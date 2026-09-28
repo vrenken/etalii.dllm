@@ -7,10 +7,13 @@ Lets MCP clients (Claude Code, Claude Desktop, IDEs) call the deterministic mode
 
 from __future__ import annotations
 
+from typing import Any
+
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
-from etalii_dllm.engine import default_engine, use_model_file
+from etalii_dllm.chat import ChatMessage
+from etalii_dllm.engine import ChatRequest, ResponseFormat, default_engine, use_model_file
 from etalii_dllm.sampling import SamplingOptions
 
 server = MCPServer("dllm")
@@ -26,6 +29,27 @@ def generate(prompt: str, max_tokens: int = 64, temperature: float = 0.0, seed: 
     """
     options = SamplingOptions(temperature=temperature, seed=seed)
     return default_engine().complete(prompt, max_tokens, options).text
+
+
+@server.tool(name="chat", annotations=_DETERMINISTIC)
+def chat(
+    messages: list[dict[str, str]],
+    max_tokens: int = 256,
+    temperature: float = 0.0,
+    seed: int = 0,
+    json_schema: dict[str, Any] | None = None,
+) -> str:
+    """Answers a conversation with the EtAlii deterministic LLM, using the model's own chat template.
+
+    ``messages`` is a list of {"role": "system" | "user" | "assistant", "content": "..."}. With ``json_schema`` the
+    answer is JSON valid under that schema (constrained decoding). The same arguments always return the same text.
+    """
+    conversation = [ChatMessage(m.get("role", "user"), m.get("content", "")) for m in messages]
+    response_format = ResponseFormat("json_schema", json_schema) if json_schema is not None else ResponseFormat()
+    request = ChatRequest(
+        conversation, max_tokens, SamplingOptions(temperature=temperature, seed=seed), response_format=response_format
+    )
+    return default_engine().chat_completion(request).content
 
 
 @server.tool(name="model_info", annotations=_DETERMINISTIC)

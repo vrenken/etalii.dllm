@@ -1,22 +1,133 @@
-"""Facade shared by the CLI, the OpenAI-compatible server and the MCP server, so all three give identical output."""
+"""Facade shared by the CLI, the OpenAI- and Anthropic-compatible server and the MCP server, so all of them give
+identical output.
+
+:meth:`DllmEngine.chat_stream` is the one chat code path: it renders the prompt (with tools), sets up constrained
+decoding (structured output, tool calls), runs the generator and turns its steps into :class:`ChatEvent` s.
+:meth:`DllmEngine.chat_completion` collects the same events, so streamed and non-streamed answers are identical.
+"""
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
+from typing import Any
 
-from etalii_dllm.chat import ChatMessage, render
+import numpy as np
+
+from etalii_dllm import tools as tooling
+from etalii_dllm.chat import TOOL_CALL_OPEN, ChatMessage, ToolCall, render
 from etalii_dllm.chat_template import ChatTemplate
-from etalii_dllm.generation import GenerationResult, Generator
+from etalii_dllm.generation import Generation, GenerationResult, Generator, TokenLogprobs
+from etalii_dllm.grammar import Grammar, TokenConstraint, TokenTrie
 from etalii_dllm.models import BigramModel, LanguageModel
-from etalii_dllm.sampling import SamplingOptions
+from etalii_dllm.numerics import linear, sum_squares
+from etalii_dllm.sampling import GREEDY, SamplingOptions
 from etalii_dllm.tokenization import ByteTokenizer, Tokenizer
+from etalii_dllm.tools import AUTO, Tool, ToolChoice
 
 DEFAULT_MODEL_SEED = 42
 MODEL_ENVIRONMENT_VARIABLE = "DLLM_MODEL"
 """Path of a ``model.dllm`` file for the front ends to serve; the placeholder bigram model when unset."""
+
+
+@dataclass(frozen=True)
+class ResponseFormat:
+    """``text`` (free), ``json_object`` (any JSON object) or ``json_schema`` (a value valid under ``schema``)."""
+
+    type: str = "text"
+    schema: Mapping[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        if self.type not in ("text", "json_object", "json_schema"):
+            raise ValueError(f"unknown response format {self.type!r}")
+        if (self.type == "json_schema") != (self.schema is not None):
+            raise ValueError("a json_schema response format needs a schema")
+
+    def grammar(self) -> Grammar | None:
+        if self.type == "json_object":
+            return Grammar.json_object()
+        if self.type == "json_schema":
+            assert self.schema is not None
+            return Grammar.json_schema(self.schema)
+        return None
+
+
+TEXT = ResponseFormat()
+
+
+@dataclass(frozen=True)
+class ChatRequest:
+    messages: Sequence[ChatMessage]
+    max_tokens: int
+    options: SamplingOptions = GREEDY
+    stop: Sequence[str] = ()
+    tools: Sequence[Tool] = ()
+    tool_choice: ToolChoice = AUTO
+    response_format: ResponseFormat = TEXT
+    top_logprobs: int | None = None
+    """``None``: no logprobs; 0 to 20: each token's logprob and that many alternatives."""
+    call_id_prefix: str = "call_"
+    request_id: str = ""
+    """Seed for the tool call ids (see :meth:`DllmEngine.derive_id`)."""
+
+
+@dataclass(frozen=True)
+class TextDelta:
+    text: str
+    logprobs: tuple[TokenLogprobs, ...] = ()
+
+
+@dataclass(frozen=True)
+class ToolCallEvent:
+    index: int
+    call: ToolCall
+
+
+@dataclass(frozen=True)
+class Finished:
+    finish_reason: str
+    """``stop`` (end of turn or a stop sequence), ``length`` or ``tool_calls``."""
+    stop_sequence: str | None
+    completion_tokens: int
+    fingerprint: str
+    """Hash of the generated token ids."""
+
+
+ChatEvent = TextDelta | ToolCallEvent | Finished
+
+
+@dataclass(frozen=True)
+class ChatResult:
+    content: str
+    tool_calls: tuple[ToolCall, ...]
+    finish_reason: str
+    stop_sequence: str | None
+    prompt_tokens: int
+    completion_tokens: int
+    fingerprint: str
+    logprobs: tuple[TokenLogprobs, ...] = ()
+
+
+@dataclass
+class ChatStream:
+    """A chat generation in progress: ``prompt_tokens`` is known up front; iterate for the events."""
+
+    prompt_tokens: int
+    events: Iterator[ChatEvent] = field(repr=False)
+
+    def __iter__(self) -> Iterator[ChatEvent]:
+        return self.events
+
+
+@dataclass(frozen=True)
+class Embedding:
+    vector: np.ndarray
+    tokens: int
 
 
 class DllmEngine:
@@ -35,6 +146,7 @@ class DllmEngine:
         """Identifies the exact weights and engine; equal fingerprints plus equal requests give equal output."""
         self.chat_template = chat_template
         self._generator = Generator(model, tokenizer, stop_tokens)
+        self._trie: TokenTrie | None = None
 
     @staticmethod
     def from_model_file(path: str | Path, verify: bool = True) -> DllmEngine:
@@ -66,17 +178,192 @@ class DllmEngine:
         model = BigramModel(tokenizer.vocabulary_size, DEFAULT_MODEL_SEED)
         return DllmEngine(model, tokenizer, "fp_" + model.weights_fingerprint[:12])
 
+    # -- text ---------------------------------------------------------------------------------------------------
+
     def complete(self, prompt: str, max_tokens: int, options: SamplingOptions) -> GenerationResult:
         return self._generator.generate(prompt, max_tokens, options)
 
-    def render_chat(self, messages: Iterable[ChatMessage]) -> str:
-        """The prompt for a conversation: the model's own chat template when it has one."""
+    def complete_stream(self, prompt: str, max_tokens: int, options: SamplingOptions) -> Generation:
+        return self._generator.stream(prompt, max_tokens, options)
+
+    def count_tokens(self, text: str) -> int:
+        return len(self.tokenizer.encode(text))
+
+    def derive_id(self, prefix: str, payload: Any) -> str:
+        """A response id from the request itself (and the weights), so identical requests get identical ids and
+        nothing depends on a clock or random source."""
+        canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str)
+        digest = hashlib.sha256(f"{self.system_fingerprint}\n{canonical}".encode()).hexdigest()
+        return prefix + digest[:24]
+
+    # -- chat ---------------------------------------------------------------------------------------------------
+
+    def render_chat(self, messages: Iterable[ChatMessage], tools: Sequence[Tool] = ()) -> str:
+        """The prompt for a conversation: the model's own chat template when it has one. Tools are presented by
+        the template when it supports them, else by Hermes instructions in the system message. A final assistant
+        message without tool calls is a prefill: the answer continues its text."""
+        messages = list(messages)
+        if len(messages) > 1 and messages[-1].role == "assistant" and not messages[-1].tool_calls:
+            return self.render_chat(messages[:-1], tools) + messages[-1].content
+        source = self.chat_template.source if self.chat_template is not None else None
+        uses_tools = bool(tools) or any(m.tool_calls or m.role == "tool" for m in messages)
+        if uses_tools and not tooling.template_supports_tools(source):
+            messages = tooling.with_instructions(messages, tools)
+            tools = ()
         if self.chat_template is None:
             return render(messages)
-        return self.chat_template.render([{"role": m.role, "content": m.content} for m in messages])
+        return self.chat_template.render(
+            tooling.template_messages(messages), tools=[t.to_openai() for t in tools] or None
+        )
 
     def chat(self, messages: Iterable[ChatMessage], max_tokens: int, options: SamplingOptions) -> GenerationResult:
         return self.complete(self.render_chat(messages), max_tokens, options)
+
+    def _token_trie(self) -> TokenTrie:
+        if self._trie is None:
+            size = self.model.vocabulary_size
+            self._trie = TokenTrie([self.tokenizer.decode_bytes([token]) for token in range(size)])
+        return self._trie
+
+    def _constraint(self, request: ChatRequest, tools: Sequence[Tool]) -> TokenConstraint | None:
+        answer = request.response_format.grammar()
+        choice = request.tool_choice
+        if tools and choice.mode in ("required", "named"):
+            return TokenConstraint(tooling.forced_grammar(tools, choice), self._token_trie())
+        if tools and answer is not None:
+            either = Grammar.either([tooling.forced_grammar(tools, AUTO), answer])
+            return TokenConstraint(either, self._token_trie())
+        if tools:
+            return TokenConstraint(tooling.call_grammar(tools), self._token_trie(), trigger=TOOL_CALL_OPEN)
+        if answer is not None:
+            return TokenConstraint(answer, self._token_trie())
+        return None
+
+    def chat_stream(self, request: ChatRequest) -> ChatStream:
+        """Starts a chat generation. Raises ``ValueError`` for invalid requests (unknown tools, unsupported
+        schemas, ...) before any token is generated."""
+        tools = [] if request.tool_choice.mode == "none" else list(request.tools)
+        tooling.validate_tools(tools, request.tool_choice)
+        constraint = self._constraint(request, tools)
+        prompt = self.render_chat(request.messages, tools)
+        generation = self._generator.stream(
+            prompt,
+            request.max_tokens,
+            request.options,
+            stop=request.stop,
+            constraint=constraint,
+            top_logprobs=request.top_logprobs,
+        )
+        return ChatStream(generation.prompt_tokens, self._events(generation, request, tools))
+
+    def _events(self, generation: Generation, request: ChatRequest, tools: Sequence[Tool]) -> Iterator[ChatEvent]:
+        text = ""
+        streamed = ""
+        tokens: list[int] = []
+        last = None
+        for step in generation:
+            last = step
+            if step.token is not None:
+                tokens.append(step.token)
+            text += step.text
+            if not tools:
+                if step.text or step.logprobs is not None:
+                    yield TextDelta(step.text, (step.logprobs,) if step.logprobs is not None else ())
+                continue
+            # With tools, only text that is certainly answer text is streamed: not leading or trailing whitespace,
+            # nothing from a <tool_call> on, and nothing at all when the reply starts like a bare JSON call.
+            safe = _answer_prefix(text)
+            delta = safe[len(streamed) :]
+            streamed = safe
+            if delta or step.logprobs is not None:
+                yield TextDelta(delta, (step.logprobs,) if step.logprobs is not None else ())
+        assert last is not None and last.finish_reason is not None
+        result = generation.result()
+        finish_reason, calls = result.finish_reason, []
+        if tools:
+            content, parsed = tooling.parse_calls(text, tools)
+            if not content.startswith(streamed):  # pragma: no cover - _answer_prefix guarantees this
+                raise AssertionError("streamed text is not a prefix of the answer")
+            if content[len(streamed) :]:
+                yield TextDelta(content[len(streamed) :])
+            for index, (name, arguments) in enumerate(parsed):
+                call_id = (
+                    request.call_id_prefix
+                    + hashlib.sha256(f"{request.request_id}\n{result.fingerprint}\n{index}".encode()).hexdigest()[:24]
+                )
+                calls.append(ToolCall(call_id, name, arguments))
+                yield ToolCallEvent(index, calls[-1])
+            if calls:
+                finish_reason = "tool_calls"
+        stop_sequence = generation.stop_sequence if finish_reason == "stop" else None
+        yield Finished(finish_reason, stop_sequence, len(tokens), result.fingerprint)
+
+    def chat_completion(self, request: ChatRequest) -> ChatResult:
+        stream = self.chat_stream(request)
+        content: list[str] = []
+        calls: list[ToolCall] = []
+        logprobs: list[TokenLogprobs] = []
+        finished: Finished | None = None
+        for event in stream:
+            if isinstance(event, TextDelta):
+                content.append(event.text)
+                logprobs.extend(event.logprobs)
+            elif isinstance(event, ToolCallEvent):
+                calls.append(event.call)
+            else:
+                finished = event
+        assert finished is not None
+        return ChatResult(
+            "".join(content),
+            tuple(calls),
+            finished.finish_reason,
+            finished.stop_sequence,
+            stream.prompt_tokens,
+            finished.completion_tokens,
+            finished.fingerprint,
+            tuple(logprobs),
+        )
+
+    # -- embeddings ---------------------------------------------------------------------------------------------
+
+    def embed(self, text: str | Sequence[int], dimensions: int | None = None) -> Embedding:
+        """Mean of the final hidden states over all positions (each column summed over positions ascending in
+        double, through the ``linear`` kernel), L2-normalised. ``dimensions`` keeps the first components and
+        normalises again."""
+        tokens = self.tokenizer.encode(text) if isinstance(text, str) else list(text)
+        if not tokens:
+            raise ValueError("cannot embed an empty input")
+        hidden_states = getattr(self.model, "hidden_states", None)
+        if hidden_states is None:
+            raise ValueError(f"model {self.model.id} does not provide hidden states")
+        states = np.asarray(hidden_states(tokens), dtype=np.float32)
+        ones = np.ones((1, states.shape[0]), dtype=np.float32)
+        total = linear(ones, np.ascontiguousarray(states.T)).numpy().reshape(-1)
+        vector = (total / np.float32(states.shape[0])).astype(np.float32)
+        if dimensions is not None:
+            if not 1 <= dimensions <= vector.shape[0]:
+                raise ValueError(f"dimensions must be between 1 and {vector.shape[0]}")
+            vector = vector[:dimensions]
+        norm = np.float32(np.sqrt(sum_squares(vector)))
+        if norm > 0:
+            vector = (vector / norm).astype(np.float32)
+        return Embedding(vector, len(tokens))
+
+
+def _answer_prefix(text: str) -> str:
+    """The part of generated text that is certainly answer text when tools are available (see ``_events``)."""
+    stripped = text.lstrip()
+    if stripped.startswith("{"):
+        return ""
+    cut = stripped.find(TOOL_CALL_OPEN)
+    if cut >= 0:
+        stripped = stripped[:cut]
+    else:
+        for length in range(min(len(TOOL_CALL_OPEN) - 1, len(stripped)), 0, -1):
+            if stripped.endswith(TOOL_CALL_OPEN[:length]):
+                stripped = stripped[:-length]
+                break
+    return stripped.rstrip()
 
 
 def use_model_file(path: str | Path | None) -> None:

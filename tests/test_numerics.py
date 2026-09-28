@@ -70,6 +70,17 @@ def test_softmax_sums_to_one():
     assert numerics.argmax(probabilities) == 2
 
 
+def test_log_softmax_matches_the_log_of_softmax():
+    logits = numerics.fill_gaussian(5, 1000) * np.float32(4.0)
+    values = numerics.log_softmax(logits)
+    reference = np.log(np.exp(logits.astype(np.float64) - logits.max()) / np.exp(logits.astype(np.float64)
+                                                                                  - logits.max()).sum())  # fmt: skip
+    assert values.dtype == np.float32
+    np.testing.assert_allclose(values, reference, rtol=0, atol=2e-6)
+    assert numerics.argmax(values) == numerics.argmax(logits)
+    assert numerics.fingerprint(numerics.log_softmax(logits)) == numerics.fingerprint(values)
+
+
 def test_argmax_breaks_ties_towards_lowest_index():
     assert numerics.argmax([0.0, 5.0, 5.0, 1.0]) == 1
 

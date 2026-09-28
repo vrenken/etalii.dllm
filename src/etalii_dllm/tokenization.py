@@ -17,6 +17,12 @@ class Tokenizer(Protocol):
 
     def decode(self, tokens: Iterable[int]) -> str: ...
 
+    def decode_bytes(self, tokens: Iterable[int]) -> bytes:
+        """The exact bytes of ``tokens``, special tokens left out. Concatenating the bytes of single tokens gives
+        the bytes of the sequence (true for byte-level tokenizers), which streaming and constrained decoding rely
+        on."""
+        ...
+
 
 class ByteTokenizer:
     """One token per UTF-8 byte plus an end-of-sequence token. A placeholder until the BPE tokenizer of imported
@@ -29,4 +35,7 @@ class ByteTokenizer:
         return list(text.encode("utf-8"))
 
     def decode(self, tokens: Iterable[int]) -> str:
-        return bytes(t for t in tokens if 0 <= t < 256).decode("utf-8", errors="replace")
+        return self.decode_bytes(tokens).decode("utf-8", errors="replace")
+
+    def decode_bytes(self, tokens: Iterable[int]) -> bytes:
+        return bytes(t for t in tokens if 0 <= t < 256)

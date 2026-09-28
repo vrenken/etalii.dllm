@@ -44,3 +44,8 @@ FINETUNE_FINGERPRINT = {
     "llama": "8cce2d4c31c0db30903367d948b48a2cac91e0058659f839619a06577c2db5d8",
     "qwen2": "557ffcff23dfc853308c73c68534cef212ee3873741fd140c4978fad806a2964",
 }
+
+# Phase 4. fingerprint() of the tokens of tests/test_generation.py's schema-constrained chat (placeholder model,
+# temperature 0.8, seed 11), and of the placeholder model's mean-pooled embedding of "embed this text".
+CONSTRAINED_FINGERPRINT = "979b6d7e752cd5b30ba187fd03c7919367f6494b05b0cdb537f0e12eff149c61"
+EMBEDDING_FINGERPRINT = "6cea233a8a650a422c82e849cd5d0c77d223c38d1e9b92f3d84603a3ba4db177"

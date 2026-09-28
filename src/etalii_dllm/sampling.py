@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -46,7 +47,20 @@ class Sampler:
         self._options = options
         self._random = DeterministicRandom(options.seed & 0xFFFFFFFFFFFFFFFF)
 
-    def sample(self, logits: FloatArray) -> int:
+    @property
+    def greedy(self) -> bool:
+        return self._options.temperature == 0
+
+    def sample(self, logits: FloatArray, allowed: Sequence[int] | None = None) -> int:
+        """Draws the next token. ``allowed`` (ascending ids) restricts the choice, as constrained decoding does:
+        the distribution, top-k and top-p are then computed over those tokens only."""
+        if allowed is not None:
+            ids = np.asarray(allowed, dtype=np.int64)
+            subset = np.ascontiguousarray(np.asarray(logits, dtype=np.float32)[ids])
+            return int(ids[self._sample(subset)])
+        return self._sample(logits)
+
+    def _sample(self, logits: FloatArray) -> int:
         options = self._options
         if options.temperature == 0:
             return argmax(logits)

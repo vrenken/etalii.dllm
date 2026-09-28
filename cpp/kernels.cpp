@@ -124,6 +124,17 @@ NB_MODULE(_kernels, m) {
         nb::arg("logits"), "Numerically stable softmax with a fixed evaluation order.");
 
     m.def(
+        "log_softmax",
+        [](FloatVector logits) {
+            const std::size_t n = logits.shape(0);
+            float* out;
+            auto result = make_array({n}, &out);
+            dllm::log_softmax(logits.data(), out, n);
+            return result;
+        },
+        nb::arg("logits"), "Log-softmax with a fixed evaluation order.");
+
+    m.def(
         "fill_gaussian",
         [](std::uint64_t seed, std::size_t n) {
             float* out;

@@ -35,6 +35,10 @@ makes the output reproducible. Changing it is a deliberate, golden-value-changin
 Beyond `|x| = 1.6e6` the sine/cosine reduction loses accuracy but stays deterministic; RoPE angles
 (`position * inv_freq`) stay far below that for any realistic context length.
 
+`softmax` and `log_softmax` subtract the maximum (first index on ties), sum `exp(l_j - max)` over `j` ascending in
+double, and round each output once: `softmax = e_i / total`, `log_softmax = (l_i - max) - log(total)`. The sampler
+uses the first, API `logprobs` the second.
+
 ## Linear algebra (`nn.hpp`)
 
 - **`linear(x, weight, bias)`**: `x[..., in] @ weight[out, in]^T + bias` (PyTorch `nn.Linear` layout; leading
