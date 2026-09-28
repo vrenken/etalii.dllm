@@ -16,9 +16,10 @@ Model Context Protocol), so existing clients and agents can use it without chang
 
 ## Status
 
-Bootstrap. The full pipeline (tokenizer → model → sampler → CLI / HTTP API / MCP server) runs end to end and is
+Phase 1 (kernels) done. The full pipeline (tokenizer → model → sampler → CLI / HTTP API / MCP server) runs end to end and is
 proven run-to-run bit-exact by CI (on Linux, Windows and macOS, which today even agree with each other). The model itself is still a seeded placeholder (a bigram
-table), so its output is noise. Next on the roadmap: a transformer that runs imported small open-weight models.
+table), so its output is noise. The transformer building blocks (aligned `Tensor`, batch-invariant matmul, RMSNorm,
+SiLU/GELU, RoPE and grouped-query attention, see [docs/kernels.md](docs/kernels.md)) are in place. Next on the roadmap: a transformer that runs imported small open-weight models.
 
 ## Quick start
 
@@ -61,8 +62,8 @@ to Python through [nanobind](https://github.com/wjakob/nanobind). Python orchest
 
 | Path | What it is |
 | --- | --- |
-| `cpp/` | C++ kernels: `include/dllm/random.hpp` (RNG), `include/dllm/math.hpp` (exp, sum, dot, softmax), `kernels.cpp` (Python bindings) |
-| `src/etalii_dllm/` | Python package: `numerics`, `sampling`, `tokenization`, `models`, `generation`, `chat`, `engine` (shared facade) |
+| `cpp/` | C++ kernels: `include/dllm/random.hpp` (RNG), `include/dllm/math.hpp` (exp, log, sin, cos, tanh, erf, sum, dot, softmax), `include/dllm/nn.hpp` (linear/matmul, RMSNorm, SiLU/GELU, RoPE, attention), `kernels.cpp` (Python bindings). Evaluation orders: [docs/kernels.md](docs/kernels.md) |
+| `src/etalii_dllm/` | Python package: `tensor` (aligned float32 `Tensor`), `numerics`, `sampling`, `tokenization`, `models`, `generation`, `chat`, `engine` (shared facade) |
 | `src/etalii_dllm/server/` | OpenAI-compatible HTTP API (`/v1/models`, `/v1/chat/completions`), FastAPI |
 | `src/etalii_dllm/mcp_server.py` | Model Context Protocol server (stdio, official `mcp` SDK) exposing `generate` and `model_info` tools |
 | `src/etalii_dllm/cli.py` | `dllm` command line tool |
@@ -76,9 +77,9 @@ to Python through [nanobind](https://github.com/wjakob/nanobind). Python orchest
 Summarised from the [research notes](docs/research/deterministic-inference.md):
 
 - **Own random numbers.** A specified generator (xoshiro256\*\* seeded by SplitMix64) instead of `random` or `numpy.random`.
-- **Own transcendental functions.** `exp` (and later `sin`, `cos`, `log`) built from IEEE basic operations only.
+- **Own transcendental functions.** `exp`, `log`, `sin`, `cos`, `tanh` and `erf` built from IEEE basic operations only.
   Not strictly needed on one machine, but cheap, and it keeps runtime or library updates from shifting results.
-- **Fixed reduction order.** Sums, dot products and softmax run in C++ and accumulate in one documented order, never in an order
+- **Fixed reduction order.** Sums, dot products, softmax, matmul, RMSNorm and attention run in C++ and accumulate in one documented order, never in an order
   chosen by thread scheduling or batch size (batch invariance), so concurrent requests cannot change each other's output.
 - **Total-order sampling.** Ties break on token id, so sorting never depends on algorithm stability.
 - **Golden hashes in CI.** Tests assert SHA-256 hashes of weights and generated tokens; any drift fails the build.
@@ -89,7 +90,7 @@ Summarised from the [research notes](docs/research/deterministic-inference.md):
 | Phase | Goal |
 | --- | --- |
 | 0. Bootstrap ✅ | Solution skeleton, deterministic RNG and math, sampler, byte tokenizer, placeholder model, OpenAI-style API, MCP server, CI with golden hashes |
-| 1. Kernels | Tensor type, deterministic matmul with fixed tiling, RMSNorm, RoPE with deterministic `sin`/`cos`, SiLU/GELU, attention with fixed-order softmax |
+| 1. Kernels ✅ | Tensor type, deterministic matmul with fixed tiling, RMSNorm, RoPE with deterministic `sin`/`cos`, SiLU/GELU, attention with fixed-order softmax |
 | 2. Import existing models | Llama-style decoder with KV cache; `dllm import` converting small open-weight models (SmolLM2, Qwen2.5, TinyLlama, ...) from safetensors/GGUF to our own format with licence metadata; BPE tokenizer and chat templates. See [model import](docs/research/model-import.md) |
 | 3. Fine-tuning (optional) | Deterministic backprop and AdamW on top of imported weights, fixed data order, reproducible checkpoints |
 | 4. API parity | Streaming (SSE), tool/function calling, JSON-schema structured output, Anthropic Messages endpoint, embeddings |
