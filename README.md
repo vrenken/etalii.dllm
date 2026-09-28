@@ -16,12 +16,18 @@ Model Context Protocol), so existing clients and agents can use it without chang
 
 ## Status
 
-Phase 1 (kernels) done. The full pipeline (tokenizer → model → sampler → CLI / HTTP API / MCP server) runs end to end and is
-proven run-to-run bit-exact by CI (on Linux, Windows and macOS, which today even agree with each other). The model itself is still a seeded placeholder (a bigram
-table), so its output is noise. The transformer building blocks (aligned `Tensor`, batch-invariant matmul, RMSNorm,
-SiLU/GELU, RoPE and grouped-query attention, see [docs/kernels.md](docs/kernels.md)) are in place. Next on the roadmap: a transformer that runs imported small open-weight models.
+Phase 1 (kernels) done, Phase 2 (importing models) in progress. The full pipeline (tokenizer → model → sampler → CLI /
+HTTP API / MCP server) runs end to end and is proven run-to-run bit-exact by CI (on Linux, Windows and macOS, which
+today even agree with each other). The transformer building blocks (aligned `Tensor`, batch-invariant matmul,
+RMSNorm, SiLU/GELU, RoPE and grouped-query attention, see [docs/kernels.md](docs/kernels.md)) are in place, and so are
+`dllm import` (safetensors/GGUF to our [model.dllm](docs/model-format.md) format, with source and licence recorded)
+a Llama/Qwen2 decoder whose KV cache cannot change its output, the models' own BPE tokenizers and chat templates, and
+`--model` on every front end. Without a model file the engine falls back to a seeded placeholder (a bigram table).
 
 ## Quick start
+
+New here? [Getting started](docs/getting-started.md) walks through installing, importing a real model and using it
+from the command line, the HTTP API and MCP.
 
 Requires Python 3.11+, CMake and a C++17 compiler (the numeric kernels are a C++ extension built on install).
 
@@ -41,6 +47,17 @@ curl http://localhost:5080/v1/chat/completions -H 'Content-Type: application/jso
 
 # MCP server over stdio, e.g. registered with Claude Code
 claude mcp add dllm -- dllm-mcp
+
+# Import an open-weight model to our own format (source, revision and licence are recorded in the file)
+dllm import hf:HuggingFaceTB/SmolLM2-135M-Instruct -o smollm2-135m.dllm
+dllm import ./qwen2.5-0.5b-instruct-q8_0.gguf -o qwen2.5-0.5b.dllm
+dllm inspect smollm2-135m.dllm
+
+# Run it: every front end takes --model (or the DLLM_MODEL environment variable) and uses the model's own
+# tokenizer and chat template
+dllm --model smollm2-135m.dllm chat "What is the capital of France?"
+dllm-server --model smollm2-135m.dllm
+claude mcp add dllm -- dllm-mcp --model /path/to/smollm2-135m.dllm
 ```
 
 Run the same request twice and compare: the responses, including `id` and `system_fingerprint`, are identical.
@@ -62,6 +79,10 @@ to Python through [nanobind](https://github.com/wjakob/nanobind). Python orchest
 | `src/etalii_dllm/server/` | OpenAI-compatible HTTP API (`/v1/models`, `/v1/chat/completions`), FastAPI |
 | `src/etalii_dllm/mcp_server.py` | Model Context Protocol server (stdio, official `mcp` SDK) exposing `generate` and `model_info` tools |
 | `src/etalii_dllm/cli.py` | `dllm` command line tool |
+| `src/etalii_dllm/importing/` | Model import: safetensors and GGUF readers, GGUF dequantisation, Hugging Face download, `dllm import` |
+| `src/etalii_dllm/bpe.py`, `chat_template.py` | Byte-level BPE tokenizer from `tokenizer.json` (or GGUF metadata) and the model's Jinja chat template |
+| `src/etalii_dllm/transformer.py` | Llama/Qwen2 decoder with a KV cache that cannot change the logits |
+| `src/etalii_dllm/modelfile.py` | The [`model.dllm`](docs/model-format.md) container that imported models are stored in |
 | `tests/` | pytest suite, including golden-hash reproducibility tests |
 | `docs/research/` | Research notes: [deterministic inference](docs/research/deterministic-inference.md), [compatibility targets](docs/research/compatibility.md), [model import](docs/research/model-import.md) |
 

@@ -21,3 +21,13 @@ KERNEL_FINGERPRINTS = {
     "rope": "9cd1ae74870656556f13dca8726d1e4430a1cc68934c2b5e06b5529ccfd77158",
     "attention": "c7e16ac447a7dcb06878fa1d122a7d19370d1d95502a21027bf2551f4a6ba18d",
 }
+
+# Fingerprint of tests/model_fixtures.py's tiny bf16 checkpoint imported to model.dllm (format version 1). It pins
+# the container layout and the exact bf16 -> fp32 conversion; the HF and GGUF imports of those weights both match it.
+TINY_IMPORT_FINGERPRINT = "1585fbbfe689fd0d52dc36a4b3668f3af07babda2f72c8bfd33d9849dbabc71e"
+
+# fingerprint() of the decoder's next-token logits for tests/test_transformer.py::PROMPT on the tiny imported models.
+TINY_LOGITS_FINGERPRINT = {
+    "llama": "12a0878056708099f139e39c6948153b7ba152960259846ab9caa940863e1e29",
+    "qwen2": "9d284fb62e7360dc835fcd1dd9cac2b54c6bff5c66744d980c02025039330d0f",
+}

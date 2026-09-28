@@ -26,7 +26,10 @@ Small (≤ 2B parameters) so they run on a CPU and fit in CI caches. Licences ar
 Default: **Apache 2.0 or MIT models only**, so converted weights can be redistributed with attribution and a copy of
 the licence. Models with custom licences are opt-in and never redistributed by this project.
 
-## Conversion pipeline (planned, roadmap phase 2)
+## Conversion pipeline (roadmap phase 2)
+
+Steps 1 to 4 are implemented (`dllm import`, `src/etalii_dllm/importing/`); the file format is specified in
+[model-format.md](../model-format.md). Step 5 waits for the decoder and for network access to the Hub.
 
 ```
 Hugging Face repo (config.json, tokenizer.json, *.safetensors)  ─┐

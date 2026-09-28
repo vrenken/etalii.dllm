@@ -2,7 +2,7 @@
 
 Lets MCP clients (Claude Code, Claude Desktop, IDEs) call the deterministic model as a tool, e.g.::
 
-    claude mcp add dllm -- dllm-mcp
+    claude mcp add dllm -- dllm-mcp --model smollm2-135m.dllm
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from __future__ import annotations
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
-from etalii_dllm.engine import default_engine
+from etalii_dllm.engine import default_engine, use_model_file
 from etalii_dllm.sampling import SamplingOptions
 
 server = MCPServer("dllm")
@@ -35,5 +35,10 @@ def model_info() -> str:
     return f"model: {engine.model.id}\nsystem_fingerprint: {engine.system_fingerprint}"
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="dllm-mcp", description="EtAlii.Dllm MCP server (stdio)")
+    parser.add_argument("--model", help="model.dllm file to serve (default: $DLLM_MODEL, else the placeholder model)")
+    use_model_file(parser.parse_args(argv).model)
     server.run("stdio")
