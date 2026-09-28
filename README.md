@@ -40,6 +40,11 @@ curl http://localhost:5080/v1/chat/completions -H 'Content-Type: application/jso
 
 # MCP server over stdio, e.g. registered with Claude Code
 claude mcp add dllm -- dllm-mcp
+
+# Import an open-weight model to our own format (source, revision and licence are recorded in the file)
+dllm import hf:HuggingFaceTB/SmolLM2-135M-Instruct -o smollm2-135m.dllm
+dllm import ./qwen2.5-0.5b-instruct-q8_0.gguf -o qwen2.5-0.5b.dllm
+dllm inspect smollm2-135m.dllm
 ```
 
 Run the same request twice and compare: the responses, including `id` and `system_fingerprint`, are identical.
@@ -61,6 +66,8 @@ to Python through [nanobind](https://github.com/wjakob/nanobind). Python orchest
 | `src/etalii_dllm/server/` | OpenAI-compatible HTTP API (`/v1/models`, `/v1/chat/completions`), FastAPI |
 | `src/etalii_dllm/mcp_server.py` | Model Context Protocol server (stdio, official `mcp` SDK) exposing `generate` and `model_info` tools |
 | `src/etalii_dllm/cli.py` | `dllm` command line tool |
+| `src/etalii_dllm/importing/` | Model import: safetensors and GGUF readers, GGUF dequantisation, Hugging Face download, `dllm import` |
+| `src/etalii_dllm/modelfile.py` | The [`model.dllm`](docs/model-format.md) container that imported models are stored in |
 | `tests/` | pytest suite, including golden-hash reproducibility tests |
 | `docs/research/` | Research notes: [deterministic inference](docs/research/deterministic-inference.md), [compatibility targets](docs/research/compatibility.md), [model import](docs/research/model-import.md) |
 

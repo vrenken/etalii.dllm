@@ -18,7 +18,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "httpx>=0.27", "ruff>=0.6"]
+# gguf and safetensors are the reference implementations the importer tests compare against.
+dev = ["pytest>=8", "httpx>=0.27", "ruff>=0.6", "gguf>=0.17", "safetensors>=0.4"]
 
 [project.scripts]
 dllm = "etalii_dllm.cli:main"

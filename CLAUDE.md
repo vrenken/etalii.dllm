@@ -31,7 +31,9 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
   `etalii_dllm._kernels`. `CMakeLists.txt` sets the floating point flags; never add `-ffast-math`, `-O3 -march=native`
   style reassociation flags or `-ffp-contract=fast`.
 - `src/etalii_dllm/`: `numerics` (thin wrappers over `_kernels`, fingerprints), `sampling`, `tokenization`, `models`,
-  `generation`, `chat`, `engine` (`DllmEngine`, the facade shared by every front end).
+  `generation`, `chat`, `engine` (`DllmEngine`, the facade shared by every front end), `architecture`
+  (`TransformerConfig`), `modelfile` (the `model.dllm` container, `docs/model-format.md`), `importing` (safetensors/GGUF
+  readers and `dllm import`; tests compare against the `gguf` and `safetensors` reference packages).
 - `src/etalii_dllm/server/`, `mcp_server.py`, `cli.py`: thin front ends over `DllmEngine`. Keep logic out of them
   so all three stay output-identical.
 - `tests/`: pytest. `tests/golden_values.py` holds the reference hashes.
