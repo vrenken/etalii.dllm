@@ -77,3 +77,24 @@ For each (query, head), independently:
 
 Keys beyond the causal horizon are never read, so the result does not depend on how long the KV cache is, and a
 prefill of `n` tokens gives exactly the same bits as decoding them one at a time (`tests/test_kernels.py`).
+
+## Gradients (`grad.hpp`)
+
+The backward kernels used for [fine-tuning](training.md) follow the same rules: one double accumulator per output
+element, a fixed order, one rounding.
+
+- **`linear_backward`**: `dx[r, k] = sum_n dy[r, n] w[n, k]` (`n` ascending), `dw[n, k] = sum_r dy[r, n] x[r, k]`
+  and `db[n] = sum_r dy[r, n]` (`r` ascending).
+- **`rms_norm_backward`**: `inv` recomputed as in the forward kernel; `dx_i = inv w_i dy_i - x_i inv^3 / dim *
+  sum_j w_j dy_j x_j` (`j` ascending); `dw_i = sum_r dy x inv` over rows ascending.
+- **`silu_backward`**: `dy * s (1 + x (1 - s))` with `s = sigmoid(x)`, in double.
+- **`rope(..., inverse=True)`**: the same rotation with `sin` negated (exactly), i.e. the transpose.
+- **`attention_backward`**: per (query, head), in query-then-head order, the probabilities are recomputed exactly as
+  in the forward pass; `dp_j = sum_i dout_i v_ji`, `D = sum_j p_j dp_j`, `ds_j = p_j (dp_j - D)`,
+  `dq = scale sum_j ds_j k_j`; `dk_j` and `dv_j` accumulate `scale ds_j q` and `p_j dout` in double over queries
+  ascending, then heads ascending.
+- **`cross_entropy`**: `logsumexp = max + log(sum_j exp(l_j - max))` (`j` ascending, `dllm` exp/log); the loss is
+  summed over rows ascending; `dlogits = (softmax - onehot) * scale`. Negative targets are skipped.
+- **`embedding_backward`**: rows grouped per token id by a counting sort that keeps positions ascending, then
+  summed in double.
+- **`sum_squares`** and **`adamw_step`**: see [training](training.md).

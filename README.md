@@ -16,13 +16,15 @@ Model Context Protocol), so existing clients and agents can use it without chang
 
 ## Status
 
-Phase 1 (kernels) done, Phase 2 (importing models) in progress. The full pipeline (tokenizer → model → sampler → CLI /
-HTTP API / MCP server) runs end to end and is proven run-to-run bit-exact by CI (on Linux, Windows and macOS, which
+Phases 1 (kernels) and 3 (fine-tuning) done, Phase 2 (importing models) nearly done. The full pipeline (tokenizer →
+model → sampler → CLI / HTTP API / MCP server) runs end to end and is proven run-to-run bit-exact by CI (on Linux, Windows and macOS, which
 today even agree with each other). The transformer building blocks (aligned `Tensor`, batch-invariant matmul,
 RMSNorm, SiLU/GELU, RoPE and grouped-query attention, see [docs/kernels.md](docs/kernels.md)) are in place, and so are
 `dllm import` (safetensors/GGUF to our [model.dllm](docs/model-format.md) format, with source and licence recorded)
 a Llama/Qwen2 decoder whose KV cache cannot change its output, the models' own BPE tokenizers and chat templates, and
-`--model` on every front end. Without a model file the engine falls back to a seeded placeholder (a bigram table).
+`--model` on every front end. `dllm finetune` trains an imported model further with AdamW, reproducibly: equal
+runs, and runs resumed from a checkpoint, write byte-identical models (see [docs/training.md](docs/training.md)).
+Without a model file the engine falls back to a seeded placeholder (a bigram table).
 
 ## Quick start
 
@@ -58,6 +60,9 @@ dllm inspect smollm2-135m.dllm
 dllm --model smollm2-135m.dllm chat "What is the capital of France?"
 dllm-server --model smollm2-135m.dllm
 claude mcp add dllm -- dllm-mcp --model /path/to/smollm2-135m.dllm
+
+# Fine-tune it on your own text; the same data and options give a byte-identical model
+dllm finetune smollm2-135m.dllm --data my-data.jsonl -o smollm2-135m-tuned.dllm --steps 50
 ```
 
 Run the same request twice and compare: the responses, including `id` and `system_fingerprint`, are identical.
@@ -74,8 +79,9 @@ to Python through [nanobind](https://github.com/wjakob/nanobind). Python orchest
 
 | Path | What it is |
 | --- | --- |
-| `cpp/` | C++ kernels: `include/dllm/random.hpp` (RNG), `include/dllm/math.hpp` (exp, log, sin, cos, tanh, erf, sum, dot, softmax), `include/dllm/nn.hpp` (linear/matmul, RMSNorm, SiLU/GELU, RoPE, attention), `kernels.cpp` (Python bindings). Evaluation orders: [docs/kernels.md](docs/kernels.md) |
+| `cpp/` | C++ kernels: `include/dllm/random.hpp` (RNG), `include/dllm/math.hpp` (exp, log, sin, cos, tanh, erf, sum, dot, softmax), `include/dllm/nn.hpp` (linear/matmul, RMSNorm, SiLU/GELU, RoPE, attention), `include/dllm/grad.hpp` (their gradients, cross-entropy, AdamW), `kernels.cpp` (Python bindings). Evaluation orders: [docs/kernels.md](docs/kernels.md) |
 | `src/etalii_dllm/` | Python package: `tensor` (aligned float32 `Tensor`), `numerics`, `sampling`, `tokenization`, `models`, `generation`, `chat`, `engine` (shared facade) |
+| `src/etalii_dllm/training/` | Fine-tuning: decoder gradients, AdamW, fixed data order, checkpoints. See [docs/training.md](docs/training.md) |
 | `src/etalii_dllm/server/` | OpenAI-compatible HTTP API (`/v1/models`, `/v1/chat/completions`), FastAPI |
 | `src/etalii_dllm/mcp_server.py` | Model Context Protocol server (stdio, official `mcp` SDK) exposing `generate` and `model_info` tools |
 | `src/etalii_dllm/cli.py` | `dllm` command line tool |
@@ -106,7 +112,7 @@ Summarised from the [research notes](docs/research/deterministic-inference.md):
 | 0. Bootstrap ✅ | Solution skeleton, deterministic RNG and math, sampler, byte tokenizer, placeholder model, OpenAI-style API, MCP server, CI with golden hashes |
 | 1. Kernels ✅ | Tensor type, deterministic matmul with fixed tiling, RMSNorm, RoPE with deterministic `sin`/`cos`, SiLU/GELU, attention with fixed-order softmax |
 | 2. Import existing models | Llama-style decoder with KV cache; `dllm import` converting small open-weight models (SmolLM2, Qwen2.5, TinyLlama, ...) from safetensors/GGUF to our own format with licence metadata; BPE tokenizer and chat templates. See [model import](docs/research/model-import.md) |
-| 3. Fine-tuning (optional) | Deterministic backprop and AdamW on top of imported weights, fixed data order, reproducible checkpoints |
+| 3. Fine-tuning ✅ | Deterministic backprop and AdamW on top of imported weights, fixed data order, reproducible checkpoints |
 | 4. API parity | Streaming (SSE), tool/function calling, JSON-schema structured output, Anthropic Messages endpoint, embeddings |
 | 5. MCP, both directions | Richer MCP server (prompts, resources); MCP client host so the model can call external tools during a chat |
 | 6. Performance | SIMD and multi-threading with fixed, batch-invariant reduction order, integer quantisation (associative int32 accumulation), GPU kernels that keep bit-exactness |

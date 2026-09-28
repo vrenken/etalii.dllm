@@ -70,7 +70,8 @@ def write_model_file(
     metadata: Mapping[str, Any],
 ) -> str:
     """Writes a model file and returns its fingerprint. ``metadata`` holds the ``source``, ``licence``,
-    ``tokenizer`` and ``chat_template`` sections (see the format document)."""
+    ``tokenizer`` and ``chat_template`` sections and, for fine-tuned models, ``fine_tuning`` (see the format
+    document)."""
     expected = config.tensor_shapes()
     if set(tensors) != set(expected):
         missing = sorted(set(expected) - set(tensors))
@@ -104,6 +105,8 @@ def write_model_file(
         "fingerprint": _FINGERPRINT_PLACEHOLDER,
         **{key: metadata.get(key) for key in ("source", "licence", "tokenizer", "chat_template")},
     }
+    if metadata.get("fine_tuning") is not None:  # only fine-tuned models carry the section
+        header["fine_tuning"] = metadata["fine_tuning"]
     header_bytes = canonical_json(header)
     header_bytes += b" " * _pad(_PREFIX.size + len(header_bytes))
     path = Path(path)
@@ -185,6 +188,10 @@ class ModelFile:
     @property
     def chat_template(self) -> str | None:
         return self.header.get("chat_template")
+
+    @property
+    def fine_tuning(self) -> dict[str, Any] | None:
+        return self.header.get("fine_tuning")
 
     def verify(self) -> None:
         """Re-hashes the tensor data and checks it against the recorded fingerprint."""

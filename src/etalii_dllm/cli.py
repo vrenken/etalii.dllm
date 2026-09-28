@@ -51,7 +51,74 @@ def _inspect(args: argparse.Namespace) -> int:
     print(f"licence:            {model.licence.get('spdx')}")
     print(f"attribution:        {model.licence.get('attribution')}")
     print(f"chat template:      {'yes' if model.chat_template else 'no'}")
+    if model.fine_tuning:
+        tuning = model.fine_tuning
+        print(
+            f"fine-tuned:         {tuning['steps_completed']} steps from {tuning['base_fingerprint'][:16]}"
+            f" on data {tuning['data_fingerprint'][:16]}, final loss {tuning['final_loss']}"
+        )
     print(f"system_fingerprint: {model.fingerprint}")
+    return 0
+
+
+def _finetune(args: argparse.Namespace) -> int:
+    from etalii_dllm.engine import DllmEngine
+    from etalii_dllm.modelfile import ModelFile, ModelFileError
+    from etalii_dllm.training import (
+        AdamWConfig,
+        CheckpointError,
+        FineTuner,
+        RunConfig,
+        StepResult,
+        TrainingData,
+        TrainingDataError,
+        read_documents,
+    )
+
+    try:
+        base = ModelFile(args.base)
+        engine = DllmEngine.from_model_file(args.base, verify=False)
+        render = None
+        if engine.chat_template is not None:
+            template = engine.chat_template
+            render = lambda messages: template.render(messages, add_generation_prompt=False)  # noqa: E731
+        separator = base.config.eos_token_ids[0] if base.config.eos_token_ids else None
+        documents = read_documents(args.data, render)
+        data = TrainingData.from_documents(documents, engine.tokenizer.encode, args.sequence_length, separator)
+        if args.resume:
+            tuner = FineTuner.load_checkpoint(args.resume, data)
+        else:
+            optimizer = AdamWConfig(
+                learning_rate=args.learning_rate,
+                weight_decay=args.weight_decay,
+                max_grad_norm=args.max_grad_norm,
+                warmup_steps=args.warmup_steps,
+                schedule=args.schedule,
+                min_learning_rate=args.min_learning_rate,
+            )
+            run = RunConfig(args.steps, args.batch_size, args.sequence_length, args.seed, optimizer)
+            tuner = FineTuner.from_model_file(base, data, run)
+    except (ModelFileError, TrainingDataError, CheckpointError, OSError, ValueError) as error:
+        print(f"dllm finetune: {error}", file=sys.stderr)
+        return 1
+
+    print(f"data:               {len(data)} windows of up to {data.sequence_length} tokens, {data.fingerprint[:16]}")
+    total = tuner.run.steps
+
+    def report(result: StepResult) -> None:
+        print(
+            f"step {result.step:>5}/{total}  loss {result.loss:.6f}  lr {result.learning_rate:.3e}"
+            f"  grad_norm {result.gradient_norm:.4f}"
+        )
+        if args.checkpoint and args.checkpoint_every and result.step % args.checkpoint_every == 0:
+            tuner.save_checkpoint(args.checkpoint)
+
+    tuner.train(on_step=report)
+    if args.checkpoint:
+        print(f"checkpoint:         {args.checkpoint} ({tuner.save_checkpoint(args.checkpoint)[:16]})")
+    fingerprint = tuner.export(args.output)
+    print(f"wrote:              {args.output}")
+    print(f"system_fingerprint: {fingerprint}")
     return 0
 
 
@@ -88,7 +155,27 @@ def main(argv: list[str] | None = None) -> int:
     inspect.add_argument("path")
     inspect.add_argument("--no-verify", action="store_true", help="skip re-hashing the tensor data")
 
+    finetune = commands.add_parser("finetune", help="fine-tune a model.dllm reproducibly (AdamW, fixed data order)")
+    finetune.add_argument("base", help="the model.dllm file to start from")
+    finetune.add_argument("--data", required=True, help=".txt file, or .jsonl with {'text'} or {'messages'} lines")
+    finetune.add_argument("-o", "--output", required=True, help="the fine-tuned model.dllm file to write")
+    finetune.add_argument("--steps", type=int, default=100)
+    finetune.add_argument("--batch-size", type=int, default=8)
+    finetune.add_argument("--sequence-length", type=int, default=128)
+    finetune.add_argument("--learning-rate", type=float, default=1e-4)
+    finetune.add_argument("--min-learning-rate", type=float, default=0.0)
+    finetune.add_argument("--warmup-steps", type=int, default=0)
+    finetune.add_argument("--schedule", choices=("cosine", "constant"), default="cosine")
+    finetune.add_argument("--weight-decay", type=float, default=0.01)
+    finetune.add_argument("--max-grad-norm", type=float, default=1.0, help="0 disables clipping")
+    finetune.add_argument("--seed", type=int, default=0, help="seeds the data order")
+    finetune.add_argument("--checkpoint", help="checkpoint file to write (at the end and every --checkpoint-every)")
+    finetune.add_argument("--checkpoint-every", type=int, default=0)
+    finetune.add_argument("--resume", help="continue from this checkpoint (run settings come from it)")
+
     args = parser.parse_args(argv)
+    if args.command == "finetune":
+        return _finetune(args)
     if args.command == "import":
         return _import(args)
     if args.command == "inspect":

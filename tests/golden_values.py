@@ -31,3 +31,16 @@ TINY_LOGITS_FINGERPRINT = {
     "llama": "12a0878056708099f139e39c6948153b7ba152960259846ab9caa940863e1e29",
     "qwen2": "9d284fb62e7360dc835fcd1dd9cac2b54c6bff5c66744d980c02025039330d0f",
 }
+
+# Phase 3. fingerprint() of the concatenated gradients (tensors in natural name order) of the summed next-token loss
+# for tests/test_training.py::TOKENS on the tiny imported models.
+GRADIENT_FINGERPRINT = {
+    "llama": "d7c7892dd31fec99e21991a1555dae2e6a431cf8a7e0bef1857e9b3d16cca5c5",
+    "qwen2": "59dd1f723fda011ecefaa158fbb1557c05ddc03a97cbadae70d3c358c5081cf3",
+}
+
+# Fingerprint of the model.dllm exported after tests/test_training.py::RUN (6 AdamW steps on the ASCII data).
+FINETUNE_FINGERPRINT = {
+    "llama": "8cce2d4c31c0db30903367d948b48a2cac91e0058659f839619a06577c2db5d8",
+    "qwen2": "557ffcff23dfc853308c73c68534cef212ee3873741fd140c4978fad806a2964",
+}
