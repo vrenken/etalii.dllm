@@ -3,17 +3,29 @@
 Lets MCP clients (Claude Code, Claude Desktop, IDEs) call the deterministic model as a tool, e.g.::
 
     claude mcp add dllm -- dllm-mcp --model smollm2-135m.dllm
+
+Besides the tools it offers resources (the model card, the chat template, the determinism guarantee) and prompts
+(ready-made tasks for the ``chat`` tool). Everything it returns is derived from the model file and the request, so
+the same server gives the same answers.
 """
 
 from __future__ import annotations
 
+import json
+import os
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
 from etalii_dllm.chat import ChatMessage
-from etalii_dllm.engine import ChatRequest, ResponseFormat, default_engine, use_model_file
+from etalii_dllm.engine import (
+    MODEL_ENVIRONMENT_VARIABLE,
+    ChatRequest,
+    ResponseFormat,
+    default_engine,
+    use_model_file,
+)
 from etalii_dllm.sampling import SamplingOptions
 
 server = MCPServer("dllm")
@@ -57,6 +69,99 @@ def model_info() -> str:
     """Returns the model id and the system fingerprint that identifies the exact weights."""
     engine = default_engine()
     return f"model: {engine.model.id}\nsystem_fingerprint: {engine.system_fingerprint}"
+
+
+DETERMINISM = """\
+# Determinism
+
+EtAlii.Dllm produces bit-identical output on every run on the same hardware: the same weights (identified by the
+system fingerprint), the same prompt or conversation and the same options (max_tokens, temperature, seed, schema)
+always give the same text, regardless of load, batching or thread scheduling.
+
+- Temperature 0 is greedy decoding; with a temperature above 0 the seed selects the one reproducible sample.
+- Every reduction (matmul, softmax, norms, attention) runs in a fixed, documented order with double accumulation.
+- Results can differ between different CPUs or operating systems; compare fingerprints on the same machine.
+- Ids and fingerprints in the answers are derived from the request and the weights, never from a clock.
+"""
+
+FALLBACK_TEMPLATE = """\
+This model has no chat template of its own. Conversations use the engine's fixed format: every message is
+rendered as "<|role|>\\n" + content + "\\n" and the prompt ends with "<|assistant|>\\n".
+"""
+
+
+@server.resource(
+    "dllm://model",
+    name="model",
+    title="Model card",
+    description="The served model: id, system fingerprint, architecture, source and licence.",
+    mime_type="application/json",
+)
+def model_card() -> str:
+    engine = default_engine()
+    card: dict[str, Any] = {
+        "id": engine.model.id,
+        "system_fingerprint": engine.system_fingerprint,
+        "vocabulary_size": engine.model.vocabulary_size,
+        "chat_template": engine.chat_template is not None,
+    }
+    path = os.environ.get(MODEL_ENVIRONMENT_VARIABLE)
+    if path:
+        from etalii_dllm.modelfile import ModelFile
+
+        file = ModelFile(path, verify=False)
+        card["architecture"] = file.config.to_dict()
+        card["source"] = {k: v for k, v in file.source.items() if k != "files"}
+        card["licence"] = {k: v for k, v in file.licence.items() if k != "text"}
+        if file.fine_tuning:
+            card["fine_tuning"] = file.fine_tuning
+    return json.dumps(card, sort_keys=True, ensure_ascii=False, indent=2)
+
+
+@server.resource(
+    "dllm://model/chat-template",
+    name="chat-template",
+    title="Chat template",
+    description="The Jinja chat template the model's conversations are rendered with.",
+    mime_type="text/plain",
+)
+def chat_template() -> str:
+    template = default_engine().chat_template
+    return template.source if template is not None else FALLBACK_TEMPLATE
+
+
+@server.resource(
+    "dllm://determinism",
+    name="determinism",
+    title="Determinism guarantee",
+    description="What makes the answers reproducible, and what may differ between machines.",
+    mime_type="text/markdown",
+)
+def determinism() -> str:
+    return DETERMINISM
+
+
+@server.prompt(name="summarize", title="Summarize a text")
+def summarize(text: str, max_words: str = "60") -> str:
+    """Asks for a short summary of a text; send the prompt's message to the ``chat`` tool."""
+    return f"Summarize the following text in at most {max_words} words.\n\n{text}"
+
+
+@server.prompt(name="translate", title="Translate a text")
+def translate(text: str, language: str) -> str:
+    """Asks for a translation of a text into another language; send the prompt's message to the ``chat`` tool."""
+    return f"Translate the following text into {language}. Answer with the translation only.\n\n{text}"
+
+
+@server.prompt(name="extract_json", title="Extract fields as JSON")
+def extract_json(text: str, fields: str) -> str:
+    """Asks for the given comma-separated fields of a text as a JSON object; pair it with the ``chat`` tool's
+    ``json_schema`` to guarantee the shape."""
+    names = ", ".join(name.strip() for name in fields.split(",") if name.strip())
+    return (
+        f"Extract these fields from the text below and answer with one JSON object with exactly these keys: "
+        f"{names}. Use null for a field the text does not mention.\n\n{text}"
+    )
 
 
 def main(argv: list[str] | None = None) -> None:

@@ -31,6 +31,15 @@ MESSAGES = [
             },
         },
     },
+    {"jsonrpc": "2.0", "id": 5, "method": "resources/list"},
+    {"jsonrpc": "2.0", "id": 6, "method": "resources/read", "params": {"uri": "dllm://model"}},
+    {"jsonrpc": "2.0", "id": 7, "method": "prompts/list"},
+    {
+        "jsonrpc": "2.0",
+        "id": 8,
+        "method": "prompts/get",
+        "params": {"name": "translate", "arguments": {"text": "Good morning", "language": "Dutch"}},
+    },
 ]
 
 
@@ -76,3 +85,19 @@ def test_mcp_server_lists_and_runs_tools_deterministically():
     assert first[4]["result"]["content"] == second[4]["result"]["content"]
     answer = json.loads(first[4]["result"]["content"][0]["text"])
     assert isinstance(answer["ok"], bool)
+
+
+def test_mcp_server_offers_resources_and_prompts():
+    responses = run_session()
+    uris = [r["uri"] for r in responses[5]["result"]["resources"]]
+    assert uris == ["dllm://model", "dllm://model/chat-template", "dllm://determinism"]
+    card = json.loads(responses[6]["result"]["contents"][0]["text"])
+    assert card["id"] == "dllm-bigram-257-42" and card["system_fingerprint"].startswith("fp_")
+
+    prompts = {p["name"]: p for p in responses[7]["result"]["prompts"]}
+    assert set(prompts) == {"summarize", "translate", "extract_json"}
+    assert {a["name"]: a["required"] for a in prompts["translate"]["arguments"]} == {"text": True, "language": True}
+    (message,) = responses[8]["result"]["messages"]
+    assert message["role"] == "user"
+    assert message["content"]["text"].startswith("Translate the following text into Dutch.")
+    assert message["content"]["text"].endswith("Good morning")

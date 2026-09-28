@@ -145,6 +145,15 @@ def main(argv: list[str] | None = None) -> int:
     chat.add_argument("--system", help="system message")
     chat.add_argument("--json", action="store_true", help="answer with a JSON object (constrained decoding)")
     chat.add_argument("--json-schema", help="answer with JSON valid under this schema (a file or inline JSON)")
+    chat.add_argument("--mcp-config", help="let the model call the tools of these MCP servers ({'mcpServers': ...})")
+    chat.add_argument(
+        "--mcp-server",
+        action="append",
+        default=[],
+        metavar="[NAME=]COMMAND|URL",
+        help="an MCP server whose tools the model may call (repeatable), e.g. 'time=uvx mcp-server-time'",
+    )
+    chat.add_argument("--max-tool-rounds", type=int, default=8, help="MCP tool rounds before the answer is cut off")
     for command in (generate, chat):
         command.add_argument("--max-tokens", type=int, default=64 if command is generate else 256)
         command.add_argument("--temperature", type=float, default=0.0)
@@ -234,6 +243,8 @@ def _chat(engine: DllmEngine, args: argparse.Namespace, options: SamplingOptions
     request = ChatRequest(
         [*messages, ChatMessage("user", args.message)], args.max_tokens, options, response_format=response_format
     )
+    if args.mcp_config or args.mcp_server:
+        return _chat_with_mcp(engine, args, request)
     try:
         stream = engine.chat_stream(request)
     except ValueError as error:
@@ -249,6 +260,44 @@ def _chat(engine: DllmEngine, args: argparse.Namespace, options: SamplingOptions
                 file=sys.stderr,
             )
     return 0
+
+
+def _chat_with_mcp(engine: DllmEngine, args: argparse.Namespace, request: ChatRequest) -> int:
+    import anyio
+
+    from etalii_dllm import mcp_host
+    from etalii_dllm.engine import ToolCallEvent
+
+    async def run() -> int:
+        finished: Finished | None = None
+        servers = mcp_host.load_config(args.mcp_config) if args.mcp_config else []
+        servers += [mcp_host.parse_server(spec) for spec in args.mcp_server]
+        async with mcp_host.McpHost(servers) as host:
+            print(f"tools: {', '.join(t.name for t in host.tools) or '(none)'}", file=sys.stderr)
+            async for event in mcp_host.chat(engine, request, host, args.max_tool_rounds):
+                if isinstance(event, TextDelta):
+                    _write(event.text)
+                elif isinstance(event, ToolCallEvent):
+                    print(f"\n-> {event.call.name}({event.call.arguments})", file=sys.stderr)
+                elif isinstance(event, mcp_host.ToolResult):
+                    marker = "error" if event.is_error else "result"
+                    print(f"<- {marker}: {event.content}", file=sys.stderr)
+                else:
+                    finished = event
+        assert finished is not None
+        _write("\n")
+        print(
+            f"fingerprint: {finished.fingerprint}  tokens: {finished.completion_tokens}"
+            f"  finish: {finished.finish_reason}",
+            file=sys.stderr,
+        )
+        return 0
+
+    try:
+        return anyio.run(run)
+    except (mcp_host.McpHostError, ValueError) as error:
+        print(f"dllm chat: {error}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

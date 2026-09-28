@@ -66,6 +66,9 @@ dllm --model smollm2-135m.dllm chat "What is the capital of France?"
 dllm-server --model smollm2-135m.dllm
 claude mcp add dllm -- dllm-mcp --model /path/to/smollm2-135m.dllm
 
+# Let the model call the tools of other MCP servers during a chat (mcp.json in the usual mcpServers format)
+dllm --model qwen2.5-0.5b.dllm chat "What time is it in Amsterdam?" --mcp-config mcp.json
+
 # Fine-tune it on your own text; the same data and options give a byte-identical model
 dllm finetune smollm2-135m.dllm --data my-data.jsonl -o smollm2-135m-tuned.dllm --steps 50
 ```
@@ -88,7 +91,8 @@ to Python through [nanobind](https://github.com/wjakob/nanobind). Python orchest
 | `src/etalii_dllm/` | Python package: `tensor` (aligned float32 `Tensor`), `numerics`, `sampling`, `tokenization`, `models`, `generation` (streaming, stop sequences, logprobs), `grammar` (constrained decoding), `tools` (tool calling), `chat`, `engine` (shared facade) |
 | `src/etalii_dllm/training/` | Fine-tuning: decoder gradients, AdamW, fixed data order, checkpoints. See [docs/training.md](docs/training.md) |
 | `src/etalii_dllm/server/` | HTTP API, FastAPI: OpenAI (`/v1/models`, `/v1/chat/completions`, `/v1/embeddings`) and Anthropic (`/v1/messages`). See [docs/api.md](docs/api.md) |
-| `src/etalii_dllm/mcp_server.py` | Model Context Protocol server (stdio, official `mcp` SDK) exposing `chat`, `generate` and `model_info` tools |
+| `src/etalii_dllm/mcp_server.py` | Model Context Protocol server (stdio, official `mcp` SDK): `chat`, `generate` and `model_info` tools, model card/chat template/determinism resources, prompts. See [docs/mcp.md](docs/mcp.md) |
+| `src/etalii_dllm/mcp_host.py` | MCP client host: the model calls external MCP servers' tools during a chat (`dllm chat --mcp-config`) |
 | `src/etalii_dllm/cli.py` | `dllm` command line tool |
 | `src/etalii_dllm/importing/` | Model import: safetensors and GGUF readers, GGUF dequantisation, Hugging Face download, `dllm import` |
 | `src/etalii_dllm/bpe.py`, `chat_template.py` | Byte-level BPE tokenizer from `tokenizer.json` (or GGUF metadata) and the model's Jinja chat template |
@@ -119,7 +123,7 @@ Summarised from the [research notes](docs/research/deterministic-inference.md):
 | 2. Import existing models ✅ | Llama-style decoder with KV cache; `dllm import` converting small open-weight models (SmolLM2, Qwen2.5, TinyLlama, ...) from safetensors/GGUF to our own format with licence metadata; BPE tokenizer and chat templates. SmolLM2-135M and Qwen2.5-0.5B verified against `transformers` in CI. See [model import](docs/research/model-import.md) |
 | 3. Fine-tuning ✅ | Deterministic backprop and AdamW on top of imported weights, fixed data order, reproducible checkpoints |
 | 4. API parity ✅ | Streaming (SSE), tool/function calling, JSON-schema structured output, logprobs, Anthropic Messages endpoint, embeddings. See [HTTP API](docs/api.md) |
-| 5. MCP, both directions | Richer MCP server (prompts, resources); MCP client host so the model can call external tools during a chat |
+| 5. MCP, both directions ✅ | Richer MCP server (prompts, resources); MCP client host so the model can call external tools during a chat. See [MCP](docs/mcp.md) |
 | 6. Performance | SIMD and multi-threading with fixed, batch-invariant reduction order, integer quantisation (associative int32 accumulation), GPU kernels that keep bit-exactness |
 
 ## Working with Claude Code

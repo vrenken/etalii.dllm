@@ -123,3 +123,15 @@ def test_streaming_and_constraints_with_bpe_tokens(served):
     tool = Tool("lookup", "", {"type": "object", "properties": {"q": {"enum": ["a", "b"]}}, "required": ["q"]})
     result = served.chat_completion(ChatRequest(messages, 300, tools=[tool], tool_choice=ToolChoice("required")))
     assert [(c.name, json.loads(c.arguments)["q"] in "ab") for c in result.tool_calls] == [("lookup", True)]
+
+
+def test_mcp_resources_describe_the_served_model(served):
+    from etalii_dllm.mcp_server import chat_template, model_card
+
+    card = json.loads(model_card())
+    assert card["id"] == "example/tiny-chat"
+    assert card["system_fingerprint"] == served.system_fingerprint
+    assert card["architecture"]["layers"] == TINY_LLAMA_CONFIG["num_hidden_layers"]
+    assert card["source"]["repository"] == "example/tiny-chat"
+    assert card["licence"]["spdx"] == "Apache-2.0" and "text" not in card["licence"]
+    assert chat_template() == SMOLLM2

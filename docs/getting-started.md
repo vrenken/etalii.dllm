@@ -158,7 +158,7 @@ byte-identical responses, and a streamed answer is identical to the non-streamed
 (greedy) on every endpoint. All options, how tools and structured output work, and the differences from the real
 APIs: [HTTP API](api.md).
 
-## 5. MCP server
+## 5. MCP
 
 Register the model as an MCP server in Claude Code (use an absolute path to the model):
 
@@ -167,10 +167,23 @@ claude mcp add dllm -- dllm-mcp --model /absolute/path/to/smollm2-135m.dllm
 ```
 
 It exposes three tools: `chat` (answer a conversation with the model's chat template, optionally as JSON matching a
-schema), `generate` (continue a prompt) and `model_info` (model id and fingerprint). Other MCP clients
-(Claude Desktop, IDEs) take the same command: `dllm-mcp --model /absolute/path/to/model.dllm` over stdio. If the
-client starts it outside the virtual environment, use the full path to `.venv/bin/dllm-mcp` (Windows:
-`.venv\Scripts\dllm-mcp.exe`).
+schema), `generate` (continue a prompt) and `model_info` (model id and fingerprint); three resources (the model card
+at `dllm://model`, the chat template, and the determinism guarantee); and three prompts (`summarize`, `translate`,
+`extract_json`). Other MCP clients (Claude Desktop, IDEs) take the same command: `dllm-mcp --model
+/absolute/path/to/model.dllm` over stdio. If the client starts it outside the virtual environment, use the full path
+to `.venv/bin/dllm-mcp` (Windows: `.venv\Scripts\dllm-mcp.exe`).
+
+The other direction works too: let the model call the tools of MCP servers during a chat. Put the servers in a
+`mcp.json` in the usual `mcpServers` format, or name them with `--mcp-server`:
+
+```bash
+dllm --model qwen2.5-0.5b.dllm chat "What time is it in Amsterdam?" --mcp-server "time=uvx mcp-server-time"
+dllm --model qwen2.5-0.5b.dllm chat "What time is it in Amsterdam?" --mcp-config mcp.json
+```
+
+The tool calls and their results are printed to stderr and the answer to stdout. Tool calling needs a model trained
+for it: use Qwen2.5-Instruct here, not SmolLM2-135M. Details, the Python API and what the determinism guarantee
+covers when external tools are involved: [MCP](mcp.md).
 
 ## 6. Fine-tune
 
@@ -204,6 +217,7 @@ the reproducibility is achieved: [training](training.md).
   guarantees that every call names a real tool with arguments that fit its schema.
 - Structured output supports the common JSON-schema keywords; `pattern`, `minLength`, `minimum` and similar are
   refused with an error (see [HTTP API](api.md)). No images, audio or `n` > 1.
-- The model cannot call MCP tools during a chat yet, and the MCP server has no prompts or resources (Phase 5).
+- MCP servers' own resources and prompts are not offered to the model (only their tools), and servers that ask
+  the client for sampling or elicitation are not supported.
 - Models with SentencePiece tokenizers (TinyLlama, Llama 2), sliding-window attention, YaRN RoPE scaling or
   non-Llama/Qwen2 architectures are refused at import.
