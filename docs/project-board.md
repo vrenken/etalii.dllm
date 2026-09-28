@@ -13,13 +13,19 @@ Progress is tracked in the user-owned GitHub Project **EtAlii.Dllm**, linked to 
 
 GitHub's Actions token cannot write to a user's Projects, so the sync needs a personal token:
 
-1. Create a classic token at <https://github.com/settings/tokens/new> with the scopes `project` and `repo`
-   (or a fine-grained token with account permission *Projects: read and write* and, on this repository,
-   *Issues: read* and *Metadata: read*).
+1. Create a fine-grained token at <https://github.com/settings/personal-access-tokens/new>:
+   - Resource owner: your account; expiration: your choice (renew the secret when it expires).
+   - Repository access: *Only select repositories* > `etalii.dllm`.
+   - Repository permissions: *Issues: Read-only* (*Metadata: Read-only* is added automatically).
+   - Account permissions: *Projects: Read and write*.
+   It cannot push code, touch other repositories or change issues; it can only read this repo's issues and
+   milestones and edit your Projects.
 2. Add it as the repository secret `PROJECT_TOKEN`
    (Settings > Secrets and variables > Actions > New repository secret).
 3. Run the *Project board sync* workflow once (Actions > Project board sync > Run workflow).
-4. If the run log says the Roadmap view could not be created through the API, add it once by hand in the
+4. If the run log says the project could not be linked to the repository, link it once by hand
+   (project > Settings > Linked repositories).
+5. If the run log says the Roadmap view could not be created through the API, add it once by hand in the
    project: New view > Roadmap, dates `Start date` / `Target date`, group by `Phase`.
 
 ## Keeping it current (for Claude sessions)

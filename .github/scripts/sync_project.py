@@ -9,8 +9,8 @@ Idempotent: every run converges the board to the repository state, so it can run
   other manual status changes are left alone.
 - Tries to create a "Roadmap" view (only possible where the API supports it).
 
-Needs PROJECT_TOKEN: a classic PAT with the `project` and `repo` scopes, or a fine-grained token with
-account "Projects: read and write" plus repository "Issues: read" and "Metadata: read".
+Needs PROJECT_TOKEN: a fine-grained token limited to this repository, with repository "Issues: read-only"
+(Metadata read-only comes with it) and account "Projects: read and write". Nothing else.
 """
 
 import datetime
@@ -67,23 +67,22 @@ def ensure_project():
     repo_id = data["repository"]["id"]
     project = next((p for p in data["user"]["projectsV2"]["nodes"] if p["title"] == TITLE), None)
     if project is None:
-        project = graphql("""mutation($owner: ID!, $title: String!, $repo: ID!) {
-            createProjectV2(input: {ownerId: $owner, title: $title, repositoryId: $repo}) {
-                projectV2 { id number title url } }
-        }""", owner=data["user"]["id"], title=TITLE, repo=repo_id)["createProjectV2"]["projectV2"]
+        project = graphql("""mutation($owner: ID!, $title: String!) {
+            createProjectV2(input: {ownerId: $owner, title: $title}) { projectV2 { id number title url } }
+        }""", owner=data["user"]["id"], title=TITLE)["createProjectV2"]["projectV2"]
         print(f"Created project {project['url']}")
         graphql("""mutation($id: ID!, $desc: String!, $readme: String!) {
             updateProjectV2(input: {projectId: $id, shortDescription: $desc, readme: $readme}) { projectV2 { id } }
         }""", id=project["id"], desc="Roadmap and progress of the deterministic LLM",
                 readme=f"Synced automatically from https://github.com/{REPO} issues and milestones by "
                        "`.github/workflows/project-sync.yml`. Edit issues and milestones there, not here.")
-    else:
-        try:
-            graphql("""mutation($p: ID!, $r: ID!) {
-                linkProjectV2ToRepository(input: {projectId: $p, repositoryId: $r}) { repository { id } }
-            }""", p=project["id"], r=repo_id)
-        except RuntimeError as error:  # already linked
-            print(f"Link skipped: {error}")
+    try:
+        graphql("""mutation($p: ID!, $r: ID!) {
+            linkProjectV2ToRepository(input: {projectId: $p, repositoryId: $r}) { repository { id } }
+        }""", p=project["id"], r=repo_id)
+    except RuntimeError as error:  # already linked, or the token may not link repositories
+        print(f"::notice::Project not linked to the repository ({error.args[0][:200]}). "
+              "Link it once by hand: project > ... > Settings > Linked repositories.")
     return project
 
 
