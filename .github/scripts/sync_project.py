@@ -9,8 +9,8 @@ Idempotent: every run converges the board to the repository state, so it can run
   other manual status changes are left alone.
 - Tries to create a "Roadmap" view (only possible where the API supports it).
 
-Needs PROJECT_TOKEN: a fine-grained token limited to this repository, with repository "Issues: read-only"
-(Metadata read-only comes with it) and account "Projects: read and write". Nothing else.
+Needs PROJECT_TOKEN: a classic token with only the `project` scope. Fine-grained tokens cannot reach user-owned
+Projects. The repository is public, so reading its issues needs no further scope.
 """
 
 import datetime
