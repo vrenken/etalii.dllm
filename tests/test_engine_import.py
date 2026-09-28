@@ -91,3 +91,35 @@ def test_front_ends_agree(served, model_path, capsys, monkeypatch):
     assert capsys.readouterr().out == expected + "\n"
     assert cli(["--model", str(model_path), "chat", "Hi", "--max-tokens", "10"]) == 0
     assert capsys.readouterr().out == response["choices"][0]["message"]["content"] + "\n"
+
+
+# -- Phase 4 with a real BPE vocabulary (multi-byte tokens) --------------------------------------------------------
+
+
+def test_streaming_and_constraints_with_bpe_tokens(served):
+    import jsonschema
+
+    from etalii_dllm.engine import ChatRequest, ResponseFormat, TextDelta
+    from etalii_dllm.tools import Tool, ToolChoice
+
+    messages = [ChatMessage("user", "Héllo wörld, ça va?")]
+    for seed in range(3):
+        request = ChatRequest(messages, 24, SamplingOptions(temperature=1.2, seed=seed))
+        streamed = "".join(e.text for e in served.chat_stream(request) if isinstance(e, TextDelta))
+        assert streamed == served.chat_completion(request).content == served.chat(messages, 24, request.options).text
+
+    schema = {"type": "object", "properties": {"word": {"type": "string"}, "n": {"type": "integer"}},
+              "required": ["word", "n"]}  # fmt: skip
+    finished = 0
+    for seed in range(6):
+        options = SamplingOptions(temperature=0.8, seed=seed)
+        request = ChatRequest(messages, 80, options, response_format=ResponseFormat("json_schema", schema))
+        result = served.chat_completion(request)
+        if result.finish_reason == "stop":
+            finished += 1
+            jsonschema.validate(json.loads(result.content), schema)
+    assert finished
+
+    tool = Tool("lookup", "", {"type": "object", "properties": {"q": {"enum": ["a", "b"]}}, "required": ["q"]})
+    result = served.chat_completion(ChatRequest(messages, 300, tools=[tool], tool_choice=ToolChoice("required")))
+    assert [(c.name, json.loads(c.arguments)["q"] in "ab") for c in result.tool_calls] == [("lookup", True)]

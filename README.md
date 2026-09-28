@@ -11,12 +11,13 @@ requirement instead of a best-effort hint:
 That holds regardless of server load, batch composition or thread scheduling. Identical output across *different*
 hardware is not a goal; where it comes for free (as it does today) it is a bonus, not a promise.
 
-The model speaks the protocols the rest of the ecosystem already uses (an OpenAI-compatible chat API and the
-Model Context Protocol), so existing clients and agents can use it without changes.
+The model speaks the protocols the rest of the ecosystem already uses (the OpenAI and Anthropic HTTP APIs, with
+streaming, tool calling and JSON-schema structured output, and the Model Context Protocol), so existing clients and
+agents can use it without changes.
 
 ## Status
 
-Phases 1 (kernels) and 3 (fine-tuning) done, Phase 2 (importing models) nearly done. The full pipeline (tokenizer →
+Phases 1 (kernels), 3 (fine-tuning) and 4 (API parity) done, Phase 2 (importing models) nearly done. The full pipeline (tokenizer →
 model → sampler → CLI / HTTP API / MCP server) runs end to end and is proven run-to-run bit-exact by CI (on Linux, Windows and macOS, which
 today even agree with each other). The transformer building blocks (aligned `Tensor`, batch-invariant matmul,
 RMSNorm, SiLU/GELU, RoPE and grouped-query attention, see [docs/kernels.md](docs/kernels.md)) are in place, and so are
@@ -24,6 +25,9 @@ RMSNorm, SiLU/GELU, RoPE and grouped-query attention, see [docs/kernels.md](docs
 a Llama/Qwen2 decoder whose KV cache cannot change its output, the models' own BPE tokenizers and chat templates, and
 `--model` on every front end. `dllm finetune` trains an imported model further with AdamW, reproducibly: equal
 runs, and runs resumed from a checkpoint, write byte-identical models (see [docs/training.md](docs/training.md)).
+The HTTP API speaks both OpenAI and Anthropic, with streaming, tool calling, JSON-schema structured output
+(constrained decoding), logprobs and embeddings; streamed and non-streamed answers are identical (see
+[docs/api.md](docs/api.md)).
 Without a model file the engine falls back to a seeded placeholder (a bigram table).
 
 ## Quick start
@@ -42,7 +46,7 @@ pytest
 dllm info
 dllm generate --prompt "Hello" --temperature 0.8 --seed 7
 
-# OpenAI-compatible HTTP server on http://localhost:5080
+# OpenAI- and Anthropic-compatible HTTP server on http://localhost:5080 (see docs/api.md)
 dllm-server
 curl http://localhost:5080/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"model":"dllm","messages":[{"role":"user","content":"Hi"}],"temperature":0.7,"seed":5}'
@@ -79,11 +83,11 @@ to Python through [nanobind](https://github.com/wjakob/nanobind). Python orchest
 
 | Path | What it is |
 | --- | --- |
-| `cpp/` | C++ kernels: `include/dllm/random.hpp` (RNG), `include/dllm/math.hpp` (exp, log, sin, cos, tanh, erf, sum, dot, softmax), `include/dllm/nn.hpp` (linear/matmul, RMSNorm, SiLU/GELU, RoPE, attention), `include/dllm/grad.hpp` (their gradients, cross-entropy, AdamW), `kernels.cpp` (Python bindings). Evaluation orders: [docs/kernels.md](docs/kernels.md) |
-| `src/etalii_dllm/` | Python package: `tensor` (aligned float32 `Tensor`), `numerics`, `sampling`, `tokenization`, `models`, `generation`, `chat`, `engine` (shared facade) |
+| `cpp/` | C++ kernels: `include/dllm/random.hpp` (RNG), `include/dllm/math.hpp` (exp, log, sin, cos, tanh, erf, sum, dot, softmax, log-softmax), `include/dllm/nn.hpp` (linear/matmul, RMSNorm, SiLU/GELU, RoPE, attention), `include/dllm/grad.hpp` (their gradients, cross-entropy, AdamW), `kernels.cpp` (Python bindings). Evaluation orders: [docs/kernels.md](docs/kernels.md) |
+| `src/etalii_dllm/` | Python package: `tensor` (aligned float32 `Tensor`), `numerics`, `sampling`, `tokenization`, `models`, `generation` (streaming, stop sequences, logprobs), `grammar` (constrained decoding), `tools` (tool calling), `chat`, `engine` (shared facade) |
 | `src/etalii_dllm/training/` | Fine-tuning: decoder gradients, AdamW, fixed data order, checkpoints. See [docs/training.md](docs/training.md) |
-| `src/etalii_dllm/server/` | OpenAI-compatible HTTP API (`/v1/models`, `/v1/chat/completions`), FastAPI |
-| `src/etalii_dllm/mcp_server.py` | Model Context Protocol server (stdio, official `mcp` SDK) exposing `generate` and `model_info` tools |
+| `src/etalii_dllm/server/` | HTTP API, FastAPI: OpenAI (`/v1/models`, `/v1/chat/completions`, `/v1/embeddings`) and Anthropic (`/v1/messages`). See [docs/api.md](docs/api.md) |
+| `src/etalii_dllm/mcp_server.py` | Model Context Protocol server (stdio, official `mcp` SDK) exposing `chat`, `generate` and `model_info` tools |
 | `src/etalii_dllm/cli.py` | `dllm` command line tool |
 | `src/etalii_dllm/importing/` | Model import: safetensors and GGUF readers, GGUF dequantisation, Hugging Face download, `dllm import` |
 | `src/etalii_dllm/bpe.py`, `chat_template.py` | Byte-level BPE tokenizer from `tokenizer.json` (or GGUF metadata) and the model's Jinja chat template |
@@ -113,7 +117,7 @@ Summarised from the [research notes](docs/research/deterministic-inference.md):
 | 1. Kernels ✅ | Tensor type, deterministic matmul with fixed tiling, RMSNorm, RoPE with deterministic `sin`/`cos`, SiLU/GELU, attention with fixed-order softmax |
 | 2. Import existing models | Llama-style decoder with KV cache; `dllm import` converting small open-weight models (SmolLM2, Qwen2.5, TinyLlama, ...) from safetensors/GGUF to our own format with licence metadata; BPE tokenizer and chat templates. See [model import](docs/research/model-import.md) |
 | 3. Fine-tuning ✅ | Deterministic backprop and AdamW on top of imported weights, fixed data order, reproducible checkpoints |
-| 4. API parity | Streaming (SSE), tool/function calling, JSON-schema structured output, Anthropic Messages endpoint, embeddings |
+| 4. API parity ✅ | Streaming (SSE), tool/function calling, JSON-schema structured output, logprobs, Anthropic Messages endpoint, embeddings. See [HTTP API](docs/api.md) |
 | 5. MCP, both directions | Richer MCP server (prompts, resources); MCP client host so the model can call external tools during a chat |
 | 6. Performance | SIMD and multi-threading with fixed, batch-invariant reduction order, integer quantisation (associative int32 accumulation), GPU kernels that keep bit-exactness |
 

@@ -36,10 +36,12 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
   end; `DLLM_MODEL`/`--model` selects a `model.dllm`), `transformer` (Llama/Qwen2 decoder + KV cache), `bpe` and
   `chat_template` (the model's own tokenizer and Jinja template), `architecture` (`TransformerConfig`), `modelfile`
   (the `model.dllm` container, `docs/model-format.md`), `importing` (safetensors/GGUF readers and `dllm import`),
-  `training` (gradients, AdamW, data order, checkpoints and `dllm finetune`, `docs/training.md`).
+  `training` (gradients, AdamW, data order, checkpoints and `dllm finetune`, `docs/training.md`), `grammar`
+  (JSON-schema constrained decoding over a token trie), `tools` (tool calling in the Hermes `<tool_call>` format).
   Tests compare against the reference packages `gguf`, `safetensors` and `tokenizers` (dev dependencies).
-- `src/etalii_dllm/server/`, `mcp_server.py`, `cli.py`: thin front ends over `DllmEngine`. Keep logic out of them
-  so all three stay output-identical.
+- `src/etalii_dllm/server/` (OpenAI `app.py`, Anthropic `anthropic_api.py`; `docs/api.md`), `mcp_server.py`,
+  `cli.py`: thin front ends over `DllmEngine.chat_stream`. Keep logic out of them so all stay output-identical;
+  non-streamed responses are assembled from the same event stream as streamed ones.
 - `tests/`: pytest. `tests/golden_values.py` holds the reference hashes.
 
 ## Determinism rules (inference and training code)

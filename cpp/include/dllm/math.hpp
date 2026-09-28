@@ -335,4 +335,18 @@ inline void softmax(const float* logits, float* out, double* scratch, std::size_
     }
 }
 
+// Log-softmax: (l_i - max) - log(sum_j exp(l_j - max)), the sum over j ascending in double; each result is rounded
+// once to float. Gives the log-probabilities reported by the API (logprobs).
+inline void log_softmax(const float* logits, float* out, std::size_t n) {
+    const double max = logits[argmax(logits, n)];
+    double total = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        total += dllm::exp(static_cast<double>(logits[i]) - max);
+    }
+    const double log_total = dllm::log(total);
+    for (std::size_t i = 0; i < n; ++i) {
+        out[i] = static_cast<float>((static_cast<double>(logits[i]) - max) - log_total);
+    }
+}
+
 }  // namespace dllm

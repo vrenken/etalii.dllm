@@ -50,3 +50,7 @@ class BigramModel:
     def forward(self, tokens: Sequence[int]) -> FloatArray:
         previous = tokens[-1] if tokens else 0
         return np.array(self._table[previous], dtype=np.float32)
+
+    def hidden_states(self, tokens: Sequence[int]) -> FloatArray:
+        """One row per position (the logits row of that token), for embeddings."""
+        return np.array(self._table[np.asarray(tokens, dtype=np.int64)], dtype=np.float32)

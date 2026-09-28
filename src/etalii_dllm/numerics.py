@@ -56,6 +56,11 @@ def softmax(logits: npt.ArrayLike) -> FloatArray:
     return _kernels.softmax(_as_float32(logits))
 
 
+def log_softmax(logits: npt.ArrayLike) -> FloatArray:
+    """Log-probabilities ``(l_i - max) - log(sum_j exp(l_j - max))`` with a fixed evaluation order."""
+    return _kernels.log_softmax(_as_float32(logits))
+
+
 def fingerprint(values: npt.ArrayLike, dtype: npt.DTypeLike = np.float32) -> str:
     """SHA-256 of the exact little-endian bit patterns. Equal fingerprints mean bit-identical data."""
     array = np.ascontiguousarray(values, dtype=np.dtype(dtype).newbyteorder("<"))

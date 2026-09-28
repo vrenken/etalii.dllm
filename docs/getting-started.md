@@ -1,7 +1,7 @@
 # Getting started
 
-This guide takes you from a fresh clone to a real open-weight model answering over the command line, an
-OpenAI-compatible HTTP API and MCP. It is kept up to date as features land; the last section says what does not
+This guide takes you from a fresh clone to a real open-weight model answering over the command line, OpenAI- and
+Anthropic-compatible HTTP APIs and MCP. It is kept up to date as features land; the last section says what does not
 work yet.
 
 ## 1. Install
@@ -21,7 +21,7 @@ cd etalii.dllm
 python -m venv .venv
 source .venv/bin/activate          # Windows (PowerShell): .venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
-pytest                              # optional: about 300 tests, a few seconds
+pytest                              # optional: about 370 tests, ten seconds or so
 ```
 
 Check the installation with the built-in placeholder model (a tiny random bigram table, so its text is gibberish,
@@ -76,13 +76,23 @@ dllm --model smollm2-135m.dllm chat "Write a haiku about rain" --temperature 0.7
 dllm --model smollm2-135m.dllm generate --prompt "Once upon a time" --max-tokens 100
 ```
 
-`chat` wraps your message in the model's own chat template; `generate` continues raw text. Instead of `--model` you
-can set `DLLM_MODEL=/path/to/smollm2-135m.dllm` once; every command, the server and the MCP server use it.
+`chat` wraps your message in the model's own chat template; `generate` continues raw text. Both print the text as
+it is generated. Instead of `--model` you can set `DLLM_MODEL=/path/to/smollm2-135m.dllm` once; every command, the
+server and the MCP server use it.
+
+Ask for JSON and the answer is guaranteed to parse (constrained decoding: the model can only pick tokens that keep
+the output valid):
+
+```bash
+dllm --model smollm2-135m.dllm chat "Invent a cat" --json
+dllm --model smollm2-135m.dllm chat "Invent a cat" --json-schema '{"type": "object",
+  "properties": {"name": {"type": "string"}, "age": {"type": "integer"}}, "required": ["name", "age"]}'
+```
 
 Determinism: the same model file, prompt, options and seed give the same tokens every time on the same machine,
 also under concurrent load. Temperature 0 (the default) is greedy decoding.
 
-## 4. OpenAI-compatible server
+## 4. OpenAI- and Anthropic-compatible server
 
 ```bash
 dllm-server --model smollm2-135m.dllm        # http://127.0.0.1:5080, --host/--port to change
@@ -108,8 +118,38 @@ reply = client.chat.completions.create(
 print(reply.choices[0].message.content, reply.system_fingerprint)
 ```
 
-The response `id` and `system_fingerprint` are derived from the output and the weights, so identical requests get
-byte-identical responses. Streaming and tool calls are not available yet (see below).
+Streaming (`stream=True`), tool calling (`tools`, `tool_choice`), structured output (`response_format` with
+`json_object` or `json_schema`), `logprobs`/`top_logprobs`, `stop` sequences and `/v1/embeddings` work as in the
+OpenAI API:
+
+```python
+for chunk in client.chat.completions.create(
+    model="dllm", messages=[{"role": "user", "content": "Count to five."}], stream=True
+):
+    print(chunk.choices[0].delta.content or "", end="")
+
+vectors = client.embeddings.create(model="dllm", input=["first text", "second text"])
+```
+
+The same server speaks the Anthropic Messages API at `/v1/messages`, so the Anthropic SDK works too:
+
+```python
+import anthropic
+
+client = anthropic.Anthropic(base_url="http://127.0.0.1:5080", api_key="unused")
+message = client.messages.create(
+    model="dllm",
+    max_tokens=100,
+    messages=[{"role": "user", "content": "Hi!"}],
+    extra_body={"temperature": 0.7, "seed": 42},  # sampling options go in extra_body
+)
+print(message.content[0].text)
+```
+
+The response ids and `system_fingerprint` are derived from the request and the weights, so identical requests get
+byte-identical responses, and a streamed answer is identical to the non-streamed one. Temperature defaults to 0
+(greedy) on every endpoint. All options, how tools and structured output work, and the differences from the real
+APIs: [HTTP API](api.md).
 
 ## 5. MCP server
 
@@ -119,7 +159,8 @@ Register the model as an MCP server in Claude Code (use an absolute path to the 
 claude mcp add dllm -- dllm-mcp --model /absolute/path/to/smollm2-135m.dllm
 ```
 
-It exposes two tools: `generate` (continue a prompt) and `model_info` (model id and fingerprint). Other MCP clients
+It exposes three tools: `chat` (answer a conversation with the model's chat template, optionally as JSON matching a
+schema), `generate` (continue a prompt) and `model_info` (model id and fingerprint). Other MCP clients
 (Claude Desktop, IDEs) take the same command: `dllm-mcp --model /absolute/path/to/model.dllm` over stdio. If the
 client starts it outside the virtual environment, use the full path to `.venv/bin/dllm-mcp` (Windows:
 `.venv\Scripts\dllm-mcp.exe`).
@@ -151,7 +192,11 @@ the reproducibility is achieved: [training](training.md).
   slower for bigger models. The KV cache is in place, so long answers do not slow down per token. Fine-tuning
   costs roughly three times as much per token as reading a prompt, so on SmolLM2-135M keep runs to a few thousand
   tokens for now.
-- Streaming, tool/function calling, structured output and an Anthropic Messages endpoint are Phase 4; the MCP
-  server has no chat tool yet.
+- Tool calling works best with models trained for it (Qwen2.5-Instruct uses the same `<tool_call>` format the
+  engine asks for). SmolLM2-135M does not know tools, so expect clumsy calls from it; constrained decoding still
+  guarantees that every call names a real tool with arguments that fit its schema.
+- Structured output supports the common JSON-schema keywords; `pattern`, `minLength`, `minimum` and similar are
+  refused with an error (see [HTTP API](api.md)). No images, audio or `n` > 1.
+- The model cannot call MCP tools during a chat yet, and the MCP server has no prompts or resources (Phase 5).
 - Models with SentencePiece tokenizers (TinyLlama, Llama 2), sliding-window attention, YaRN RoPE scaling or
   non-Llama/Qwen2 architectures are refused at import.

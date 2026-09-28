@@ -5,9 +5,18 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from etalii_dllm.chat import ChatMessage
-from etalii_dllm.engine import default_engine, use_model_file
+from etalii_dllm.engine import (
+    ChatRequest,
+    DllmEngine,
+    Finished,
+    ResponseFormat,
+    TextDelta,
+    default_engine,
+    use_model_file,
+)
 from etalii_dllm.sampling import SamplingOptions
 
 
@@ -134,6 +143,8 @@ def main(argv: list[str] | None = None) -> int:
     chat = commands.add_parser("chat", help="answer a message using the model's chat template")
     chat.add_argument("message")
     chat.add_argument("--system", help="system message")
+    chat.add_argument("--json", action="store_true", help="answer with a JSON object (constrained decoding)")
+    chat.add_argument("--json-schema", help="answer with JSON valid under this schema (a file or inline JSON)")
     for command in (generate, chat):
         command.add_argument("--max-tokens", type=int, default=64 if command is generate else 256)
         command.add_argument("--temperature", type=float, default=0.0)
@@ -190,15 +201,53 @@ def main(argv: list[str] | None = None) -> int:
 
     options = SamplingOptions(temperature=args.temperature, top_k=args.top_k, top_p=args.top_p, seed=args.seed)
     if args.command == "chat":
-        messages = [ChatMessage("system", args.system)] if args.system else []
-        result = engine.chat([*messages, ChatMessage("user", args.message)], args.max_tokens, options)
-    else:
-        result = engine.complete(args.prompt, args.max_tokens, options)
-    print(result.text)
+        return _chat(engine, args, options)
+    generation = engine.complete_stream(args.prompt, args.max_tokens, options)
+    for step in generation:
+        _write(step.text)
+    result = generation.result()
+    _write("\n")
     print(
         f"fingerprint: {result.fingerprint}  tokens: {len(result.tokens)}  finish: {result.finish_reason}",
         file=sys.stderr,
     )
+    return 0
+
+
+def _write(text: str) -> None:
+    """Prints generated text as it arrives."""
+    sys.stdout.write(text)
+    sys.stdout.flush()
+
+
+def _chat(engine: DllmEngine, args: argparse.Namespace, options: SamplingOptions) -> int:
+    response_format = ResponseFormat("json_object") if args.json else ResponseFormat()
+    if args.json_schema:
+        source = args.json_schema
+        try:
+            text = Path(source).read_text(encoding="utf-8") if not source.lstrip().startswith("{") else source
+            response_format = ResponseFormat("json_schema", json.loads(text))
+        except (OSError, json.JSONDecodeError) as error:
+            print(f"dllm chat: --json-schema: {error}", file=sys.stderr)
+            return 1
+    messages = [ChatMessage("system", args.system)] if args.system else []
+    request = ChatRequest(
+        [*messages, ChatMessage("user", args.message)], args.max_tokens, options, response_format=response_format
+    )
+    try:
+        stream = engine.chat_stream(request)
+    except ValueError as error:
+        print(f"dllm chat: {error}", file=sys.stderr)
+        return 1
+    for event in stream:
+        if isinstance(event, TextDelta):
+            _write(event.text)
+        elif isinstance(event, Finished):
+            _write("\n")
+            print(
+                f"fingerprint: {event.fingerprint}  tokens: {event.completion_tokens}  finish: {event.finish_reason}",
+                file=sys.stderr,
+            )
     return 0
 
 

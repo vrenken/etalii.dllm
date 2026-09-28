@@ -114,6 +114,12 @@ class Transformer:
         concurrently)."""
         return self.forward_cached(tokens, self.new_cache())
 
+    def hidden_states(self, tokens: Sequence[int]) -> FloatArray:
+        """The final-norm hidden states ``[positions, hidden]`` (what the LM head sees), for embeddings."""
+        if not tokens:
+            raise ValueError("the decoder needs at least one token of context")
+        return self._layers(list(tokens), 0, self.new_cache()).numpy().copy()
+
     def forward_cached(self, tokens: Sequence[int], cache: KVCache) -> FloatArray:
         """Next-token logits after ``tokens``, reusing the longest prefix already in ``cache`` and appending the
         rest. Gives the same bits as :meth:`forward`."""

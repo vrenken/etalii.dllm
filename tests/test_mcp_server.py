@@ -18,6 +18,19 @@ MESSAGES = [
         "method": "tools/call",
         "params": {"name": "generate", "arguments": {"prompt": "Hi", "max_tokens": 8, "temperature": 0.5, "seed": 3}},
     },
+    {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "tools/call",
+        "params": {
+            "name": "chat",
+            "arguments": {
+                "messages": [{"role": "user", "content": "Hi"}],
+                "max_tokens": 40,
+                "json_schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]},
+            },
+        },
+    },
 ]
 
 
@@ -55,8 +68,11 @@ def run_session() -> dict[int, dict]:
 def test_mcp_server_lists_and_runs_tools_deterministically():
     first = run_session()
     tools = {t["name"]: t for t in first[2]["result"]["tools"]}
-    assert set(tools) == {"generate", "model_info"}
+    assert set(tools) == {"chat", "generate", "model_info"}
     assert tools["generate"]["annotations"]["idempotentHint"] is True
 
     second = run_session()
     assert first[3]["result"]["content"] == second[3]["result"]["content"]
+    assert first[4]["result"]["content"] == second[4]["result"]["content"]
+    answer = json.loads(first[4]["result"]["content"][0]["text"])
+    assert isinstance(answer["ok"], bool)
