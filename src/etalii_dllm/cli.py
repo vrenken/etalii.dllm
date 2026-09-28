@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 
+from etalii_dllm.chat import ChatMessage
 from etalii_dllm.engine import default_engine, use_model_file
 from etalii_dllm.sampling import SamplingOptions
 
@@ -63,11 +64,15 @@ def main(argv: list[str] | None = None) -> int:
 
     generate = commands.add_parser("generate", help="continue a prompt")
     generate.add_argument("--prompt", default="")
-    generate.add_argument("--max-tokens", type=int, default=64)
-    generate.add_argument("--temperature", type=float, default=0.0)
-    generate.add_argument("--top-k", type=int, default=0)
-    generate.add_argument("--top-p", type=float, default=1.0)
-    generate.add_argument("--seed", type=int, default=0)
+    chat = commands.add_parser("chat", help="answer a message using the model's chat template")
+    chat.add_argument("message")
+    chat.add_argument("--system", help="system message")
+    for command in (generate, chat):
+        command.add_argument("--max-tokens", type=int, default=64 if command is generate else 256)
+        command.add_argument("--temperature", type=float, default=0.0)
+        command.add_argument("--top-k", type=int, default=0)
+        command.add_argument("--top-p", type=float, default=1.0)
+        command.add_argument("--seed", type=int, default=0)
 
     importer = commands.add_parser("import", help="convert an open-weight model to model.dllm")
     importer.add_argument("source", help="checkpoint directory, .gguf file, or hf:org/name[@revision]")
@@ -97,7 +102,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     options = SamplingOptions(temperature=args.temperature, top_k=args.top_k, top_p=args.top_p, seed=args.seed)
-    result = engine.complete(args.prompt, args.max_tokens, options)
+    if args.command == "chat":
+        messages = [ChatMessage("system", args.system)] if args.system else []
+        result = engine.chat([*messages, ChatMessage("user", args.message)], args.max_tokens, options)
+    else:
+        result = engine.complete(args.prompt, args.max_tokens, options)
     print(result.text)
     print(
         f"fingerprint: {result.fingerprint}  tokens: {len(result.tokens)}  finish: {result.finish_reason}",

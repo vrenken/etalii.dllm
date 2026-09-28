@@ -26,6 +26,9 @@ a Llama/Qwen2 decoder whose KV cache cannot change its output, the models' own B
 
 ## Quick start
 
+New here? [Getting started](docs/getting-started.md) walks through installing, importing a real model and using it
+from the command line, the HTTP API and MCP.
+
 Requires Python 3.11+, CMake and a C++17 compiler (the numeric kernels are a C++ extension built on install).
 
 ```bash
@@ -52,7 +55,7 @@ dllm inspect smollm2-135m.dllm
 
 # Run it: every front end takes --model (or the DLLM_MODEL environment variable) and uses the model's own
 # tokenizer and chat template
-dllm --model smollm2-135m.dllm generate --prompt "The capital of France is"
+dllm --model smollm2-135m.dllm chat "What is the capital of France?"
 dllm-server --model smollm2-135m.dllm
 claude mcp add dllm -- dllm-mcp --model /path/to/smollm2-135m.dllm
 ```

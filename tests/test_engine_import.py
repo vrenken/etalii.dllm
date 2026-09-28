@@ -89,3 +89,5 @@ def test_front_ends_agree(served, model_path, capsys, monkeypatch):
     monkeypatch.setenv(engine_module.MODEL_ENVIRONMENT_VARIABLE, "")
     assert cli(["--model", str(model_path), "generate", "--prompt", "Deterministic", "--max-tokens", "10"]) == 0
     assert capsys.readouterr().out == expected + "\n"
+    assert cli(["--model", str(model_path), "chat", "Hi", "--max-tokens", "10"]) == 0
+    assert capsys.readouterr().out == response["choices"][0]["message"]["content"] + "\n"
