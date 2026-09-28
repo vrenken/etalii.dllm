@@ -20,7 +20,7 @@ GitHub's Actions token cannot write to a user's Projects, so the sync needs a pe
 2. Add it as the repository secret `PROJECT_TOKEN`
    (Settings > Secrets and variables > Actions > New repository secret).
 3. Run the *Project board sync* workflow once (Actions > Project board sync > Run workflow).
-4. The token cannot link the project to the repository, so link it once by hand
+4. If the run log says the project could not be linked to the repository, link it once by hand
    (project > Settings > Linked repositories).
 5. If the run log says the Roadmap view could not be created through the API, add it once by hand in the
    project: New view > Roadmap, dates `Start date` / `Target date`, group by `Phase`.
