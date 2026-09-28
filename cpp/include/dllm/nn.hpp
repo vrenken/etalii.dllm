@@ -121,9 +121,11 @@ inline float gelu_tanh(float x) {
 // Pair i rotates by angle positions[t] * inv_freq[i] (computed in double with dllm::sin / dllm::cos):
 //  - interleaved = false (Hugging Face "rotate_half" layout): pairs (i, i + rotary_dim / 2);
 //  - interleaved = true (Meta / GGUF layout): pairs (2i, 2i + 1).
+// With inverse = true every pair rotates by the negated angle (sin negated exactly): the transpose of the rotation,
+// which is the RoPE backward pass.
 inline void rope(const float* x, const std::int64_t* positions, const double* inv_freq, float* out,
                  std::size_t tokens, std::size_t heads, std::size_t head_dim, std::size_t rotary_dim,
-                 bool interleaved) {
+                 bool interleaved, bool inverse = false) {
     const std::size_t half = rotary_dim / 2;
     std::vector<double> cos_table(half);
     std::vector<double> sin_table(half);
@@ -132,7 +134,7 @@ inline void rope(const float* x, const std::int64_t* positions, const double* in
         for (std::size_t i = 0; i < half; ++i) {
             const double angle = pos * inv_freq[i];
             cos_table[i] = dllm::cos(angle);
-            sin_table[i] = dllm::sin(angle);
+            sin_table[i] = inverse ? -dllm::sin(angle) : dllm::sin(angle);
         }
         for (std::size_t h = 0; h < heads; ++h) {
             const float* xh = x + (t * heads + h) * head_dim;

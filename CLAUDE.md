@@ -28,14 +28,15 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
 ## Layout
 
 - `cpp/include/dllm/`: header-only C++ kernels (`random.hpp`, `math.hpp` transcendentals, `nn.hpp` matmul/norm/RoPE/
-  attention; evaluation orders in `docs/kernels.md`); `cpp/kernels.cpp` binds them as
+  attention, `grad.hpp` their gradients plus cross-entropy and AdamW; evaluation orders in `docs/kernels.md`); `cpp/kernels.cpp` binds them as
   `etalii_dllm._kernels`. `CMakeLists.txt` sets the floating point flags; never add `-ffast-math`, `-O3 -march=native`
   style reassociation flags or `-ffp-contract=fast`.
 - `src/etalii_dllm/`: `tensor` (aligned float32 `Tensor`), `numerics` (thin wrappers over `_kernels`, fingerprints),
   `sampling`, `tokenization`, `models`, `generation`, `chat`, `engine` (`DllmEngine`, the facade shared by every front
   end; `DLLM_MODEL`/`--model` selects a `model.dllm`), `transformer` (Llama/Qwen2 decoder + KV cache), `bpe` and
   `chat_template` (the model's own tokenizer and Jinja template), `architecture` (`TransformerConfig`), `modelfile`
-  (the `model.dllm` container, `docs/model-format.md`), `importing` (safetensors/GGUF readers and `dllm import`).
+  (the `model.dllm` container, `docs/model-format.md`), `importing` (safetensors/GGUF readers and `dllm import`),
+  `training` (gradients, AdamW, data order, checkpoints and `dllm finetune`, `docs/training.md`).
   Tests compare against the reference packages `gguf`, `safetensors` and `tokenizers` (dev dependencies).
 - `src/etalii_dllm/server/`, `mcp_server.py`, `cli.py`: thin front ends over `DllmEngine`. Keep logic out of them
   so all three stay output-identical.

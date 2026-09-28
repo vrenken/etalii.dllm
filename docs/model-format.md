@@ -37,6 +37,7 @@ same source twice gives byte-identical files (`tests/test_import.py`).
 | `licence` | `spdx` id, full licence `text`, `attribution` line, `redistributable` (true only for Apache-2.0 and MIT), optional `link` |
 | `tokenizer` | Hugging Face: `tokenizer.json`, `tokenizer_config.json` and `special_tokens_map.json` verbatim. GGUF: the `tokenizer.*` metadata. The BPE tokenizer (#14) reads this |
 | `chat_template` | The model's Jinja chat template, or `null` |
+| `fine_tuning` | Only in models written by `dllm finetune`: base model fingerprint, data fingerprint, run settings, steps completed and final loss (see [training](training.md)) |
 
 ## Tensor names
 

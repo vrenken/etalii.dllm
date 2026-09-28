@@ -2,13 +2,16 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/optional.h>
+#include <nanobind/stl/tuple.h>
 
 #include <cmath>
 #include <cstdint>
 #include <new>
 #include <optional>
+#include <tuple>
 #include <vector>
 
+#include "dllm/grad.hpp"
 #include "dllm/math.hpp"
 #include "dllm/nn.hpp"
 #include "dllm/random.hpp"
@@ -20,6 +23,7 @@ using FloatTensor = nb::ndarray<const float, nb::c_contig, nb::device::cpu>;
 using DoubleVector = nb::ndarray<const double, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
 using IndexVector = nb::ndarray<const std::int64_t, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
 using OwnedFloatArray = nb::ndarray<nb::numpy, float>;
+using MutableFloatTensor = nb::ndarray<float, nb::c_contig, nb::device::cpu>;
 
 namespace {
 
@@ -185,7 +189,7 @@ NB_MODULE(_kernels, m) {
 
     m.def(
         "rope",
-        [](FloatTensor x, IndexVector positions, DoubleVector inv_freq, bool interleaved) {
+        [](FloatTensor x, IndexVector positions, DoubleVector inv_freq, bool interleaved, bool inverse) {
             require(x.ndim() == 3, "x must be [tokens, heads, head_dim]");
             const std::size_t tokens = x.shape(0);
             const std::size_t head_dim = x.shape(2);
@@ -195,11 +199,11 @@ NB_MODULE(_kernels, m) {
             float* out;
             auto result = make_array(shape_of(x), &out);
             dllm::rope(x.data(), positions.data(), inv_freq.data(), out, tokens, x.shape(1), head_dim, rotary_dim,
-                       interleaved);
+                       interleaved, inverse);
             return result;
         },
         nb::arg("x"), nb::arg("positions"), nb::arg("inv_freq"), nb::arg("interleaved") = false,
-        "Rotary position embedding of x[tokens, heads, head_dim].");
+        nb::arg("inverse") = false, "Rotary position embedding of x[tokens, heads, head_dim] (inverse: its transpose).");
 
     m.def(
         "attention",
@@ -222,4 +226,135 @@ NB_MODULE(_kernels, m) {
         },
         nb::arg("q"), nb::arg("k"), nb::arg("v"), nb::arg("scale"), nb::arg("causal") = true,
         nb::arg("q_offset") = -1, "Scaled dot-product attention with grouped-query heads and a fixed order.");
+
+    m.def(
+        "linear_backward",
+        [](FloatTensor x, FloatTensor w, FloatTensor dy, bool with_bias) {
+            require(w.ndim() == 2, "weight must be [out_features, in_features]");
+            const std::size_t in_features = w.shape(1);
+            const std::size_t out_features = w.shape(0);
+            require(x.ndim() >= 1 && x.shape(x.ndim() - 1) == in_features, "x does not match the weight");
+            require(dy.ndim() == x.ndim() && dy.shape(dy.ndim() - 1) == out_features, "dy does not match the weight");
+            const std::size_t rows = leading_rows(x);
+            require(leading_rows(dy) == rows, "x and dy must have the same leading dimensions");
+            float* dx;
+            float* dw;
+            float* db = nullptr;
+            auto dx_array = make_array(shape_of(x), &dx);
+            auto dw_array = make_array({out_features, in_features}, &dw);
+            std::optional<OwnedFloatArray> db_array;
+            if (with_bias) {
+                db_array = make_array({out_features}, &db);
+            }
+            dllm::linear_backward(x.data(), w.data(), dy.data(), dx, dw, db, rows, in_features, out_features);
+            return std::make_tuple(dx_array, dw_array, db_array);
+        },
+        nb::arg("x"), nb::arg("weight"), nb::arg("dy"), nb::arg("with_bias") = false,
+        "Gradients (dx, dweight, dbias or None) of linear(); fixed order, double accumulators.");
+
+    m.def(
+        "rms_norm_backward",
+        [](FloatTensor x, std::optional<FloatVector> weight, FloatTensor dy, double eps) {
+            require(x.ndim() >= 1, "x must have at least one dimension");
+            const std::size_t dim = x.shape(x.ndim() - 1);
+            require(dy.size() == x.size() && dy.shape(dy.ndim() - 1) == dim, "dy must have the shape of x");
+            require(!weight || weight->shape(0) == dim, "weight length must equal the last dimension of x");
+            float* dx;
+            float* dw;
+            auto dx_array = make_array(shape_of(x), &dx);
+            auto dw_array = make_array({dim}, &dw);
+            dllm::rms_norm_backward(x.data(), weight ? weight->data() : nullptr, dy.data(), dx, dw, leading_rows(x),
+                                    dim, eps);
+            return std::make_tuple(dx_array, dw_array);
+        },
+        nb::arg("x"), nb::arg("weight").none(), nb::arg("dy"), nb::arg("eps") = 1e-6,
+        "Gradients (dx, dweight) of rms_norm(); fixed order, double accumulators.");
+
+    m.def(
+        "silu_backward",
+        [](FloatTensor x, FloatTensor dy) {
+            require(x.size() == dy.size(), "x and dy must have the same size");
+            float* out;
+            auto result = make_array(shape_of(x), &out);
+            for (std::size_t i = 0; i < x.size(); ++i) {
+                out[i] = dllm::silu_backward(x.data()[i], dy.data()[i]);
+            }
+            return result;
+        },
+        nb::arg("x"), nb::arg("dy"), "dy * silu'(x), elementwise.");
+
+    m.def(
+        "attention_backward",
+        [](FloatTensor q, FloatTensor k, FloatTensor v, FloatTensor dout, double scale, bool causal,
+           std::int64_t q_offset) {
+            require(q.ndim() == 3 && k.ndim() == 3 && v.ndim() == 3, "q, k and v must be [length, heads, dim]");
+            const std::size_t q_len = q.shape(0);
+            const std::size_t kv_len = k.shape(0);
+            require(v.shape(0) == kv_len && v.shape(1) == k.shape(1), "k and v must have the same length and heads");
+            require(q.shape(2) == k.shape(2), "q and k must have the same head_dim");
+            require(k.shape(1) > 0 && q.shape(1) % k.shape(1) == 0, "q heads must be a multiple of kv heads");
+            require(dout.ndim() == 3 && dout.shape(0) == q_len && dout.shape(1) == q.shape(1) &&
+                        dout.shape(2) == v.shape(2),
+                    "dout must be [q_len, q_heads, value_dim]");
+            if (q_offset < 0) {
+                q_offset = static_cast<std::int64_t>(kv_len) - static_cast<std::int64_t>(q_len);
+            }
+            require(q_offset >= 0, "q_offset must be non-negative");
+            float* dq;
+            float* dk;
+            float* dv;
+            auto dq_array = make_array(shape_of(q), &dq);
+            auto dk_array = make_array(shape_of(k), &dk);
+            auto dv_array = make_array(shape_of(v), &dv);
+            dllm::attention_backward(q.data(), k.data(), v.data(), dout.data(), dq, dk, dv, q_len, kv_len,
+                                     q.shape(1), k.shape(1), q.shape(2), v.shape(2), scale, causal,
+                                     static_cast<std::size_t>(q_offset));
+            return std::make_tuple(dq_array, dk_array, dv_array);
+        },
+        nb::arg("q"), nb::arg("k"), nb::arg("v"), nb::arg("dout"), nb::arg("scale"), nb::arg("causal") = true,
+        nb::arg("q_offset") = -1, "Gradients (dq, dk, dv) of attention(); fixed order, double accumulators.");
+
+    m.def(
+        "cross_entropy",
+        [](FloatTensor logits, IndexVector targets, double scale) {
+            require(logits.ndim() == 2, "logits must be [rows, vocab]");
+            require(targets.shape(0) == logits.shape(0), "targets must have one entry per row");
+            float* dlogits;
+            auto result = make_array(shape_of(logits), &dlogits);
+            const double loss = dllm::cross_entropy(logits.data(), targets.data(), dlogits, logits.shape(0),
+                                                    logits.shape(1), scale);
+            return std::make_tuple(loss, result);
+        },
+        nb::arg("logits"), nb::arg("targets"), nb::arg("scale") = 1.0,
+        "(summed loss, dlogits * scale) of softmax cross-entropy; negative targets are ignored.");
+
+    m.def(
+        "embedding_backward",
+        [](FloatTensor dy, IndexVector tokens, std::size_t vocab) {
+            require(dy.ndim() == 2 && dy.shape(0) == tokens.shape(0), "dy must be [len(tokens), dim]");
+            float* out;
+            auto result = make_array({vocab, dy.shape(1)}, &out);
+            dllm::embedding_backward(dy.data(), tokens.data(), out, dy.shape(0), dy.shape(1), vocab);
+            return result;
+        },
+        nb::arg("dy"), nb::arg("tokens"), nb::arg("vocabulary_size"),
+        "Embedding gradient [vocab, dim]: rows of dy summed per token in position order.");
+
+    m.def(
+        "sum_squares", [](FloatTensor values) { return dllm::sum_squares(values.data(), values.size()); },
+        nb::arg("values"), "Sum of squares in index order with a double accumulator.");
+
+    m.def(
+        "adamw_step",
+        [](MutableFloatTensor param, FloatTensor grad, MutableFloatTensor m, MutableFloatTensor v, double lr,
+           double beta1, double beta2, double eps, double weight_decay, double bias_correction1,
+           double bias_correction2, double grad_scale) {
+            const std::size_t n = param.size();
+            require(grad.size() == n && m.size() == n && v.size() == n, "param, grad, m and v must have one size");
+            dllm::adamw_step(param.data(), grad.data(), m.data(), v.data(), n, lr, beta1, beta2, eps, weight_decay,
+                             bias_correction1, bias_correction2, grad_scale);
+        },
+        nb::arg("param"), nb::arg("grad"), nb::arg("m"), nb::arg("v"), nb::arg("lr"), nb::arg("beta1"),
+        nb::arg("beta2"), nb::arg("eps"), nb::arg("weight_decay"), nb::arg("bias_correction1"),
+        nb::arg("bias_correction2"), nb::arg("grad_scale") = 1.0, "One in-place AdamW step, element by element.");
 }

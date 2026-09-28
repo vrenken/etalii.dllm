@@ -157,15 +157,17 @@ def rope(
     inv_freq: npt.ArrayLike,
     *,
     interleaved: bool = False,
+    inverse: bool = False,
 ) -> Tensor:
     """Rotary position embedding of ``x[tokens, heads, head_dim]`` at absolute ``positions``.
 
     ``interleaved=False`` rotates pairs ``(i, i + rotary_dim/2)`` (Hugging Face layout), ``True`` pairs
-    ``(2i, 2i+1)`` (Meta/GGUF layout). Dimensions beyond ``2 * len(inv_freq)`` pass through.
+    ``(2i, 2i+1)`` (Meta/GGUF layout). Dimensions beyond ``2 * len(inv_freq)`` pass through. ``inverse`` rotates
+    by the negated angles: the transpose of the rotation, and so the gradient of ``rope``.
     """
     pos = np.ascontiguousarray(positions, dtype=np.int64)
     freqs = np.ascontiguousarray(inv_freq, dtype=np.float64)
-    return Tensor(_kernels.rope(_float32(x), pos, freqs, interleaved))
+    return Tensor(_kernels.rope(_float32(x), pos, freqs, interleaved, inverse))
 
 
 def attention(
@@ -190,3 +192,74 @@ def attention(
         raise ValueError("q_offset must be non-negative")
     s = 1.0 / math.sqrt(qa.shape[2]) if scale is None else float(scale)
     return Tensor(_kernels.attention(qa, ka, va, s, causal, -1 if q_offset is None else q_offset))
+
+
+# Gradients. Each has the evaluation order documented in cpp/include/dllm/grad.hpp and docs/kernels.md.
+
+
+def linear_backward(
+    x: npt.ArrayLike | Tensor, weight: npt.ArrayLike | Tensor, dy: npt.ArrayLike | Tensor, *, with_bias: bool = False
+) -> tuple[Tensor, Tensor, Tensor | None]:
+    """``(dx, dweight, dbias)`` of :func:`linear`; ``dbias`` is ``None`` unless ``with_bias``."""
+    dx, dw, db = _kernels.linear_backward(_float32(x), _float32(weight), _float32(dy), with_bias)
+    return Tensor(dx), Tensor(dw), None if db is None else Tensor(db)
+
+
+def rms_norm_backward(
+    x: npt.ArrayLike | Tensor, weight: npt.ArrayLike | Tensor | None, dy: npt.ArrayLike | Tensor, eps: float = 1e-6
+) -> tuple[Tensor, Tensor]:
+    """``(dx, dweight)`` of :func:`rms_norm` (without ``add_unit_offset``)."""
+    w = None if weight is None else _float32(weight)
+    dx, dw = _kernels.rms_norm_backward(_float32(x), w, _float32(dy), eps)
+    return Tensor(dx), Tensor(dw)
+
+
+def silu_backward(x: npt.ArrayLike | Tensor, dy: npt.ArrayLike | Tensor) -> Tensor:
+    """``dy * silu'(x)``, elementwise."""
+    return Tensor(_kernels.silu_backward(_float32(x), _float32(dy)))
+
+
+def attention_backward(
+    q: npt.ArrayLike | Tensor,
+    k: npt.ArrayLike | Tensor,
+    v: npt.ArrayLike | Tensor,
+    dout: npt.ArrayLike | Tensor,
+    *,
+    scale: float | None = None,
+    causal: bool = True,
+    q_offset: int | None = None,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """``(dq, dk, dv)`` of :func:`attention` with the same arguments."""
+    qa = _float32(q)
+    if qa.ndim != 3:
+        raise ValueError("q must be [length, heads, head_dim]")
+    if q_offset is not None and q_offset < 0:
+        raise ValueError("q_offset must be non-negative")
+    s = 1.0 / math.sqrt(qa.shape[2]) if scale is None else float(scale)
+    offset = -1 if q_offset is None else q_offset
+    dq, dk, dv = _kernels.attention_backward(qa, _float32(k), _float32(v), _float32(dout), s, causal, offset)
+    return Tensor(dq), Tensor(dk), Tensor(dv)
+
+
+def cross_entropy(
+    logits: npt.ArrayLike | Tensor, targets: npt.ArrayLike, *, scale: float = 1.0
+) -> tuple[float, Tensor]:
+    """Softmax cross-entropy of ``logits[rows, vocab]``: the loss summed over rows (in double) and
+    ``dlogits * scale``. Rows whose target is negative are ignored."""
+    loss, dlogits = _kernels.cross_entropy(_float32(logits), np.ascontiguousarray(targets, dtype=np.int64), scale)
+    return float(loss), Tensor(dlogits)
+
+
+def embedding_backward(dy: npt.ArrayLike | Tensor, tokens: npt.ArrayLike, vocabulary_size: int) -> Tensor:
+    """Gradient of ``embedding[tokens]``: ``dy`` rows summed per token id, in position order."""
+    return Tensor(
+        _kernels.embedding_backward(_float32(dy), np.ascontiguousarray(tokens, dtype=np.int64), vocabulary_size)
+    )
+
+
+def sum_squares(values: npt.ArrayLike | Tensor) -> float:
+    """Sum of squares in index order with a double accumulator."""
+    return float(_kernels.sum_squares(_float32(values)))
+
+
+adamw_step = _kernels.adamw_step

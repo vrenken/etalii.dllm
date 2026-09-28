@@ -21,7 +21,7 @@ cd etalii.dllm
 python -m venv .venv
 source .venv/bin/activate          # Windows (PowerShell): .venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
-pytest                              # optional: about 270 tests, a few seconds
+pytest                              # optional: about 300 tests, a few seconds
 ```
 
 Check the installation with the built-in placeholder model (a tiny random bigram table, so its text is gibberish,
@@ -124,6 +124,22 @@ It exposes two tools: `generate` (continue a prompt) and `model_info` (model id 
 client starts it outside the virtual environment, use the full path to `.venv/bin/dllm-mcp` (Windows:
 `.venv\Scripts\dllm-mcp.exe`).
 
+## 6. Fine-tune
+
+Train an imported model further on your own text. The run is reproducible: the same model, data and options give a
+byte-identical result, also when it is interrupted and resumed from a checkpoint.
+
+```bash
+# my-data.jsonl: one {"text": "..."} or {"messages": [{"role": "user", ...}, {"role": "assistant", ...}]} per line
+dllm finetune smollm2-135m.dllm --data my-data.jsonl -o smollm2-135m-tuned.dllm \
+    --steps 50 --batch-size 4 --sequence-length 128 --learning-rate 1e-4 --checkpoint run.dllmckpt
+dllm inspect smollm2-135m-tuned.dllm
+dllm --model smollm2-135m-tuned.dllm chat "..."
+```
+
+Each step prints its loss. `--resume run.dllmckpt` continues a stopped run. All options, the data format and how
+the reproducibility is achieved: [training](training.md).
+
 ## What does not work yet
 
 - The importer, decoder, tokenizer and chat templates are tested against reference implementations on small
@@ -132,7 +148,9 @@ client starts it outside the virtual environment, use the full path to `.venv/bi
   open an issue with the `dllm inspect` output.
 - Speed: the kernels are single-threaded and unoptimised (Phase 6). For SmolLM2-135M expect roughly 2 to 3 tokens
   per second, both for reading the prompt and for generating (measured on one cloud CPU core), and proportionally
-  slower for bigger models. The KV cache is in place, so long answers do not slow down per token.
+  slower for bigger models. The KV cache is in place, so long answers do not slow down per token. Fine-tuning
+  costs roughly three times as much per token as reading a prompt, so on SmolLM2-135M keep runs to a few thousand
+  tokens for now.
 - Streaming, tool/function calling, structured output and an Anthropic Messages endpoint are Phase 4; the MCP
   server has no chat tool yet.
 - Models with SentencePiece tokenizers (TinyLlama, Llama 2), sliding-window attention, YaRN RoPE scaling or
