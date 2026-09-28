@@ -32,12 +32,17 @@ COLORS = ["GREEN", "BLUE", "PURPLE", "GRAY", "YELLOW", "ORANGE", "RED"]
 
 def request(method, url, body=None, accept="application/vnd.github+json"):
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method, headers={
-        "Authorization": f"bearer {TOKEN}",
-        "Accept": accept,
-        "Content-Type": "application/json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    })
+    req = urllib.request.Request(
+        url,
+        data=data,
+        method=method,
+        headers={
+            "Authorization": f"bearer {TOKEN}",
+            "Accept": accept,
+            "Content-Type": "application/json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
     with urllib.request.urlopen(req) as response:
         return json.load(response)
 
@@ -60,31 +65,50 @@ def rest_all(path):
 
 
 def ensure_project():
-    data = graphql("""query($owner: String!, $name: String!) {
-        user(login: $owner) { id projectsV2(first: 100) { nodes { id number title url repositories(first: 20) { nodes { id } } } } }
+    data = graphql(
+        """query($owner: String!, $name: String!) {
+        user(login: $owner) { id projectsV2(first: 100) { nodes {
+            id number title url repositories(first: 20) { nodes { id } } } } }
         repository(owner: $owner, name: $name) { id }
-    }""", owner=OWNER, name=NAME)
+    }""",
+        owner=OWNER,
+        name=NAME,
+    )
     repo_id = data["repository"]["id"]
     project = next((p for p in data["user"]["projectsV2"]["nodes"] if p["title"] == TITLE), None)
     if project is None:
-        project = graphql("""mutation($owner: ID!, $title: String!) {
+        project = graphql(
+            """mutation($owner: ID!, $title: String!) {
             createProjectV2(input: {ownerId: $owner, title: $title}) { projectV2 { id number title url } }
-        }""", owner=data["user"]["id"], title=TITLE)["createProjectV2"]["projectV2"]
+        }""",
+            owner=data["user"]["id"],
+            title=TITLE,
+        )["createProjectV2"]["projectV2"]
         print(f"Created project {project['url']}")
-        graphql("""mutation($id: ID!, $desc: String!, $readme: String!) {
+        graphql(
+            """mutation($id: ID!, $desc: String!, $readme: String!) {
             updateProjectV2(input: {projectId: $id, shortDescription: $desc, readme: $readme}) { projectV2 { id } }
-        }""", id=project["id"], desc="Roadmap and progress of the deterministic LLM",
-                readme=f"Synced automatically from https://github.com/{REPO} issues and milestones by "
-                       "`.github/workflows/project-sync.yml`. Edit issues and milestones there, not here.")
+        }""",
+            id=project["id"],
+            desc="Roadmap and progress of the deterministic LLM",
+            readme=f"Synced automatically from https://github.com/{REPO} issues and milestones by "
+            "`.github/workflows/project-sync.yml`. Edit issues and milestones there, not here.",
+        )
     if any(r["id"] == repo_id for r in project.get("repositories", {}).get("nodes", [])):
         return project
     try:
-        graphql("""mutation($p: ID!, $r: ID!) {
+        graphql(
+            """mutation($p: ID!, $r: ID!) {
             linkProjectV2ToRepository(input: {projectId: $p, repositoryId: $r}) { repository { id } }
-        }""", p=project["id"], r=repo_id)
+        }""",
+            p=project["id"],
+            r=repo_id,
+        )
     except RuntimeError as error:  # already linked, or the token may not link repositories
-        print(f"::notice::Project not linked to the repository ({error.args[0][:200]}). "
-              "Link it once by hand: project > ... > Settings > Linked repositories.")
+        print(
+            f"::notice::Project not linked to the repository ({error.args[0][:200]}). "
+            "Link it once by hand: project > ... > Settings > Linked repositories."
+        )
     return project
 
 
@@ -97,15 +121,22 @@ def ensure_fields(project, phase_names):
     fields = {f["name"]: f for f in graphql(FIELDS_QUERY, id=project["id"])["node"]["fields"]["nodes"] if f}
     if "Phase" not in fields:
         options = [{"name": n, "color": COLORS[i % len(COLORS)], "description": ""} for i, n in enumerate(phase_names)]
-        graphql("""mutation($p: ID!, $o: [ProjectV2SingleSelectFieldOptionInput!]) {
+        graphql(
+            """mutation($p: ID!, $o: [ProjectV2SingleSelectFieldOptionInput!]) {
             createProjectV2Field(input: {projectId: $p, dataType: SINGLE_SELECT, name: "Phase",
                                          singleSelectOptions: $o}) { projectV2Field { __typename } } }""",
-                p=project["id"], o=options)
+            p=project["id"],
+            o=options,
+        )
     for name in ("Start date", "Target date"):
         if name not in fields:
-            graphql("""mutation($p: ID!, $n: String!) {
+            graphql(
+                """mutation($p: ID!, $n: String!) {
                 createProjectV2Field(input: {projectId: $p, dataType: DATE, name: $n}) { projectV2Field { __typename } }
-            }""", p=project["id"], n=name)
+            }""",
+                p=project["id"],
+                n=name,
+            )
     fields = {f["name"]: f for f in graphql(FIELDS_QUERY, id=project["id"])["node"]["fields"]["nodes"] if f}
     missing = [n for n in phase_names if n not in {o["name"] for o in fields["Phase"]["options"]}]
     if missing:
@@ -116,11 +147,15 @@ def ensure_fields(project, phase_names):
 def existing_items(project):
     items, cursor = {}, None
     while True:
-        page = graphql("""query($id: ID!, $after: String) { node(id: $id) { ... on ProjectV2 {
+        page = graphql(
+            """query($id: ID!, $after: String) { node(id: $id) { ... on ProjectV2 {
             items(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { id
                 content { ... on Issue { id } ... on PullRequest { id } }
                 status: fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
-            } } } } }""", id=project["id"], after=cursor)["node"]["items"]
+            } } } } }""",
+            id=project["id"],
+            after=cursor,
+        )["node"]["items"]
         for node in page["nodes"]:
             if node["content"]:
                 items[node["content"]["id"]] = node
@@ -130,9 +165,15 @@ def existing_items(project):
 
 
 def set_value(project, item_id, field, value):
-    graphql("""mutation($p: ID!, $i: ID!, $f: ID!, $v: ProjectV2FieldValue!) {
+    graphql(
+        """mutation($p: ID!, $i: ID!, $f: ID!, $v: ProjectV2FieldValue!) {
         updateProjectV2ItemFieldValue(input: {projectId: $p, itemId: $i, fieldId: $f, value: $v}) {
-            projectV2Item { id } } }""", p=project["id"], i=item_id, f=field["id"], v=value)
+            projectV2Item { id } } }""",
+        p=project["id"],
+        i=item_id,
+        f=field["id"],
+        v=value,
+    )
 
 
 def option(field, name):
@@ -148,8 +189,10 @@ def ensure_roadmap_view(project):
         request("POST", url, {"name": "Roadmap", "layout": "roadmap"})
         print("Created Roadmap view")
     except urllib.error.HTTPError as error:
-        print(f"::notice::Could not create the Roadmap view through the API ({error.code}). Add it once by hand: "
-              f"{project['url']} > New view > Roadmap, dates 'Start date' to 'Target date', group by Phase.")
+        print(
+            f"::notice::Could not create the Roadmap view through the API ({error.code}). Add it once by hand: "
+            f"{project['url']} > New view > Roadmap, dates 'Start date' to 'Target date', group by Phase."
+        )
 
 
 def main():
@@ -169,9 +212,12 @@ def main():
     for issue in sorted(issues, key=lambda i: i["number"]):
         item = items.get(issue["node_id"])
         if item is None:
-            item_id = graphql("""mutation($p: ID!, $c: ID!) {
+            item_id = graphql(
+                """mutation($p: ID!, $c: ID!) {
                 addProjectV2ItemById(input: {projectId: $p, contentId: $c}) { item { id } } }""",
-                              p=project["id"], c=issue["node_id"])["addProjectV2ItemById"]["item"]["id"]
+                p=project["id"],
+                c=issue["node_id"],
+            )["addProjectV2ItemById"]["item"]["id"]
             status = None
         else:
             item_id, status = item["id"], (item["status"] or {}).get("name")
