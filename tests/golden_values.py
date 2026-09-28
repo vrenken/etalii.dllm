@@ -57,5 +57,8 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "import": "2e4d93db18c1ce202f44a8fd4da1333532827e2b84b7979ddcba6c918bfc132f",
         "chat": "cb555f4a6519d8b67bc7e1c304b08c0c13852cea297e0fdc644b0b77f70a8f1d",
     },
-    "qwen2.5": {"import": "", "chat": ""},
+    "qwen2.5": {
+        "import": "9bf78203fabbc1d93a5f387456ff1d755d7fef36396351c911f51656c898eb99",
+        "chat": "7a75f8d55b99478a282d601c155df0fd6c5066b613db230b610612abbdc05c37",
+    },
 }
