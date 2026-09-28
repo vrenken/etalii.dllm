@@ -16,10 +16,13 @@ Model Context Protocol), so existing clients and agents can use it without chang
 
 ## Status
 
-Phase 1 (kernels) done. The full pipeline (tokenizer → model → sampler → CLI / HTTP API / MCP server) runs end to end and is
-proven run-to-run bit-exact by CI (on Linux, Windows and macOS, which today even agree with each other). The model itself is still a seeded placeholder (a bigram
-table), so its output is noise. The transformer building blocks (aligned `Tensor`, batch-invariant matmul, RMSNorm,
-SiLU/GELU, RoPE and grouped-query attention, see [docs/kernels.md](docs/kernels.md)) are in place. Next on the roadmap: a transformer that runs imported small open-weight models.
+Phase 1 (kernels) done, Phase 2 (importing models) in progress. The full pipeline (tokenizer → model → sampler → CLI /
+HTTP API / MCP server) runs end to end and is proven run-to-run bit-exact by CI (on Linux, Windows and macOS, which
+today even agree with each other). The transformer building blocks (aligned `Tensor`, batch-invariant matmul,
+RMSNorm, SiLU/GELU, RoPE and grouped-query attention, see [docs/kernels.md](docs/kernels.md)) are in place, and so are
+`dllm import` (safetensors/GGUF to our [model.dllm](docs/model-format.md) format, with source and licence recorded)
+and a Llama/Qwen2 decoder whose KV cache cannot change its output. The default model is still a seeded placeholder
+(a bigram table) until the BPE tokenizer and chat templates of imported models land.
 
 ## Quick start
 
