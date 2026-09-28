@@ -102,6 +102,225 @@ inline double exp(double x) {
     return p * power_of_two(e);
 }
 
+// Natural logarithm: x = m * 2^e with m in [sqrt(1/2), sqrt(2)), then log(m) = 2 atanh(s), s = (m-1)/(m+1), from a
+// fixed 13-term odd series (|s| <= 0.172, so the last term is below 1e-19), plus e * ln2 with a two-part ln2.
+inline double log(double x) {
+    constexpr double ln2_hi = 6.93147180369123816490e-01;
+    constexpr double ln2_lo = 1.90821492927058770002e-10;
+    constexpr double sqrt_half = 7.07106781186547524401e-01;
+
+    if (x != x || x < 0.0) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    if (x == 0.0) {
+        return -std::numeric_limits<double>::infinity();
+    }
+    if (x == std::numeric_limits<double>::infinity()) {
+        return x;
+    }
+
+    int e = 0;
+    // Bring subnormals into the normal range before reading the exponent bits.
+    if (x < std::numeric_limits<double>::min()) {
+        x *= power_of_two(54);
+        e -= 54;
+    }
+    std::uint64_t bits;
+    std::memcpy(&bits, &x, sizeof(bits));
+    e += static_cast<int>((bits >> 52) & 0x7ff) - 1023;
+    bits = (bits & 0x000fffffffffffffULL) | 0x3ff0000000000000ULL;
+    double m;
+    std::memcpy(&m, &bits, sizeof(m));
+    // m is in [1, 2); fold it into [sqrt(1/2), sqrt(2)) so |s| stays small.
+    if (m >= 2.0 * sqrt_half) {
+        m *= 0.5;
+        e += 1;
+    }
+
+    const double s = (m - 1.0) / (m + 1.0);
+    const double s2 = s * s;
+    double p = 1.0 / 25.0;
+    p = p * s2 + 1.0 / 23.0;
+    p = p * s2 + 1.0 / 21.0;
+    p = p * s2 + 1.0 / 19.0;
+    p = p * s2 + 1.0 / 17.0;
+    p = p * s2 + 1.0 / 15.0;
+    p = p * s2 + 1.0 / 13.0;
+    p = p * s2 + 1.0 / 11.0;
+    p = p * s2 + 1.0 / 9.0;
+    p = p * s2 + 1.0 / 7.0;
+    p = p * s2 + 1.0 / 5.0;
+    p = p * s2 + 1.0 / 3.0;
+    const double log_m = 2.0 * s + 2.0 * s * s2 * p;
+    return (e * ln2_hi + log_m) + e * ln2_lo;
+}
+
+namespace detail {
+
+// sin and cos of r in [-pi/4, pi/4] from fixed Taylor polynomials (Horner in r^2); the first omitted terms are
+// below 1e-19.
+inline double sin_kernel(double r) {
+    const double r2 = r * r;
+    double p = -1.0 / 1307674368000.0;           // -1/15!
+    p = p * r2 + 1.0 / 6227020800.0;             // 1/13!
+    p = p * r2 - 1.0 / 39916800.0;               // -1/11!
+    p = p * r2 + 1.0 / 362880.0;                 // 1/9!
+    p = p * r2 - 1.0 / 5040.0;                   // -1/7!
+    p = p * r2 + 1.0 / 120.0;                    // 1/5!
+    p = p * r2 - 1.0 / 6.0;                      // -1/3!
+    return r + r * r2 * p;
+}
+
+inline double cos_kernel(double r) {
+    const double r2 = r * r;
+    double p = 1.0 / 20922789888000.0;           // 1/16!
+    p = p * r2 - 1.0 / 87178291200.0;            // -1/14!
+    p = p * r2 + 1.0 / 479001600.0;              // 1/12!
+    p = p * r2 - 1.0 / 3628800.0;                // -1/10!
+    p = p * r2 + 1.0 / 40320.0;                  // 1/8!
+    p = p * r2 - 1.0 / 720.0;                    // -1/6!
+    p = p * r2 + 1.0 / 24.0;                     // 1/4!
+    return (1.0 - 0.5 * r2) + r2 * r2 * p;
+}
+
+// x = n * pi/2 + r with |r| <= pi/4 (Cody-Waite, the three 33-bit parts of pi/2 from fdlibm, so n * part is exact
+// for |n| < 2^20, i.e. |x| below about 1.6e6). Larger arguments stay deterministic but lose accuracy.
+inline double reduce_half_pi(double x, int* quadrant) {
+    constexpr double two_over_pi = 6.36619772367581382433e-01;
+    constexpr double pio2_1 = 1.57079632673412561417e+00;
+    constexpr double pio2_2 = 6.07710050630396597660e-11;
+    constexpr double pio2_3 = 2.02226624871116645580e-21;
+    constexpr double pio2_3t = 8.47842766036889956997e-32;
+
+    const double nd = x * two_over_pi;
+    const double n = nd >= 0 ? static_cast<double>(static_cast<long long>(nd + 0.5))
+                             : static_cast<double>(static_cast<long long>(nd - 0.5));
+    const double r = (((x - n * pio2_1) - n * pio2_2) - n * pio2_3) - n * pio2_3t;
+    *quadrant = static_cast<int>(static_cast<long long>(n) & 3);
+    return r;
+}
+
+}  // namespace detail
+
+inline double sin(double x) {
+    if (x != x || x == std::numeric_limits<double>::infinity() || x == -std::numeric_limits<double>::infinity()) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    int quadrant;
+    const double r = detail::reduce_half_pi(x, &quadrant);
+    switch (quadrant) {
+        case 0: return detail::sin_kernel(r);
+        case 1: return detail::cos_kernel(r);
+        case 2: return -detail::sin_kernel(r);
+        default: return -detail::cos_kernel(r);
+    }
+}
+
+inline double cos(double x) {
+    if (x != x || x == std::numeric_limits<double>::infinity() || x == -std::numeric_limits<double>::infinity()) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    int quadrant;
+    const double r = detail::reduce_half_pi(x, &quadrant);
+    switch (quadrant) {
+        case 0: return detail::cos_kernel(r);
+        case 1: return -detail::sin_kernel(r);
+        case 2: return -detail::cos_kernel(r);
+        default: return detail::sin_kernel(r);
+    }
+}
+
+// tanh from exp: tanh(x) = sign(x) * (1 - 2 / (e^(2|x|) + 1)); a Taylor polynomial near 0 avoids cancellation.
+inline double tanh(double x) {
+    if (x != x) {
+        return x;
+    }
+    const double a = x < 0 ? -x : x;
+    double t;
+    if (a < 0.125) {
+        // tanh(a) = a - a^3/3 + 2a^5/15 - 17a^7/315 + 62a^9/2835 - 1382a^11/155925 + 21844a^13/6081075 - ...
+        const double a2 = a * a;
+        double p = -929569.0 / 638512875.0;
+        p = p * a2 + 21844.0 / 6081075.0;
+        p = p * a2 - 1382.0 / 155925.0;
+        p = p * a2 + 62.0 / 2835.0;
+        p = p * a2 - 17.0 / 315.0;
+        p = p * a2 + 2.0 / 15.0;
+        p = p * a2 - 1.0 / 3.0;
+        t = a + a * a2 * p;
+    } else if (a > 22.0) {
+        t = 1.0;
+    } else {
+        t = 1.0 - 2.0 / (dllm::exp(2.0 * a) + 1.0);
+    }
+    return x < 0 ? -t : t;
+}
+
+// Logistic sigmoid 1 / (1 + e^-x), evaluated so the exponent is never large and positive.
+inline double sigmoid(double x) {
+    if (x >= 0) {
+        return 1.0 / (1.0 + dllm::exp(-x));
+    }
+    const double e = dllm::exp(x);
+    return e / (1.0 + e);
+}
+
+namespace detail {
+
+// erfc(a) for a >= 2.5: e^(-a^2) / sqrt(pi) * K(a) with K the Laplace continued fraction
+// 1 / (a + (1/2) / (a + 1 / (a + (3/2) / (a + ...)))), evaluated backwards from a fixed depth of 80.
+inline double erfc_tail(double a) {
+    constexpr double inv_sqrt_pi = 5.64189583547756286948e-01;
+    double k = a;
+    for (int n = 80; n >= 1; --n) {
+        k = a + (0.5 * n) / k;
+    }
+    return dllm::exp(-a * a) * inv_sqrt_pi / k;
+}
+
+}  // namespace detail
+
+// Error function. |x| < 2.5: the Maclaurin series erf(x) = 2/sqrt(pi) sum (-1)^n x^(2n+1) / (n! (2n+1)) with a fixed
+// 60 terms; otherwise 1 - erfc(|x|) from the continued fraction (exactly 1 beyond |x| = 6).
+inline double erf(double x) {
+    constexpr double two_over_sqrt_pi = 1.12837916709551257390e+00;
+
+    if (x != x) {
+        return x;
+    }
+    const double a = x < 0 ? -x : x;
+    double result;
+    if (a < 2.5) {
+        const double a2 = a * a;
+        double term = a;  // (-1)^n a^(2n+1) / n!
+        double total = a;
+        for (int n = 1; n < 60; ++n) {
+            term = -term * a2 / n;
+            total += term / (2 * n + 1);
+        }
+        result = two_over_sqrt_pi * total;
+    } else if (a > 6.0) {
+        result = 1.0;
+    } else {
+        result = 1.0 - detail::erfc_tail(a);
+    }
+    return x < 0 ? -result : result;
+}
+
+// Complementary error function 1 - erf(x), accurate in relative terms for large positive x (no cancellation).
+inline double erfc(double x) {
+    if (x != x) {
+        return x;
+    }
+    if (x < 2.5) {
+        return 1.0 - dllm::erf(x);
+    }
+    if (x > 27.3) {
+        return 0.0;
+    }
+    return detail::erfc_tail(x);
+}
+
 // Numerically stable softmax: subtract the maximum, exponentiate, normalise by the sequential sum.
 inline void softmax(const float* logits, float* out, double* scratch, std::size_t n) {
     const double max = logits[argmax(logits, n)];
