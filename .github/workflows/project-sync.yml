@@ -10,6 +10,10 @@ on:
   schedule:
     - cron: "17 5 * * *"
   workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/project-sync.yml
+      - .github/scripts/sync_project.py
 
 concurrency:
   group: project-sync
