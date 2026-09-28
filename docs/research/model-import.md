@@ -1,7 +1,8 @@
 # Importing existing open-weight models
 
 EtAlii.Dllm will not train its large statistical base from scratch. Training even a small useful model needs far
-more data and compute than this project should spend. Instead we **import the weights of existing small open-weight
+more data and compute than this project should spend, and **collecting or scraping training data ourselves is out
+of scope**. Imported models are the data source. Instead we **import the weights of existing small open-weight
 LLMs, convert them to our own format and run them deterministically**. Our value is the deterministic engine, not
 new weights.
 
@@ -50,8 +51,8 @@ Jinja chat template, which also defines its tool-calling format and so feeds the
 
 ## Beyond inference
 
-- **Fine-tuning** (optional, later) on top of imported weights with deterministic training, instead of training
-  from zero.
+- **Fine-tuning** (optional, later) on top of imported weights with deterministic training, using only existing
+  published datasets or data distilled from imported models, never data we harvest ourselves.
 - **Distillation data**: an imported model can generate deterministic training data or logits for our own smaller
   experimental models, with the source model's licence applying to that data.
 
