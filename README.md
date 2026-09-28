@@ -18,7 +18,7 @@ Model Context Protocol), so existing clients and agents can use it without chang
 
 Bootstrap. The full pipeline (tokenizer → model → sampler → CLI / HTTP API / MCP server) runs end to end and is
 proven run-to-run bit-exact by CI (on Linux, Windows and macOS, which today even agree with each other). The model itself is still a seeded placeholder (a bigram
-table), so its output is noise; the transformer is the next milestone on the roadmap.
+table), so its output is noise. Next on the roadmap: a transformer that runs imported small open-weight models.
 
 ## Quick start
 
@@ -52,7 +52,7 @@ Run the same request twice and compare: the responses, including `id` and `syste
 | `src/EtAlii.Dllm.Mcp` | Model Context Protocol server (stdio) exposing `generate` and `model_info` tools |
 | `src/EtAlii.Dllm.Cli` | `dllm` command line tool |
 | `tests/` | xUnit tests, including golden-hash reproducibility tests |
-| `docs/research/` | Research notes: [deterministic inference](docs/research/deterministic-inference.md), [compatibility targets](docs/research/compatibility.md) |
+| `docs/research/` | Research notes: [deterministic inference](docs/research/deterministic-inference.md), [compatibility targets](docs/research/compatibility.md), [model import](docs/research/model-import.md) |
 
 ## How determinism is achieved
 
@@ -73,8 +73,8 @@ Summarised from the [research notes](docs/research/deterministic-inference.md):
 | --- | --- |
 | 0. Bootstrap ✅ | Solution skeleton, deterministic RNG and math, sampler, byte tokenizer, placeholder model, OpenAI-style API, MCP server, CI with golden hashes |
 | 1. Kernels | Tensor type, deterministic matmul with fixed tiling, RMSNorm, RoPE with deterministic `sin`/`cos`, SiLU/GELU, attention with fixed-order softmax |
-| 2. Transformer inference | Llama-style decoder with KV cache, BPE tokenizer (`tokenizer.json`/tiktoken), loading safetensors and GGUF weights, run small open models (e.g. SmolLM, TinyStories) bit-exactly |
-| 3. Training from scratch | Deterministic backprop and AdamW, fixed data order, train a small model end to end with reproducible checkpoints |
+| 2. Import existing models | Llama-style decoder with KV cache; `dllm import` converting small open-weight models (SmolLM2, Qwen2.5, TinyLlama, ...) from safetensors/GGUF to our own format with licence metadata; BPE tokenizer and chat templates. See [model import](docs/research/model-import.md) |
+| 3. Fine-tuning (optional) | Deterministic backprop and AdamW on top of imported weights, fixed data order, reproducible checkpoints |
 | 4. API parity | Streaming (SSE), tool/function calling, JSON-schema structured output, Anthropic Messages endpoint, embeddings |
 | 5. MCP, both directions | Richer MCP server (prompts, resources); MCP client host so the model can call external tools during a chat |
 | 6. Performance | SIMD and multi-threading with fixed, batch-invariant reduction order, integer quantisation (associative int32 accumulation), GPU kernels that keep bit-exactness |

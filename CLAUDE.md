@@ -8,6 +8,8 @@ EtAlii.Dllm is a deterministic LLM written from scratch in C# on .NET 10. The on
 on the same hardware, the same weights, prompt and context window produce bit-identical output on every run,
 regardless of load, batching or thread scheduling. Identical output across different hardware is not required.
 Vision and roadmap: `README.md`. Background: `docs/research/`.
+Weights come from importing small open-weight models (Apache 2.0/MIT by default), not from training from scratch;
+see `docs/research/model-import.md`. `huggingface.co` is blocked by the default cloud network policy.
 
 ## Commands
 
