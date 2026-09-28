@@ -61,3 +61,6 @@ If a hash changes:
   them, and justify any suppression in a comment.
 - Test names use `Method_Behaviour` (CA1707 is disabled for tests only).
 - Work on a feature branch and open a draft PR against `develop` (the default branch).
+- Progress is tracked in the GitHub Project EtAlii.Dllm (see `docs/project-board.md`). Roadmap items are issues
+  labelled `roadmap`/`phase-N` under "Phase N" milestones; a PR that finishes one says `Closes #n`, and a README
+  roadmap change updates the matching issues/milestones.
