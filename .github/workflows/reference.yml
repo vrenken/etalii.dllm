@@ -1,0 +1,35 @@
+name: Reference models
+
+# Imports the real pinned models (SmolLM2-135M-Instruct, Qwen2.5-0.5B-Instruct) and compares tokenizer, chat
+# template, logits and greedy generation with Hugging Face transformers; pins our outputs as golden hashes.
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reference:
+    runs-on: ubuntu-latest
+    env:
+      DLLM_REFERENCE_MODELS: ${{ github.workspace }}/.reference-models
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build and install with the reference implementation (CPU torch)
+        run: pip install ".[dev,reference]" --extra-index-url https://download.pytorch.org/whl/cpu
+      - name: Cache the pinned model snapshots
+        uses: actions/cache@v4
+        with:
+          path: .reference-models
+          key: reference-models-${{ hashFiles('tests/test_reference_models.py') }}
+          restore-keys: reference-models-
+      - name: Download the pinned models (skipped for cached files)
+        run: python tests/test_reference_models.py "$DLLM_REFERENCE_MODELS"
+      - name: Compare with transformers
+        run: pytest tests/test_reference_models.py -v -rs
