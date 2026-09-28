@@ -33,8 +33,8 @@ Hugging Face repo (config.json, tokenizer.json, *.safetensors)  ─┐
 GGUF file (llama.cpp / Ollama)                                   ─┴─►  dllm import  ─►  model.dllm
 ```
 
-1. **Read.** safetensors is a JSON header followed by raw little-endian tensors, easy to parse in C# with no
-   dependencies. GGUF (key/value metadata + tensors, including quantised block formats) is the second reader.
+1. **Read.** safetensors is a JSON header followed by raw little-endian tensors, easy to parse with no
+   dependencies (NumPy can map the tensors directly). GGUF (key/value metadata + tensors, including quantised block formats) is the second reader.
 2. **Map.** Translate the source architecture (`config.json`: hidden size, heads, KV heads, RoPE θ and scaling, norm
    epsilon, tied embeddings) to our transformer description. Unsupported features fail the import loudly.
 3. **Convert.** bf16 → fp32 and fp16 → fp32 are exact, so conversion loses nothing. Any quantisation we add uses

@@ -1,8 +1,0 @@
-<Project>
-  <Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)../'))" />
-  <PropertyGroup>
-    <IsPackable>false</IsPackable>
-    <!-- Underscores in test names (Method_Behaviour) are intentional. -->
-    <NoWarn>$(NoWarn);CA1707</NoWarn>
-  </PropertyGroup>
-</Project>

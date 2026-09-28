@@ -26,10 +26,10 @@ its portable choices cost nothing yet; that may change when performance work sta
 | Parallel reductions | Atomics, split-K matrix multiplication and tree reductions whose shape depends on thread count or scheduling reorder sums. |
 | Batch-size dependent kernels | Kernels pick different tiling or reduction strategies by batch size, so a request's result depends on its neighbours. This, not GPU "randomness", is the main cause of non-determinism in production LLM serving (Thinking Machines, 2025). |
 | Kernel autotuning | Libraries benchmark several algorithms at start-up and pick the fastest, which may differ per run or machine. |
-| SIMD width | A vectorised sum over 4, 8 or 16 lanes groups terms differently. In .NET `Vector<T>` has a hardware-dependent width (128/256/512 bits). |
+| SIMD width and BLAS | A vectorised sum over 4, 8 or 16 lanes groups terms differently. NumPy selects SIMD kernels at runtime by CPU and uses pairwise summation; BLAS libraries (OpenBLAS, MKL) choose block sizes and thread splits by matrix shape and thread count, so the same row can give different bits in a different batch. |
 | Fused multiply-add | `fma(a, b, c)` rounds once, `a * b + c` twice. Compilers that contract expressions on some targets and not others give different bits. |
 | Transcendental functions | `exp`, `log`, `sin`, `tanh` come from the platform C runtime; they are not required to be correctly rounded and differ between glibc, MSVC and Apple libm. |
-| Random number generators | Library RNGs are not specified across versions (e.g. `System.Random`), and parallel draws consume the stream in scheduling order. |
+| Random number generators | Library RNGs are not specified across versions (e.g. derived distributions in `numpy.random` and `std::` distributions), and parallel draws consume the stream in scheduling order. |
 | Sampling | Unstable sorts with ties, float-summed cumulative probabilities (top-p) and threshold comparisons amplify tiny differences. |
 | Denormals / flush-to-zero | CPU and GPU modes that flush subnormals change results for tiny values. |
 | Text handling | Unicode normalisation, culture-sensitive parsing and hash-randomised dictionary order in tokenizers. |
@@ -53,8 +53,12 @@ its portable choices cost nothing yet; that may change when performance work sta
 
 ## Rules adopted by EtAlii.Dllm
 
-1. **Prefer own transcendental functions** (`DeterministicMath`: range reduction + fixed polynomial) over
-   `Math.Exp`, `MathF.Tanh` and friends. On one machine the platform versions are repeatable too, but a runtime or
+0. **Arithmetic that reduces lives in C++**, compiled with `-ffp-contract=off` / `/fp:precise` and no fast-math.
+   Python and NumPy may orchestrate and do elementwise work (which is correctly rounded per element), but never sums,
+   matmuls or other reductions in inference paths; no BLAS.
+
+1. **Prefer own transcendental functions** (`cpp/include/dllm/math.hpp`: range reduction + fixed polynomial) over
+   `std::exp`, `math.exp`, `numpy.exp` and friends. On one machine the platform versions are repeatable too, but a runtime or
    C library update can silently change them; our own keep results stable across upgrades.
 2. **Hardware-specific instructions are allowed** (SIMD of any width, FMA), provided the code path chosen on a
    given machine never varies between runs, e.g. selected once from CPU capabilities, never by timing or autotuning.
@@ -66,7 +70,7 @@ its portable choices cost nothing yet; that may change when performance work sta
 5. **Specified RNG.** xoshiro256\*\* seeded by SplitMix64 for sequential streams; a counter-based generator
    (Philox) when draws must be parallel, so each draw depends only on (seed, counter).
 6. **Total-order sampling.** Candidates sorted by (probability desc, token id asc). Cumulative sums in `double`.
-7. **Culture-invariant, ordinal text handling** in tokenizers; no reliance on `Dictionary` enumeration order.
+7. **Culture-invariant, ordinal text handling** in tokenizers; no reliance on set iteration order or `PYTHONHASHSEED`.
 8. **Golden hashes.** Tests fix SHA-256 hashes of weights, logits and generated tokens, plus tests that the same
    request gives the same output alone, in a batch and under concurrency. A change in any hash is either a bug or an
    intentional, documented change. Once kernels become hardware-specific, hashes may be keyed per CPU/GPU family.

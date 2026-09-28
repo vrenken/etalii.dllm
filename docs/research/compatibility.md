@@ -33,8 +33,8 @@ Anthropic SDK clients can use the model. Phase 4.
 
 Two directions:
 
-1. **Dllm as MCP server** (implemented). `src/EtAlii.Dllm.Mcp` uses the official C# SDK (`ModelContextProtocol`
-   NuGet package) over stdio and exposes `generate` and `model_info`, both annotated read-only and idempotent,
+1. **Dllm as MCP server** (implemented). `src/etalii_dllm/mcp_server.py` uses the official Python SDK (`mcp`
+   package, `MCPServer`) over stdio and exposes `generate` and `model_info`, both annotated read-only and idempotent,
    which is literally true here. Next: MCP prompts and resources, and the HTTP (streamable) transport.
 2. **Dllm as the model behind an MCP host** (planned, Phase 5). The model emits tool calls, a host connects to MCP
    servers, runs the calls and feeds results back. Determinism then covers the model's decisions; tool results are

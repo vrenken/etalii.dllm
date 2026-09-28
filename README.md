@@ -1,6 +1,6 @@
 # EtAlii.Dllm
 
-**A deterministic large language model, built from scratch in C#/.NET.**
+**A deterministic large language model, built from scratch in Python with C++ kernels.**
 
 Mainstream LLM inference is not reproducible: the same prompt, the same weights and even the same `seed` can
 give different answers from one request to the next. EtAlii.Dllm treats bit-exact reproducibility as a hard
@@ -22,46 +22,56 @@ table), so its output is noise. Next on the roadmap: a transformer that runs imp
 
 ## Quick start
 
-Requires the [.NET 10 SDK](https://dotnet.microsoft.com/download).
+Requires Python 3.11+, CMake and a C++17 compiler (the numeric kernels are a C++ extension built on install).
 
 ```bash
-dotnet build
-dotnet test
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+pytest
 
 # Command line
-dotnet run --project src/EtAlii.Dllm.Cli -- info
-dotnet run --project src/EtAlii.Dllm.Cli -- generate --prompt "Hello" --temperature 0.8 --seed 7
+dllm info
+dllm generate --prompt "Hello" --temperature 0.8 --seed 7
 
 # OpenAI-compatible HTTP server on http://localhost:5080
-dotnet run --project src/EtAlii.Dllm.Server
+dllm-server
 curl http://localhost:5080/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"model":"dllm","messages":[{"role":"user","content":"Hi"}],"temperature":0.7,"seed":5}'
 
 # MCP server over stdio, e.g. registered with Claude Code
-claude mcp add dllm -- dotnet run --project src/EtAlii.Dllm.Mcp
+claude mcp add dllm -- dllm-mcp
 ```
 
 Run the same request twice and compare: the responses, including `id` and `system_fingerprint`, are identical.
+
+## Why Python and C++
+
+Python is where the model ecosystem lives: loading safetensors/GGUF, tokenizers, reference implementations to
+compare against, the official MCP SDK and FastAPI for the HTTP API. Deterministic arithmetic cannot be left to
+NumPy or BLAS, whose reduction order depends on array size, thread count and library version, so every kernel that
+reduces (sums, dot products, softmax, later matmul and attention) is written in C++ with a fixed order and exposed
+to Python through [nanobind](https://github.com/wjakob/nanobind). Python orchestrates; C++ computes.
 
 ## Repository layout
 
 | Path | What it is |
 | --- | --- |
-| `src/EtAlii.Dllm.Core` | Deterministic numerics, RNG, sampler, tokenizer, models, generation loop |
-| `src/EtAlii.Dllm.Server` | OpenAI-compatible HTTP API (`/v1/models`, `/v1/chat/completions`) |
-| `src/EtAlii.Dllm.Mcp` | Model Context Protocol server (stdio) exposing `generate` and `model_info` tools |
-| `src/EtAlii.Dllm.Cli` | `dllm` command line tool |
-| `tests/` | xUnit tests, including golden-hash reproducibility tests |
+| `cpp/` | C++ kernels: `include/dllm/random.hpp` (RNG), `include/dllm/math.hpp` (exp, sum, dot, softmax), `kernels.cpp` (Python bindings) |
+| `src/etalii_dllm/` | Python package: `numerics`, `sampling`, `tokenization`, `models`, `generation`, `chat`, `engine` (shared facade) |
+| `src/etalii_dllm/server/` | OpenAI-compatible HTTP API (`/v1/models`, `/v1/chat/completions`), FastAPI |
+| `src/etalii_dllm/mcp_server.py` | Model Context Protocol server (stdio, official `mcp` SDK) exposing `generate` and `model_info` tools |
+| `src/etalii_dllm/cli.py` | `dllm` command line tool |
+| `tests/` | pytest suite, including golden-hash reproducibility tests |
 | `docs/research/` | Research notes: [deterministic inference](docs/research/deterministic-inference.md), [compatibility targets](docs/research/compatibility.md), [model import](docs/research/model-import.md) |
 
 ## How determinism is achieved
 
 Summarised from the [research notes](docs/research/deterministic-inference.md):
 
-- **Own random numbers.** A specified generator (xoshiro256\*\* seeded by SplitMix64) instead of `System.Random`.
+- **Own random numbers.** A specified generator (xoshiro256\*\* seeded by SplitMix64) instead of `random` or `numpy.random`.
 - **Own transcendental functions.** `exp` (and later `sin`, `cos`, `log`) built from IEEE basic operations only.
   Not strictly needed on one machine, but cheap, and it keeps runtime or library updates from shifting results.
-- **Fixed reduction order.** Sums, dot products and softmax accumulate in one documented order, never in an order
+- **Fixed reduction order.** Sums, dot products and softmax run in C++ and accumulate in one documented order, never in an order
   chosen by thread scheduling or batch size (batch invariance), so concurrent requests cannot change each other's output.
 - **Total-order sampling.** Ties break on token id, so sorting never depends on algorithm stability.
 - **Golden hashes in CI.** Tests assert SHA-256 hashes of weights and generated tokens; any drift fails the build.

@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
-# Installs the .NET 10 SDK in Claude Code cloud sessions, where it is not preinstalled.
-# builds.dotnet.microsoft.com is blocked by the default network policy there, so use the Ubuntu package.
+# Prepares Claude Code cloud sessions: a Python virtual environment with the package installed in editable mode,
+# which also compiles the C++ kernels (needs cmake and a C++ compiler, both preinstalled in the cloud image).
 set -euo pipefail
 
 if [ "${CLAUDE_CODE_REMOTE:-}" != "true" ]; then
   exit 0
 fi
 
-if ! command -v dotnet >/dev/null 2>&1 || ! dotnet --list-sdks | grep -q '^10\.'; then
-  apt-get update -qq >/dev/null 2>&1 || true
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq dotnet-sdk-10.0 >/dev/null
-fi
-
 cd "${CLAUDE_PROJECT_DIR:-.}"
-dotnet restore --verbosity quiet
+PYTHON=$(command -v python3.12 || command -v python3)
+if [ ! -x .venv/bin/python ]; then
+  "$PYTHON" -m venv .venv
+fi
+.venv/bin/pip install -q --upgrade pip
+.venv/bin/pip install -q scikit-build-core nanobind
+.venv/bin/pip install -q --no-build-isolation -e ".[dev]"
+
+if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
+  echo "export PATH=\"$PWD/.venv/bin:\$PATH\"" >> "$CLAUDE_ENV_FILE"
+fi
