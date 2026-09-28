@@ -1,7 +1,7 @@
 namespace EtAlii.Dllm.Core.Numerics;
 
 /// <summary>
-/// Floating point kernels whose results are bit-exact on every platform.
+/// Floating point kernels with a fixed evaluation order. They are currently bit-exact on every platform as well.
 /// </summary>
 /// <remarks>
 /// Rules followed by every method here (see docs/research/deterministic-inference.md):

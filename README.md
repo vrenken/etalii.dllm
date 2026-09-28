@@ -6,7 +6,10 @@ Mainstream LLM inference is not reproducible: the same prompt, the same weights 
 give different answers from one request to the next. EtAlii.Dllm treats bit-exact reproducibility as a hard
 requirement instead of a best-effort hint:
 
-> Same weights + same request ⇒ the same tokens, bit for bit, on every run, every machine and every OS.
+> Same hardware + same weights + same prompt and context window ⇒ the same tokens, bit for bit, on every run.
+
+That holds regardless of server load, batch composition or thread scheduling. Identical output across *different*
+hardware is not a goal; where it comes for free (as it does today) it is a bonus, not a promise.
 
 The model speaks the protocols the rest of the ecosystem already uses (an OpenAI-compatible chat API and the
 Model Context Protocol), so existing clients and agents can use it without changes.
@@ -14,7 +17,7 @@ Model Context Protocol), so existing clients and agents can use it without chang
 ## Status
 
 Bootstrap. The full pipeline (tokenizer → model → sampler → CLI / HTTP API / MCP server) runs end to end and is
-proven bit-exact across Linux, Windows and macOS by CI. The model itself is still a seeded placeholder (a bigram
+proven run-to-run bit-exact by CI (on Linux, Windows and macOS, which today even agree with each other). The model itself is still a seeded placeholder (a bigram
 table), so its output is noise; the transformer is the next milestone on the roadmap.
 
 ## Quick start
@@ -56,25 +59,25 @@ Run the same request twice and compare: the responses, including `id` and `syste
 Summarised from the [research notes](docs/research/deterministic-inference.md):
 
 - **Own random numbers.** A specified generator (xoshiro256\*\* seeded by SplitMix64) instead of `System.Random`.
-- **Own transcendental functions.** `exp` (and later `sin`, `cos`, `log`) built from IEEE basic operations only,
-  because platform math libraries differ in the last bit.
+- **Own transcendental functions.** `exp` (and later `sin`, `cos`, `log`) built from IEEE basic operations only.
+  Not strictly needed on one machine, but cheap, and it keeps runtime or library updates from shifting results.
 - **Fixed reduction order.** Sums, dot products and softmax accumulate in one documented order, never in an order
-  chosen by thread scheduling, SIMD width or batch size.
+  chosen by thread scheduling or batch size (batch invariance), so concurrent requests cannot change each other's output.
 - **Total-order sampling.** Ties break on token id, so sorting never depends on algorithm stability.
-- **Golden hashes in CI.** Tests assert SHA-256 hashes of weights and generated tokens on three operating systems
-  and two CPU architectures; any drift fails the build.
+- **Golden hashes in CI.** Tests assert SHA-256 hashes of weights and generated tokens; any drift fails the build.
+  Hashes may become per-hardware once kernels use hardware-specific instructions.
 
 ## Roadmap
 
 | Phase | Goal |
 | --- | --- |
 | 0. Bootstrap ✅ | Solution skeleton, deterministic RNG and math, sampler, byte tokenizer, placeholder model, OpenAI-style API, MCP server, CI with golden hashes |
-| 1. Kernels | Tensor type, deterministic matmul with fixed tiling, RMSNorm, RoPE with portable `sin`/`cos`, SiLU/GELU, attention with fixed-order softmax |
+| 1. Kernels | Tensor type, deterministic matmul with fixed tiling, RMSNorm, RoPE with deterministic `sin`/`cos`, SiLU/GELU, attention with fixed-order softmax |
 | 2. Transformer inference | Llama-style decoder with KV cache, BPE tokenizer (`tokenizer.json`/tiktoken), loading safetensors and GGUF weights, run small open models (e.g. SmolLM, TinyStories) bit-exactly |
 | 3. Training from scratch | Deterministic backprop and AdamW, fixed data order, train a small model end to end with reproducible checkpoints |
 | 4. API parity | Streaming (SSE), tool/function calling, JSON-schema structured output, Anthropic Messages endpoint, embeddings |
 | 5. MCP, both directions | Richer MCP server (prompts, resources); MCP client host so the model can call external tools during a chat |
-| 6. Performance | Fixed-lane SIMD, multi-threading with deterministic partitioning, integer quantisation (associative int32 accumulation), GPU kernels that keep bit-exactness |
+| 6. Performance | SIMD and multi-threading with fixed, batch-invariant reduction order, integer quantisation (associative int32 accumulation), GPU kernels that keep bit-exactness |
 
 ## Working with Claude Code
 

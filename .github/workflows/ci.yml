@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # x64 Linux and Windows plus Arm64 macOS: the golden-value tests prove bit-exact output across all of them.
+        # The golden-value tests catch run-to-run drift; the current portable kernels also agree across these platforms.
         os: [ubuntu-latest, windows-latest, macos-latest]
     env:
       DOTNET_NOLOGO: true

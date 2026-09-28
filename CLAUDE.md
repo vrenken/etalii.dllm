@@ -5,7 +5,8 @@ Guidance for Claude Code sessions working in this repository.
 ## Project
 
 EtAlii.Dllm is a deterministic LLM written from scratch in C# on .NET 10. The one non-negotiable requirement:
-the same weights and the same request produce bit-identical output on every run and every platform.
+on the same hardware, the same weights, prompt and context window produce bit-identical output on every run,
+regardless of load, batching or thread scheduling. Identical output across different hardware is not required.
 Vision and roadmap: `README.md`. Background: `docs/research/`.
 
 ## Commands
@@ -34,10 +35,10 @@ Microsoft download host is blocked by the network policy) and restores packages.
 ## Determinism rules (inference and training code)
 
 1. Never use `System.Random`, `Guid.NewGuid`, `DateTime.Now` or any ambient entropy. Use `DeterministicRandom`.
-2. Never call `Math`/`MathF` transcendental functions (`Exp`, `Log`, `Pow`, `Sin`, `Cos`, `Tanh`, ...). Add a
-   portable version to `DeterministicMath` built only from `+ - * /` and `sqrt`, with an accuracy test against `Math`.
-3. Reductions run in a fixed, documented order with a `double` accumulator. No `Parallel.For` reductions, no
-   `Vector<T>` (width varies by CPU), no `Math.FusedMultiplyAdd` unless every platform takes the same path.
+2. Prefer `DeterministicMath` over `Math`/`MathF` transcendental functions (`Exp`, `Log`, `Sin`, `Tanh`, ...) so
+   runtime upgrades cannot shift results; add new ones built from `+ - * /` and `sqrt`, with an accuracy test.
+3. Reductions run in a fixed, documented order with a `double` accumulator. Parallelism only with fixed partitioning
+   (chunks from data size, combined in chunk order). SIMD and FMA are fine if the code path is fixed per machine.
 4. Kernels must not change strategy based on batch size or sequence length.
 5. Sorting must use a total order (break ties on index/token id).
 6. Text processing is ordinal and culture-invariant. Do not depend on `Dictionary`/`HashSet` enumeration order.
@@ -45,7 +46,8 @@ Microsoft download host is blocked by the network policy) and restores packages.
 
 ## Golden values
 
-Reproducibility tests assert exact SHA-256 hashes, and CI runs them on Linux x64, Windows x64 and macOS Arm64.
+Reproducibility tests assert exact SHA-256 hashes. CI runs them on Linux, Windows and macOS; today all agree, but if a
+hardware-specific kernel makes them diverge, key the golden values per platform rather than forcing portability.
 If a hash changes:
 - unintentionally: it is a determinism bug, find it; do not update the constant.
 - intentionally (new weights, new sampler semantics): update `GoldenValues.cs` and say why in the commit message.

@@ -2,7 +2,7 @@ namespace EtAlii.Dllm.Core.Models;
 
 /// <summary>
 /// An autoregressive language model. Implementations must be pure: the logits depend only on the weights and
-/// the given tokens, and are bit-identical on every platform.
+/// the given tokens, and are bit-identical on every run on the same hardware.
 /// </summary>
 public interface ILanguageModel
 {

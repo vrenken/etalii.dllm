@@ -1,6 +1,6 @@
 # Deterministic inference: research notes
 
-Goal: identical output tokens for identical (weights, request) pairs, on every run and every supported platform.
+Goal: identical output tokens for identical (weights, prompt, context window) inputs on the same hardware, on every run.
 This note lists where non-determinism comes from in LLM inference, what mainstream stacks do about it, and the rules
 EtAlii.Dllm adopts. References at the end are starting points for deeper reading.
 
@@ -12,7 +12,11 @@ EtAlii.Dllm adopts. References at the end are starting points for deeper reading
    how long the prompt prefix in the KV cache is.
 3. **Cross-platform bit-exactness.** Same output on x64 and Arm64, Windows, Linux and macOS, across runtime versions.
 
-EtAlii.Dllm targets level 3. Level 3 implies the other two.
+EtAlii.Dllm targets **levels 1 and 2**: on the same hardware, the same prompt and context window always give the
+same output, whatever the load, the batch composition or the thread scheduling. Level 3 is explicitly *not* a
+goal. That frees kernels to use the fastest instructions each machine offers (AVX-512, NEON, FMA, GPU tensor cores),
+as long as the reduction order on that machine is fixed. The current code happens to be portable as well, because
+its portable choices cost nothing yet; that may change when performance work starts.
 
 ## Where non-determinism comes from
 
@@ -49,30 +53,31 @@ EtAlii.Dllm targets level 3. Level 3 implies the other two.
 
 ## Rules adopted by EtAlii.Dllm
 
-1. **Only correctly rounded operations in float code**: `+ - * /` and `sqrt`. No `Math.Exp`, `MathF.Tanh` and
-   friends in inference paths; use `DeterministicMath` (range reduction + fixed polynomial). A future option is a
-   port of CORE-MATH routines.
-2. **No implicit FMA.** RyuJIT does not contract `a * b + c`; `Math.FusedMultiplyAdd` may only be used where the
-   same code path is guaranteed on every platform (with a software fallback of identical results).
-3. **Fixed reduction order**, documented per kernel. Accumulate in `double` for `float` data. Parallelism and SIMD
-   are allowed only where they preserve that order (e.g. fixed partitioning into chunks whose partial sums are then
-   combined in chunk order, independent of thread count; fixed-width `Vector128<T>` lanes, never `Vector<T>`).
+1. **Prefer own transcendental functions** (`DeterministicMath`: range reduction + fixed polynomial) over
+   `Math.Exp`, `MathF.Tanh` and friends. On one machine the platform versions are repeatable too, but a runtime or
+   C library update can silently change them; our own keep results stable across upgrades.
+2. **Hardware-specific instructions are allowed** (SIMD of any width, FMA), provided the code path chosen on a
+   given machine never varies between runs, e.g. selected once from CPU capabilities, never by timing or autotuning.
+3. **Fixed reduction order**, documented per kernel. Accumulate in `double` for `float` data. Parallelism is allowed
+   only with fixed partitioning: chunks defined by the data size alone, partial sums combined in chunk order,
+   independent of thread count and scheduling.
 4. **Batch invariance by construction.** Kernels never branch on batch size or sequence position for their
    reduction strategy.
 5. **Specified RNG.** xoshiro256\*\* seeded by SplitMix64 for sequential streams; a counter-based generator
    (Philox) when draws must be parallel, so each draw depends only on (seed, counter).
 6. **Total-order sampling.** Candidates sorted by (probability desc, token id asc). Cumulative sums in `double`.
 7. **Culture-invariant, ordinal text handling** in tokenizers; no reliance on `Dictionary` enumeration order.
-8. **Golden hashes.** Tests fix SHA-256 hashes of weights, logits and generated tokens. CI runs them on Linux x64,
-   Windows x64 and macOS Arm64; a change in any hash is either a bug or an intentional, documented change.
+8. **Golden hashes.** Tests fix SHA-256 hashes of weights, logits and generated tokens, plus tests that the same
+   request gives the same output alone, in a batch and under concurrency. A change in any hash is either a bug or an
+   intentional, documented change. Once kernels become hardware-specific, hashes may be keyed per CPU/GPU family.
 
 ## Open questions
 
 - Performance budget: how close can deterministic CPU kernels get to llama.cpp on the same hardware?
-- GPU: can batch-invariant, fixed-order kernels be made bit-identical to the CPU path, or is the GPU a separate
-  "determinism domain" with its own fingerprint?
+- GPU: batch-invariant, fixed-order kernels on the GPU form their own "determinism domain" with their own
+  fingerprint; how much throughput does batch invariance cost there?
 - Quantisation: is integer-only inference (including softmax and normalisation in fixed point) accurate enough
-  for small models, and does it simplify portability enough to be the default?
+  for small models? Integer accumulation is associative, which makes parallel kernels deterministic for free.
 
 ## References
 
