@@ -36,9 +36,13 @@ class Generator:
         sampler = Sampler(options)
         generated: list[int] = []
         finish_reason = "length"
+        # Models with a KV cache reuse it across steps; by construction that gives the same logits as forward().
+        new_cache = getattr(self._model, "new_cache", None)
+        cache = new_cache() if new_cache is not None else None
 
         while len(generated) < max_tokens:
-            token = sampler.sample(self._model.forward(context))
+            logits = self._model.forward(context) if cache is None else self._model.forward_cached(context, cache)
+            token = sampler.sample(logits)
             if token == self._tokenizer.end_of_sequence:
                 finish_reason = "stop"
                 break
