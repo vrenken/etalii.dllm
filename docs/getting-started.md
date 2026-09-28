@@ -45,6 +45,13 @@ dllm import hf:HuggingFaceTB/SmolLM2-135M-Instruct -o smollm2-135m.dllm
 dllm inspect smollm2-135m.dllm
 ```
 
+Qwen2.5-0.5B-Instruct (Apache 2.0, about 1 GB download, 2 GB converted) is the second verified model and is
+better at following instructions and calling tools:
+
+```bash
+dllm import hf:Qwen/Qwen2.5-0.5B-Instruct -o qwen2.5-0.5b.dllm
+```
+
 Pin a revision with `hf:HuggingFaceTB/SmolLM2-135M-Instruct@<commit or tag>`; without one the importer resolves
 `main` to its current commit and records that. Downloads are cached in `~/.cache/etalii-dllm/hub` (`--cache` to
 change it); set `HF_TOKEN` for gated repositories.
@@ -183,10 +190,10 @@ the reproducibility is achieved: [training](training.md).
 
 ## What does not work yet
 
-- The importer, decoder, tokenizer and chat templates are tested against reference implementations on small
-  synthetic models; the first end-to-end run on the real SmolLM2 weights and the logit comparison against
-  Hugging Face `transformers` are still to come (roadmap issues #13 and #16). If a real model misbehaves, please
-  open an issue with the `dllm inspect` output.
+- Two real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct and
+  Qwen2.5-0.5B-Instruct (tokenizer, chat template, logits within 1e-3 and the same greedy answer; see
+  `tests/test_reference_models.py`). Other Llama/Qwen2 models should work but are not checked; if one misbehaves,
+  please open an issue with the `dllm inspect` output.
 - Speed: the kernels are single-threaded and unoptimised (Phase 6). For SmolLM2-135M expect roughly 2 to 3 tokens
   per second, both for reading the prompt and for generating (measured on one cloud CPU core), and proportionally
   slower for bigger models. The KV cache is in place, so long answers do not slow down per token. Fine-tuning

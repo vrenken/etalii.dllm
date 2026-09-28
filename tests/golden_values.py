@@ -49,3 +49,16 @@ FINETUNE_FINGERPRINT = {
 # temperature 0.8, seed 11), and of the placeholder model's mean-pooled embedding of "embed this text".
 CONSTRAINED_FINGERPRINT = "979b6d7e752cd5b30ba187fd03c7919367f6494b05b0cdb537f0e12eff149c61"
 EMBEDDING_FINGERPRINT = "6cea233a8a650a422c82e849cd5d0c77d223c38d1e9b92f3d84603a3ba4db177"
+
+# Phase 2 real models (tests/test_reference_models.py): the import fingerprint of the pinned checkpoint, and
+# GenerationResult.fingerprint of the greedy chat answer to test_reference_models.CHAT.
+REFERENCE_MODEL_FINGERPRINTS = {
+    "smollm2": {
+        "import": "2e4d93db18c1ce202f44a8fd4da1333532827e2b84b7979ddcba6c918bfc132f",
+        "chat": "cb555f4a6519d8b67bc7e1c304b08c0c13852cea297e0fdc644b0b77f70a8f1d",
+    },
+    "qwen2.5": {
+        "import": "9bf78203fabbc1d93a5f387456ff1d755d7fef36396351c911f51656c898eb99",
+        "chat": "7a75f8d55b99478a282d601c155df0fd6c5066b613db230b610612abbdc05c37",
+    },
+}

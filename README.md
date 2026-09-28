@@ -17,13 +17,14 @@ agents can use it without changes.
 
 ## Status
 
-Phases 1 (kernels), 3 (fine-tuning) and 4 (API parity) done, Phase 2 (importing models) nearly done. The full pipeline (tokenizer →
+Phases 1 (kernels), 2 (importing models), 3 (fine-tuning) and 4 (API parity) done. The full pipeline (tokenizer →
 model → sampler → CLI / HTTP API / MCP server) runs end to end and is proven run-to-run bit-exact by CI (on Linux, Windows and macOS, which
 today even agree with each other). The transformer building blocks (aligned `Tensor`, batch-invariant matmul,
 RMSNorm, SiLU/GELU, RoPE and grouped-query attention, see [docs/kernels.md](docs/kernels.md)) are in place, and so are
 `dllm import` (safetensors/GGUF to our [model.dllm](docs/model-format.md) format, with source and licence recorded)
 a Llama/Qwen2 decoder whose KV cache cannot change its output, the models' own BPE tokenizers and chat templates, and
-`--model` on every front end. `dllm finetune` trains an imported model further with AdamW, reproducibly: equal
+`--model` on every front end. The real SmolLM2-135M-Instruct and Qwen2.5-0.5B-Instruct imports match Hugging Face
+`transformers` (logits within about 2e-5, identical greedy answers), checked in CI. `dllm finetune` trains an imported model further with AdamW, reproducibly: equal
 runs, and runs resumed from a checkpoint, write byte-identical models (see [docs/training.md](docs/training.md)).
 The HTTP API speaks both OpenAI and Anthropic, with streaming, tool calling, JSON-schema structured output
 (constrained decoding), logprobs and embeddings; streamed and non-streamed answers are identical (see
@@ -115,7 +116,7 @@ Summarised from the [research notes](docs/research/deterministic-inference.md):
 | --- | --- |
 | 0. Bootstrap ✅ | Solution skeleton, deterministic RNG and math, sampler, byte tokenizer, placeholder model, OpenAI-style API, MCP server, CI with golden hashes |
 | 1. Kernels ✅ | Tensor type, deterministic matmul with fixed tiling, RMSNorm, RoPE with deterministic `sin`/`cos`, SiLU/GELU, attention with fixed-order softmax |
-| 2. Import existing models | Llama-style decoder with KV cache; `dllm import` converting small open-weight models (SmolLM2, Qwen2.5, TinyLlama, ...) from safetensors/GGUF to our own format with licence metadata; BPE tokenizer and chat templates. See [model import](docs/research/model-import.md) |
+| 2. Import existing models ✅ | Llama-style decoder with KV cache; `dllm import` converting small open-weight models (SmolLM2, Qwen2.5, TinyLlama, ...) from safetensors/GGUF to our own format with licence metadata; BPE tokenizer and chat templates. SmolLM2-135M and Qwen2.5-0.5B verified against `transformers` in CI. See [model import](docs/research/model-import.md) |
 | 3. Fine-tuning ✅ | Deterministic backprop and AdamW on top of imported weights, fixed data order, reproducible checkpoints |
 | 4. API parity ✅ | Streaming (SSE), tool/function calling, JSON-schema structured output, logprobs, Anthropic Messages endpoint, embeddings. See [HTTP API](docs/api.md) |
 | 5. MCP, both directions | Richer MCP server (prompts, resources); MCP client host so the model can call external tools during a chat |

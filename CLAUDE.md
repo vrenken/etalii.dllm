@@ -42,7 +42,9 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
 - `src/etalii_dllm/server/` (OpenAI `app.py`, Anthropic `anthropic_api.py`; `docs/api.md`), `mcp_server.py`,
   `cli.py`: thin front ends over `DllmEngine.chat_stream`. Keep logic out of them so all stay output-identical;
   non-streamed responses are assembled from the same event stream as streamed ones.
-- `tests/`: pytest. `tests/golden_values.py` holds the reference hashes.
+- `tests/`: pytest. `tests/golden_values.py` holds the reference hashes. `tests/test_reference_models.py` compares the
+  real pinned SmolLM2/Qwen2.5 imports with `transformers` (`DLLM_REFERENCE_MODELS=<dir>`, extra `reference`; the
+  `Reference models` workflow downloads them); cached copies live in `/mnt/project-files/models` in cloud sessions.
 
 ## Determinism rules (inference and training code)
 

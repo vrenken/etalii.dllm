@@ -28,8 +28,9 @@ the licence. Models with custom licences are opt-in and never redistributed by t
 
 ## Conversion pipeline (roadmap phase 2)
 
-Steps 1 to 4 are implemented (`dllm import`, `src/etalii_dllm/importing/`); the file format is specified in
-[model-format.md](../model-format.md). Step 5 waits for the decoder and for network access to the Hub.
+All five steps are implemented (`dllm import`, `src/etalii_dllm/importing/`); the file format is specified in
+[model-format.md](../model-format.md). Step 5 runs in CI (`.github/workflows/reference.yml`) for the pinned
+SmolLM2-135M-Instruct and Qwen2.5-0.5B-Instruct.
 
 ```
 Hugging Face repo (config.json, tokenizer.json, *.safetensors)  ─┐
@@ -47,7 +48,11 @@ GGUF file (llama.cpp / Ollama)                                   ─┴─►  d
    The SHA-256 of the tensor data becomes the model's `system_fingerprint`.
 5. **Verify.** Compare our logits for a set of prompts against the reference implementation (Hugging Face
    transformers, or llama.cpp) within a tolerance. Bit equality with them is not expected, because they do not use
-   our reduction order. Then pin our own outputs as golden hashes.
+   our reduction order. Then pin our own outputs as golden hashes. `tests/test_reference_models.py` checks the
+   tokenizer and chat template output for equality, the next-token logits of a few prompts to within 1e-3 (observed
+   about 2e-5 in float32) with the same top 5, and that greedy decoding of a chat gives exactly the tokens
+   `transformers` generates. Run it locally with `DLLM_REFERENCE_MODELS=<dir>` (checkpoints as `<dir>/<name>/` or
+   as the `dllm import` hub cache) and `pip install ".[dev,reference]"`.
 
 The same importer brings in the tokenizer (`tokenizer.json` BPE, byte fallback, special tokens) and the model's
 Jinja chat template, which also defines its tool-calling format and so feeds the OpenAI/MCP tool support.
