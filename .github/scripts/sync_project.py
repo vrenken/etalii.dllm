@@ -61,7 +61,7 @@ def rest_all(path):
 
 def ensure_project():
     data = graphql("""query($owner: String!, $name: String!) {
-        user(login: $owner) { id projectsV2(first: 100) { nodes { id number title url } } }
+        user(login: $owner) { id projectsV2(first: 100) { nodes { id number title url repositories(first: 20) { nodes { id } } } } }
         repository(owner: $owner, name: $name) { id }
     }""", owner=OWNER, name=NAME)
     repo_id = data["repository"]["id"]
@@ -76,6 +76,8 @@ def ensure_project():
         }""", id=project["id"], desc="Roadmap and progress of the deterministic LLM",
                 readme=f"Synced automatically from https://github.com/{REPO} issues and milestones by "
                        "`.github/workflows/project-sync.yml`. Edit issues and milestones there, not here.")
+    if any(r["id"] == repo_id for r in project.get("repositories", {}).get("nodes", [])):
+        return project
     try:
         graphql("""mutation($p: ID!, $r: ID!) {
             linkProjectV2ToRepository(input: {projectId: $p, repositoryId: $r}) { repository { id } }
