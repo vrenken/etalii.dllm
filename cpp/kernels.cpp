@@ -89,6 +89,7 @@ NB_MODULE(_kernels, m) {
     m.def("tanh", &dllm::tanh, nb::arg("x"), "Portable hyperbolic tangent built on dllm exp.");
     m.def("sigmoid", &dllm::sigmoid, nb::arg("x"), "Portable logistic sigmoid built on dllm exp.");
     m.def("erf", &dllm::erf, nb::arg("x"), "Portable error function built from basic IEEE operations.");
+    m.def("erfc", &dllm::erfc, nb::arg("x"), "Portable complementary error function 1 - erf(x).");
 
     m.def("sum", [](FloatVector v) { return dllm::sum(v.data(), v.shape(0)); }, nb::arg("values"),
           "Sum in index order with a double accumulator.");

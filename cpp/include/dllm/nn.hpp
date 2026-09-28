@@ -101,11 +101,12 @@ inline float silu(float x) {
     return static_cast<float>(d * sigmoid(d));
 }
 
-// Exact GELU: 0.5 x (1 + erf(x / sqrt(2))).
+// Exact GELU: 0.5 x (1 + erf(x / sqrt(2))), evaluated as 0.5 x erfc(-x / sqrt(2)) so the tiny negative tail keeps
+// its relative accuracy instead of cancelling to zero.
 inline float gelu(float x) {
     constexpr double inv_sqrt2 = 7.07106781186547524401e-01;
     const double d = x;
-    return static_cast<float>(0.5 * d * (1.0 + dllm::erf(d * inv_sqrt2)));
+    return static_cast<float>(0.5 * d * dllm::erfc(-d * inv_sqrt2));
 }
 
 // GELU with the tanh approximation (GPT-2, Gemma): 0.5 x (1 + tanh(sqrt(2/pi) (x + 0.044715 x^3))).

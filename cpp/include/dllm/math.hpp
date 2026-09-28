@@ -265,12 +265,25 @@ inline double sigmoid(double x) {
     return e / (1.0 + e);
 }
 
+namespace detail {
+
+// erfc(a) for a >= 2.5: e^(-a^2) / sqrt(pi) * K(a) with K the Laplace continued fraction
+// 1 / (a + (1/2) / (a + 1 / (a + (3/2) / (a + ...)))), evaluated backwards from a fixed depth of 80.
+inline double erfc_tail(double a) {
+    constexpr double inv_sqrt_pi = 5.64189583547756286948e-01;
+    double k = a;
+    for (int n = 80; n >= 1; --n) {
+        k = a + (0.5 * n) / k;
+    }
+    return dllm::exp(-a * a) * inv_sqrt_pi / k;
+}
+
+}  // namespace detail
+
 // Error function. |x| < 2.5: the Maclaurin series erf(x) = 2/sqrt(pi) sum (-1)^n x^(2n+1) / (n! (2n+1)) with a fixed
-// 60 terms. Otherwise erfc(x) = e^(-x^2) / sqrt(pi) * K(x) with K the Laplace continued fraction
-// 1 / (x + (1/2) / (x + 1 / (x + (3/2) / (x + ...)))), evaluated backwards from a fixed depth of 80.
+// 60 terms; otherwise 1 - erfc(|x|) from the continued fraction (exactly 1 beyond |x| = 6).
 inline double erf(double x) {
     constexpr double two_over_sqrt_pi = 1.12837916709551257390e+00;
-    constexpr double inv_sqrt_pi = 5.64189583547756286948e-01;
 
     if (x != x) {
         return x;
@@ -289,14 +302,23 @@ inline double erf(double x) {
     } else if (a > 6.0) {
         result = 1.0;
     } else {
-        double k = a;
-        for (int n = 80; n >= 1; --n) {
-            k = a + (0.5 * n) / k;
-        }
-        const double erfc = dllm::exp(-a * a) * inv_sqrt_pi / k;
-        result = 1.0 - erfc;
+        result = 1.0 - detail::erfc_tail(a);
     }
     return x < 0 ? -result : result;
+}
+
+// Complementary error function 1 - erf(x), accurate in relative terms for large positive x (no cancellation).
+inline double erfc(double x) {
+    if (x != x) {
+        return x;
+    }
+    if (x < 2.5) {
+        return 1.0 - dllm::erf(x);
+    }
+    if (x > 27.3) {
+        return 0.0;
+    }
+    return detail::erfc_tail(x);
 }
 
 // Numerically stable softmax: subtract the maximum, exponentiate, normalise by the sequential sum.

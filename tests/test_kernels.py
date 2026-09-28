@@ -50,6 +50,14 @@ def test_tanh_and_sigmoid_are_accurate(x):
 @pytest.mark.parametrize("x", [0.0, 1e-6, 0.2, -0.9, 1.5, 2.4999, 2.5, 3.3, -4.0, 5.9, 6.5])
 def test_erf_is_accurate(x):
     assert numerics.erf(x) == pytest.approx(math.erf(x), rel=1e-14, abs=1e-300)
+    assert numerics.erfc(x) == pytest.approx(math.erfc(x), rel=1e-13, abs=1e-15)
+
+
+@pytest.mark.parametrize("x", [3.0, 6.5, 10.0, 20.0, 26.5])
+def test_erfc_keeps_relative_accuracy_in_the_tail(x):
+    assert numerics.erfc(x) == pytest.approx(math.erfc(x), rel=1e-13)
+    assert numerics.erfc(-x) == pytest.approx(math.erfc(-x), rel=1e-15)
+    assert numerics.erfc(40.0) == 0.0
 
 
 # Tensor ------------------------------------------------------------------------------------------------------------
@@ -141,13 +149,11 @@ def test_rms_norm_matches_reference_and_is_batch_invariant():
 def test_activations_match_reference():
     x = np.linspace(-12, 12, 2001, dtype=np.float32)
     x64 = x.astype(np.float64)
-    erf = np.vectorize(math.erf)
+    erfc = np.vectorize(math.erfc)
     tanh = np.vectorize(math.tanh)
     silu_reference = x64 / (1 + np.vectorize(math.exp)(-x64))
     np.testing.assert_allclose(numerics.silu(x).numpy(), silu_reference, rtol=2e-7, atol=1e-30)
-    np.testing.assert_allclose(
-        numerics.gelu(x).numpy(), 0.5 * x64 * (1 + erf(x64 / math.sqrt(2))), rtol=2e-7, atol=1e-30
-    )
+    np.testing.assert_allclose(numerics.gelu(x).numpy(), 0.5 * x64 * erfc(-x64 / math.sqrt(2)), rtol=2e-7, atol=1e-30)
     tanh_reference = 0.5 * x64 * (1 + tanh(math.sqrt(2 / math.pi) * (x64 + 0.044715 * x64**3)))
     np.testing.assert_allclose(numerics.gelu(x, approximate="tanh").numpy(), tanh_reference, rtol=2e-7, atol=1e-30)
     assert numerics.silu(x.reshape(1, 2001, 1)).shape == (1, 2001, 1)

@@ -26,6 +26,7 @@ cos = _kernels.cos
 tanh = _kernels.tanh
 sigmoid = _kernels.sigmoid
 erf = _kernels.erf
+erfc = _kernels.erfc
 fill_gaussian = _kernels.fill_gaussian
 
 FloatArray = npt.NDArray[np.float32]
