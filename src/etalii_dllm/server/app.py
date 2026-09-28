@@ -9,7 +9,7 @@ from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse
 
 from etalii_dllm.chat import ChatMessage
-from etalii_dllm.engine import DllmEngine, default_engine
+from etalii_dllm.engine import DllmEngine, default_engine, use_model_file
 from etalii_dllm.sampling import SamplingOptions
 from etalii_dllm.server.contracts import (
     ChatCompletionChoice,
@@ -82,5 +82,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="EtAlii.Dllm OpenAI-compatible server")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5080)
+    parser.add_argument("--model", help="model.dllm file to serve (default: $DLLM_MODEL, else the placeholder model)")
     args = parser.parse_args()
+    use_model_file(args.model)
     uvicorn.run(app, host=args.host, port=args.port)

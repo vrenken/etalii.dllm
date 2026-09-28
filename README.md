@@ -21,8 +21,8 @@ HTTP API / MCP server) runs end to end and is proven run-to-run bit-exact by CI 
 today even agree with each other). The transformer building blocks (aligned `Tensor`, batch-invariant matmul,
 RMSNorm, SiLU/GELU, RoPE and grouped-query attention, see [docs/kernels.md](docs/kernels.md)) are in place, and so are
 `dllm import` (safetensors/GGUF to our [model.dllm](docs/model-format.md) format, with source and licence recorded)
-and a Llama/Qwen2 decoder whose KV cache cannot change its output. The default model is still a seeded placeholder
-(a bigram table) until the BPE tokenizer and chat templates of imported models land.
+a Llama/Qwen2 decoder whose KV cache cannot change its output, the models' own BPE tokenizers and chat templates, and
+`--model` on every front end. Without a model file the engine falls back to a seeded placeholder (a bigram table).
 
 ## Quick start
 
@@ -49,6 +49,12 @@ claude mcp add dllm -- dllm-mcp
 dllm import hf:HuggingFaceTB/SmolLM2-135M-Instruct -o smollm2-135m.dllm
 dllm import ./qwen2.5-0.5b-instruct-q8_0.gguf -o qwen2.5-0.5b.dllm
 dllm inspect smollm2-135m.dllm
+
+# Run it: every front end takes --model (or the DLLM_MODEL environment variable) and uses the model's own
+# tokenizer and chat template
+dllm --model smollm2-135m.dllm generate --prompt "The capital of France is"
+dllm-server --model smollm2-135m.dllm
+claude mcp add dllm -- dllm-mcp --model /path/to/smollm2-135m.dllm
 ```
 
 Run the same request twice and compare: the responses, including `id` and `system_fingerprint`, are identical.
@@ -71,6 +77,7 @@ to Python through [nanobind](https://github.com/wjakob/nanobind). Python orchest
 | `src/etalii_dllm/mcp_server.py` | Model Context Protocol server (stdio, official `mcp` SDK) exposing `generate` and `model_info` tools |
 | `src/etalii_dllm/cli.py` | `dllm` command line tool |
 | `src/etalii_dllm/importing/` | Model import: safetensors and GGUF readers, GGUF dequantisation, Hugging Face download, `dllm import` |
+| `src/etalii_dllm/bpe.py`, `chat_template.py` | Byte-level BPE tokenizer from `tokenizer.json` (or GGUF metadata) and the model's Jinja chat template |
 | `src/etalii_dllm/transformer.py` | Llama/Qwen2 decoder with a KV cache that cannot change the logits |
 | `src/etalii_dllm/modelfile.py` | The [`model.dllm`](docs/model-format.md) container that imported models are stored in |
 | `tests/` | pytest suite, including golden-hash reproducibility tests |

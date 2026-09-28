@@ -33,9 +33,10 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
   style reassociation flags or `-ffp-contract=fast`.
 - `src/etalii_dllm/`: `tensor` (aligned float32 `Tensor`), `numerics` (thin wrappers over `_kernels`, fingerprints),
   `sampling`, `tokenization`, `models`, `generation`, `chat`, `engine` (`DllmEngine`, the facade shared by every front
-  end), `transformer` (Llama/Qwen2 decoder + KV cache), `architecture` (`TransformerConfig`), `modelfile` (the
-  `model.dllm` container, `docs/model-format.md`), `importing` (safetensors/GGUF readers and `dllm import`; tests
-  compare against the `gguf` and `safetensors` reference packages).
+  end; `DLLM_MODEL`/`--model` selects a `model.dllm`), `transformer` (Llama/Qwen2 decoder + KV cache), `bpe` and
+  `chat_template` (the model's own tokenizer and Jinja template), `architecture` (`TransformerConfig`), `modelfile`
+  (the `model.dllm` container, `docs/model-format.md`), `importing` (safetensors/GGUF readers and `dllm import`).
+  Tests compare against the reference packages `gguf`, `safetensors` and `tokenizers` (dev dependencies).
 - `src/etalii_dllm/server/`, `mcp_server.py`, `cli.py`: thin front ends over `DllmEngine`. Keep logic out of them
   so all three stay output-identical.
 - `tests/`: pytest. `tests/golden_values.py` holds the reference hashes.

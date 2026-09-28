@@ -114,14 +114,16 @@ def write_safetensors(path: Path, tensors: dict[str, tuple[str, np.ndarray]], me
             stream.write(np.ascontiguousarray(raw).tobytes())
 
 
-def write_hf_checkpoint(directory: Path, config: dict | None = None, card: str = MODEL_CARD) -> dict[str, np.ndarray]:
+def write_hf_checkpoint(
+    directory: Path, config: dict | None = None, card: str = MODEL_CARD, tokenizer_json: dict | None = None
+) -> dict[str, np.ndarray]:
     """A Hugging Face style checkpoint directory in bf16; returns the float32 weights it holds."""
     config = config or TINY_LLAMA_CONFIG
     directory.mkdir(parents=True, exist_ok=True)
     weights = hf_weights(config)
     (directory / "config.json").write_text(json.dumps(config), encoding="utf-8")
     (directory / "generation_config.json").write_text(json.dumps({"eos_token_id": [2, 3]}), encoding="utf-8")
-    (directory / "tokenizer.json").write_text(json.dumps(TOKENIZER_JSON), encoding="utf-8")
+    (directory / "tokenizer.json").write_text(json.dumps(tokenizer_json or TOKENIZER_JSON), encoding="utf-8")
     (directory / "tokenizer_config.json").write_text(json.dumps(TOKENIZER_CONFIG), encoding="utf-8")
     if card:
         (directory / "README.md").write_text(card, encoding="utf-8")

@@ -6,7 +6,7 @@ import argparse
 import json
 import sys
 
-from etalii_dllm.engine import default_engine
+from etalii_dllm.engine import default_engine, use_model_file
 from etalii_dllm.sampling import SamplingOptions
 
 
@@ -56,6 +56,7 @@ def _inspect(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="dllm", description="EtAlii deterministic LLM")
+    parser.add_argument("--model", help="model.dllm file to use (default: $DLLM_MODEL, else the placeholder model)")
     commands = parser.add_subparsers(dest="command", required=True)
 
     commands.add_parser("info", help="show the model id and system fingerprint")
@@ -87,6 +88,7 @@ def main(argv: list[str] | None = None) -> int:
         return _import(args)
     if args.command == "inspect":
         return _inspect(args)
+    use_model_file(args.model)
     engine = default_engine()
 
     if args.command == "info":

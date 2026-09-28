@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from etalii_dllm.models import LanguageModel
@@ -24,9 +25,10 @@ class GenerationResult:
 
 
 class Generator:
-    def __init__(self, model: LanguageModel, tokenizer: Tokenizer) -> None:
+    def __init__(self, model: LanguageModel, tokenizer: Tokenizer, stop_tokens: Iterable[int] = ()) -> None:
         self._model = model
         self._tokenizer = tokenizer
+        self._stop_tokens = frozenset([tokenizer.end_of_sequence, *stop_tokens])
 
     def generate(self, prompt: str, max_tokens: int, options: SamplingOptions) -> GenerationResult:
         if max_tokens < 0:
@@ -43,7 +45,7 @@ class Generator:
         while len(generated) < max_tokens:
             logits = self._model.forward(context) if cache is None else self._model.forward_cached(context, cache)
             token = sampler.sample(logits)
-            if token == self._tokenizer.end_of_sequence:
+            if token in self._stop_tokens:
                 finish_reason = "stop"
                 break
             generated.append(token)

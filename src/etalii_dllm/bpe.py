@@ -1,0 +1,504 @@
+"""Byte-level BPE tokenizer driven by a Hugging Face ``tokenizer.json`` (GPT-2, SmolLM2, Qwen2, Llama 3 style).
+
+The pipeline mirrors the ``tokenizers`` library: added tokens are split out first, the rest is normalised,
+pre-tokenised (``Split``, ``Digits``, ``ByteLevel``), mapped to byte-level characters and merged with the same
+priority rule (lowest merge rank first, leftmost on ties). Tests compare the output with the reference library.
+
+Determinism: no sets or dict iteration decide an outcome, and nothing depends on the locale or ``PYTHONHASHSEED``.
+Normalisation uses :mod:`unicodedata` and the regular expressions use the ``regex`` package, so their Unicode tables
+are fixed by the installed Python and ``regex`` versions; the same installation always tokenizes the same way.
+Unsupported components fail at load time instead of tokenizing differently from the reference.
+"""
+
+from __future__ import annotations
+
+import heapq
+import unicodedata
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
+from functools import lru_cache
+from typing import Any
+
+import regex
+
+GPT2_PATTERN = r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"
+
+
+class TokenizerError(ValueError):
+    """The tokenizer description uses a component this implementation does not support, or is invalid."""
+
+
+@lru_cache(maxsize=1)
+def bytes_to_unicode() -> dict[int, str]:
+    """GPT-2's reversible byte -> printable character table."""
+    printable = [*range(ord("!"), ord("~") + 1), *range(ord("¡"), ord("¬") + 1), *range(ord("®"), ord("ÿ") + 1)]
+    characters = list(printable)
+    extra = 0
+    for byte in range(256):
+        if byte not in printable:
+            printable.append(byte)
+            characters.append(256 + extra)
+            extra += 1
+    return {byte: chr(character) for byte, character in zip(printable, characters, strict=True)}
+
+
+# --- normalisers -------------------------------------------------------------------------------------------------
+
+
+def _normalizer(spec: Mapping[str, Any] | None) -> Callable[[str], str]:
+    if spec is None:
+        return lambda text: text
+    kind = spec.get("type")
+    if kind in ("NFC", "NFD", "NFKC", "NFKD"):
+        form = kind
+        return lambda text: unicodedata.normalize(form, text)
+    if kind == "Lowercase":
+        return str.lower
+    if kind == "Sequence":
+        steps = [_normalizer(s) for s in spec["normalizers"]]
+
+        def run(text: str) -> str:
+            for step in steps:
+                text = step(text)
+            return text
+
+        return run
+    raise TokenizerError(f"normalizer {kind!r} is not supported")
+
+
+# --- pre-tokenisers ----------------------------------------------------------------------------------------------
+
+PreTokenizer = Callable[[list[str]], list[str]]
+
+
+def _split_by(pattern: regex.Pattern[str], text: str, behavior: str, invert: bool) -> list[str]:
+    """``tokenizers``' ``Split`` with a regex: matches are the delimiters (or, inverted, the content)."""
+    pieces: list[tuple[str, bool]] = []  # (text, is_match)
+    position = 0
+    for match in pattern.finditer(text):
+        if match.start() == match.end():
+            continue
+        if match.start() > position:
+            pieces.append((text[position : match.start()], False))
+        pieces.append((match.group(), True))
+        position = match.end()
+    if position < len(text):
+        pieces.append((text[position:], False))
+    if invert:
+        pieces = [(piece, not is_match) for piece, is_match in pieces]
+
+    if behavior == "Isolated":
+        return [piece for piece, _ in pieces]
+    if behavior == "Removed":
+        return [piece for piece, is_match in pieces if not is_match]
+    if behavior == "MergedWithPrevious":
+        merged: list[str] = []
+        for piece, is_match in pieces:
+            if is_match and merged:
+                merged[-1] += piece
+            else:
+                merged.append(piece)
+        return merged
+    if behavior == "MergedWithNext":
+        merged = []
+        pending = ""
+        for piece, is_match in pieces:
+            if is_match:
+                if pending:
+                    merged.append(pending)
+                pending = piece
+            else:
+                merged.append(pending + piece)
+                pending = ""
+        if pending:
+            merged.append(pending)
+        return merged
+    if behavior == "Contiguous":
+        merged = []
+        previous: bool | None = None
+        for piece, is_match in pieces:
+            if is_match and previous is True:
+                merged[-1] += piece
+            else:
+                merged.append(piece)
+            previous = is_match
+        return merged
+    raise TokenizerError(f"split behaviour {behavior!r} is not supported")
+
+
+def _pre_tokenizer(spec: Mapping[str, Any] | None) -> tuple[PreTokenizer, bool]:
+    """Returns the pre-tokeniser and whether it includes the byte-level mapping."""
+    if spec is None:
+        return (lambda pieces: pieces), False
+    kind = spec.get("type")
+    if kind == "Sequence":
+        steps = [_pre_tokenizer(s) for s in spec["pretokenizers"]]
+
+        def run(pieces: list[str]) -> list[str]:
+            for step, _ in steps:
+                pieces = step(pieces)
+            return pieces
+
+        return run, any(byte_level for _, byte_level in steps)
+    if kind == "Split":
+        pattern_spec = spec["pattern"]
+        if "Regex" in pattern_spec:
+            pattern = regex.compile(pattern_spec["Regex"])
+        else:
+            pattern = regex.compile(regex.escape(pattern_spec["String"]))
+        behavior, invert = spec.get("behavior", "Isolated"), bool(spec.get("invert", False))
+        return (lambda pieces: [p for piece in pieces for p in _split_by(pattern, piece, behavior, invert)]), False
+    if kind == "Digits":
+        digits = regex.compile(r"\p{Nd}" if spec.get("individual_digits") else r"\p{Nd}+")
+        return (lambda pieces: [p for piece in pieces for p in _split_by(digits, piece, "Isolated", False)]), False
+    if kind == "ByteLevel":
+        add_prefix_space = bool(spec.get("add_prefix_space", False))
+        gpt2 = regex.compile(GPT2_PATTERN) if spec.get("use_regex", True) else None
+
+        def byte_level(pieces: list[str]) -> list[str]:
+            out = []
+            for piece in pieces:
+                if add_prefix_space and not piece.startswith(" "):
+                    piece = " " + piece
+                out.extend(_split_by(gpt2, piece, "Isolated", False) if gpt2 else [piece])
+            return out
+
+        return byte_level, True
+    raise TokenizerError(f"pre-tokenizer {kind!r} is not supported")
+
+
+# --- BPE model ---------------------------------------------------------------------------------------------------
+
+
+def _merge(symbols: list[int], merges: Mapping[tuple[int, int], tuple[int, int]]) -> list[int]:
+    """Applies merges exactly like ``tokenizers``' ``Word::merge_all``: a heap ordered by (rank, position); stale
+    entries are skipped when popped."""
+    count = len(symbols)
+    ids = list(symbols)
+    previous = list(range(-1, count - 1))
+    following = [*range(1, count), -1]
+    alive = [True] * count
+    heap: list[tuple[int, int, int]] = []
+    for i in range(count - 1):
+        merge = merges.get((ids[i], ids[i + 1]))
+        if merge is not None:
+            heap.append((merge[0], i, merge[1]))
+    heapq.heapify(heap)
+    while heap:
+        _, position, new_id = heapq.heappop(heap)
+        if not alive[position] or following[position] == -1:
+            continue
+        right = following[position]
+        current = merges.get((ids[position], ids[right]))
+        if current is None or current[1] != new_id:
+            continue
+        ids[position] = new_id
+        alive[right] = False
+        following[position] = following[right]
+        if following[right] != -1:
+            previous[following[right]] = position
+        if previous[position] != -1:
+            left = previous[position]
+            merge = merges.get((ids[left], new_id))
+            if merge is not None:
+                heapq.heappush(heap, (merge[0], left, merge[1]))
+        if following[position] != -1:
+            merge = merges.get((new_id, ids[following[position]]))
+            if merge is not None:
+                heapq.heappush(heap, (merge[0], position, merge[1]))
+    return [token for token, keep in zip(ids, alive, strict=True) if keep]
+
+
+@dataclass(frozen=True)
+class AddedToken:
+    id: int
+    content: str
+    special: bool
+    lstrip: bool = False
+    rstrip: bool = False
+
+
+class BpeTokenizer:
+    """Encodes and decodes like the Hugging Face tokenizer described by ``spec`` (a parsed ``tokenizer.json``)."""
+
+    def __init__(
+        self,
+        spec: Mapping[str, Any],
+        *,
+        end_of_sequence: str | int | None = None,
+        begin_of_sequence: str | int | None = None,
+    ) -> None:
+        model = spec.get("model") or {}
+        if model.get("type") != "BPE":
+            raise TokenizerError(f"model {model.get('type')!r} is not supported (only BPE)")
+        for option in ("continuing_subword_prefix", "end_of_word_suffix"):
+            if model.get(option):
+                raise TokenizerError(f"BPE option {option} is not supported")
+        if model.get("dropout"):
+            raise TokenizerError("BPE dropout is not deterministic")
+
+        self._vocab: dict[str, int] = {str(k): int(v) for k, v in model["vocab"].items()}
+        self._merges: dict[tuple[int, int], tuple[int, int]] = {}
+        for rank, merge in enumerate(model.get("merges", [])):
+            left, right = merge.split(" ", 1) if isinstance(merge, str) else merge
+            try:
+                pair = (self._vocab[left], self._vocab[right])
+                merged = self._vocab[left + right]
+            except KeyError as error:
+                raise TokenizerError(f"merge {left!r} {right!r} refers to an unknown token") from error
+            self._merges.setdefault(pair, (rank, merged))
+        self._ignore_merges = bool(model.get("ignore_merges", False))
+        self._byte_fallback = bool(model.get("byte_fallback", False))
+        unk = model.get("unk_token")
+        self._unk = self._vocab.get(unk) if unk is not None else None
+
+        self._normalize = _normalizer(spec.get("normalizer"))
+        self._pre_tokenize, byte_level = _pre_tokenizer(spec.get("pre_tokenizer"))
+        if not byte_level:
+            raise TokenizerError("only byte-level BPE (a ByteLevel pre-tokenizer) is supported")
+        decoder = spec.get("decoder") or {}
+        if decoder.get("type") != "ByteLevel":
+            raise TokenizerError(f"decoder {decoder.get('type')!r} is not supported (only ByteLevel)")
+        self._post = self._post_processor(spec.get("post_processor"))
+
+        self._added = [
+            AddedToken(int(t["id"]), t["content"], bool(t.get("special")), bool(t.get("lstrip")), bool(t.get("rstrip")))
+            for t in spec.get("added_tokens", [])
+        ]
+        for token in self._added:
+            if token.content not in self._vocab:
+                self._vocab[token.content] = token.id
+        # Longest first, then by content: regex alternation then finds the leftmost-longest added token.
+        ordered = sorted(self._added, key=lambda t: (-len(t.content), t.content, t.id))
+        self._added_by_content = {t.content: t for t in ordered}
+        self._added_pattern = regex.compile("|".join(regex.escape(t.content) for t in ordered)) if ordered else None
+        self._special_ids = frozenset(t.id for t in self._added if t.special)
+
+        self._id_to_token: dict[int, str] = {}
+        for token, index in sorted(self._vocab.items(), key=lambda item: (item[1], item[0])):
+            self._id_to_token.setdefault(index, token)
+        self._byte_encoder = bytes_to_unicode()
+        self._byte_decoder = {character: byte for byte, character in self._byte_encoder.items()}
+        self._cache: dict[str, tuple[int, ...]] = {}
+
+        self.vocabulary_size = max(self._id_to_token) + 1
+        self.end_of_sequence = self._resolve(end_of_sequence)
+        self.begin_of_sequence = self._resolve(begin_of_sequence)
+
+    def _resolve(self, token: str | int | None) -> int:
+        if token is None:
+            return -1
+        if isinstance(token, int):
+            return token
+        if token not in self._vocab:
+            raise TokenizerError(f"unknown token {token!r}")
+        return self._vocab[token]
+
+    def _post_processor(self, spec: Mapping[str, Any] | None) -> Callable[[list[int]], list[int]]:
+        if spec is None or spec.get("type") == "ByteLevel":
+            return lambda ids: ids
+        if spec.get("type") == "Sequence":
+            steps = [self._post_processor(s) for s in spec["processors"]]
+
+            def run(ids: list[int]) -> list[int]:
+                for step in steps:
+                    ids = step(ids)
+                return ids
+
+            return run
+        if spec.get("type") == "TemplateProcessing":
+            template = spec["single"]
+            special = {name: entry["ids"] for name, entry in spec.get("special_tokens", {}).items()}
+
+            def apply(ids: list[int]) -> list[int]:
+                out: list[int] = []
+                for item in template:
+                    if "Sequence" in item:
+                        out.extend(ids)
+                    else:
+                        out.extend(special[item["SpecialToken"]["id"]])
+                return out
+
+            return apply
+        raise TokenizerError(f"post-processor {spec.get('type')!r} is not supported")
+
+    def token_to_id(self, token: str) -> int | None:
+        return self._vocab.get(token)
+
+    def id_to_token(self, index: int) -> str | None:
+        return self._id_to_token.get(index)
+
+    # -- encoding --
+
+    def _split_added(self, text: str) -> list[tuple[str, AddedToken | None]]:
+        if self._added_pattern is None:
+            return [(text, None)]
+        parts: list[tuple[str, AddedToken | None]] = []
+        position = 0
+        for match in self._added_pattern.finditer(text):
+            token = self._added_by_content[match.group()]
+            before = text[position : match.start()]
+            if token.lstrip:
+                before = before.rstrip()
+            if before:
+                parts.append((before, None))
+            parts.append((match.group(), token))
+            position = match.end()
+            if token.rstrip:
+                while position < len(text) and text[position].isspace():
+                    position += 1
+        if position < len(text):
+            parts.append((text[position:], None))
+        return parts
+
+    def _word(self, piece: str) -> tuple[int, ...]:
+        cached = self._cache.get(piece)
+        if cached is not None:
+            return cached
+        if self._ignore_merges and piece in self._vocab:
+            result: tuple[int, ...] = (self._vocab[piece],)
+        else:
+            symbols: list[int] = []
+            for character in piece:
+                index = self._vocab.get(character)
+                if index is not None:
+                    symbols.append(index)
+                elif self._byte_fallback:
+                    symbols.extend(self._vocab[f"<0x{b:02X}>"] for b in character.encode("utf-8"))
+                elif self._unk is not None:
+                    symbols.append(self._unk)
+                else:
+                    raise TokenizerError(f"character {character!r} is not in the vocabulary")
+            result = tuple(_merge(symbols, self._merges))
+        if len(self._cache) < 100_000:
+            self._cache[piece] = result
+        return result
+
+    def encode(self, text: str, *, add_special_tokens: bool = False) -> list[int]:
+        """Token ids for ``text``. ``add_special_tokens`` applies the post-processor (e.g. a BOS token), as the
+        ``tokenizers`` default does; chat prompts rendered from a template already contain their special tokens."""
+        ids: list[int] = []
+        for part, added in self._split_added(text):
+            if added is not None:
+                ids.append(added.id)
+                continue
+            for piece in self._pre_tokenize([self._normalize(part)]):
+                if piece:
+                    mapped = "".join(self._byte_encoder[b] for b in piece.encode("utf-8"))
+                    ids.extend(self._word(mapped))
+        return self._post(ids) if add_special_tokens else ids
+
+    # -- decoding --
+
+    def decode_bytes(self, tokens: Iterable[int], *, skip_special_tokens: bool = True) -> bytes:
+        """The exact bytes of ``tokens`` (useful for streaming, where a token may end mid-character)."""
+        out = bytearray()
+        for token in tokens:
+            if skip_special_tokens and token in self._special_ids:
+                continue
+            text = self._id_to_token.get(token)
+            if text is None:
+                continue
+            if text in self._added_by_content:
+                out.extend(text.encode("utf-8"))
+                continue
+            for character in text:
+                byte = self._byte_decoder.get(character)
+                out.extend(character.encode("utf-8") if byte is None else (byte,))
+        return bytes(out)
+
+    def decode(self, tokens: Iterable[int], *, skip_special_tokens: bool = True) -> str:
+        return self.decode_bytes(tokens, skip_special_tokens=skip_special_tokens).decode("utf-8", errors="replace")
+
+
+# --- GGUF tokenizers ---------------------------------------------------------------------------------------------
+
+# Llama 3 and Qwen2 split words like GPT-2 but also isolate newlines; they differ in how many digits form a piece.
+_WORDS = (
+    r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}%s| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
+)
+_LLAMA3_PATTERN = _WORDS % "{1,3}"
+_QWEN2_PATTERN = _WORDS % ""
+_BYTE_LEVEL = {"type": "ByteLevel", "add_prefix_space": False, "trim_offsets": True, "use_regex": True}
+_BYTE_LEVEL_NO_REGEX = {**_BYTE_LEVEL, "use_regex": False}
+
+
+def _split(pattern: str) -> dict[str, Any]:
+    return {"type": "Split", "pattern": {"Regex": pattern}, "behavior": "Isolated", "invert": False}
+
+
+# ``tokenizer.ggml.pre`` -> (normalizer, pre-tokenizer, ignore_merges), matching the Hugging Face tokenizer the GGUF
+# was converted from (llama.cpp hard-codes the same splits in llama-vocab.cpp).
+_GGUF_PRE: dict[str, tuple[dict[str, Any] | None, dict[str, Any], bool]] = {
+    "gpt-2": (None, _BYTE_LEVEL, False),
+    "smollm": (
+        None,
+        {"type": "Sequence", "pretokenizers": [{"type": "Digits", "individual_digits": True}, _BYTE_LEVEL]},
+        False,
+    ),
+    "qwen2": (
+        {"type": "NFC"},
+        {"type": "Sequence", "pretokenizers": [_split(_QWEN2_PATTERN), _BYTE_LEVEL_NO_REGEX]},
+        False,
+    ),
+    "llama-bpe": (
+        None,
+        {"type": "Sequence", "pretokenizers": [_split(_LLAMA3_PATTERN), _BYTE_LEVEL_NO_REGEX]},
+        True,
+    ),
+}
+
+
+def spec_from_gguf(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    """A ``tokenizer.json``-shaped description from GGUF ``tokenizer.ggml.*`` metadata (BPE models only)."""
+    model = metadata.get("tokenizer.ggml.model")
+    if model != "gpt2":
+        raise TokenizerError(f"GGUF tokenizer model {model!r} is not supported (only gpt2-style BPE)")
+    pre = metadata.get("tokenizer.ggml.pre", "gpt-2")
+    if pre not in _GGUF_PRE:
+        raise TokenizerError(f"GGUF pre-tokenizer {pre!r} is not supported (supported: {', '.join(sorted(_GGUF_PRE))})")
+    normalizer, pre_tokenizer, ignore_merges = _GGUF_PRE[pre]
+    tokens: list[str] = list(metadata["tokenizer.ggml.tokens"])
+    types: list[int] = list(metadata.get("tokenizer.ggml.token_type", [1] * len(tokens)))
+    added = [
+        {"id": i, "content": token, "special": kind == 3, "lstrip": False, "rstrip": False, "normalized": kind != 3,
+         "single_word": False}
+        for i, (token, kind) in enumerate(zip(tokens, types, strict=True))
+        if kind in (3, 4)
+    ]  # fmt: skip
+    return {
+        "added_tokens": added,
+        "normalizer": normalizer,
+        "pre_tokenizer": pre_tokenizer,
+        "post_processor": None,
+        "decoder": {"type": "ByteLevel"},
+        "model": {
+            "type": "BPE",
+            "vocab": {token: i for i, token in enumerate(tokens)},
+            "merges": list(metadata.get("tokenizer.ggml.merges", [])),
+            "ignore_merges": ignore_merges,
+        },
+    }
+
+
+def from_model_header(tokenizer: Mapping[str, Any]) -> BpeTokenizer:
+    """The tokenizer stored in a ``model.dllm`` header by ``dllm import``."""
+    if tokenizer.get("format") == "huggingface":
+        config = tokenizer.get("tokenizer_config") or {}
+        return BpeTokenizer(
+            tokenizer["tokenizer_json"],
+            end_of_sequence=special_token_text(config.get("eos_token")),
+            begin_of_sequence=special_token_text(config.get("bos_token")),
+        )
+    if tokenizer.get("format") == "gguf":
+        eos = tokenizer.get("tokenizer.ggml.eos_token_id")
+        bos = tokenizer.get("tokenizer.ggml.bos_token_id")
+        return BpeTokenizer(spec_from_gguf(tokenizer), end_of_sequence=eos, begin_of_sequence=bos)
+    raise TokenizerError(f"unknown tokenizer format {tokenizer.get('format')!r}")
+
+
+def special_token_text(value: Any) -> str | None:
+    """``tokenizer_config.json`` stores special tokens as strings or as AddedToken dicts."""
+    if isinstance(value, dict):
+        return value.get("content")
+    return value
