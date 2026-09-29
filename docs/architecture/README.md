@@ -13,7 +13,7 @@ these pages explain the structure around them and link there for detail.
 | [Inference pipeline](inference.md) | One chat request from messages to token stream, KV and prompt caches, batching | ✅ |
 | [Kernels and compute backends](kernels.md) | The C++ layer, SIMD and thread dispatch, CUDA, the build | ✅ |
 | [Model import and format](models.md) | From safetensors/GGUF to `model.dllm` to a running decoder | ✅ |
-| Front ends, APIs and MCP | How the CLI, servers and MCP share one engine | planned ([#68](https://github.com/vrenken/etalii.dllm/issues/68)) |
+| [Front ends, APIs and MCP](front-ends.md) | How the CLI, the OpenAI, Anthropic and Ollama APIs and MCP share one engine | ✅ |
 | Fine-tuning | One reproducible training step, checkpoints and resume | planned ([#69](https://github.com/vrenken/etalii.dllm/issues/69)) |
 | Build, CI and releases | Workflows, wheels, the Docker image | planned ([#70](https://github.com/vrenken/etalii.dllm/issues/70)) |
 
@@ -36,7 +36,7 @@ Who and what talks to the engine. Everything inside the box is this repository.
 ```mermaid
 flowchart LR
     user(["Person"])
-    sdk(["OpenAI / Anthropic SDK clients,<br/>agents, IDEs"])
+    sdk(["OpenAI / Anthropic / Ollama clients,<br/>agents, IDEs"])
     mcpclient(["MCP clients<br/>(Claude Desktop, Claude Code, ...)"])
     hub[("Hugging Face Hub<br/>safetensors, GGUF, tokenizer.json")]
     mcpservers(["External MCP servers<br/>(tools)"])
@@ -64,8 +64,8 @@ flowchart LR
     engine -.->|--device cuda| gpu
 ```
 
-- **Front ends:** `dllm` (generate, chat, import, finetune), `dllm-server` (OpenAI and Anthropic compatible HTTP
-  API plus a chat page at `/`) and `dllm-mcp` (the model as an MCP server). The MCP host goes the other way: it lets
+- **Front ends:** `dllm` (generate, chat, import, finetune), `dllm-server` (OpenAI Chat Completions and Responses,
+  Anthropic and Ollama compatible HTTP APIs plus a chat page at `/`) and `dllm-mcp` (the model as an MCP server). The MCP host goes the other way: it lets
   the model call tools of external MCP servers during a chat.
 - **Models** are not trained here from scratch. Small open-weight models are converted once by `dllm import` into
   a single `model.dllm` file that records weights, tokenizer, chat template, source and licence. Without a model file
@@ -82,7 +82,7 @@ flowchart TB
     subgraph fe["Front ends (thin, no logic)"]
         direction LR
         cli["cli.py"]
-        app["server/app.py<br/>server/anthropic_api.py"]
+        app["server/app.py, responses_api.py<br/>anthropic_api.py, ollama_api.py"]
         mcps["mcp_server.py"]
         mcph["mcp_host.py"]
     end
@@ -151,7 +151,7 @@ AdamW from `grad.hpp`.
 | `cuda.py` | The GPU backend: finding NVRTC, `CudaTensor`, device-side operations. |
 | `importing/` | Readers for safetensors and GGUF (with GGML dequantisation), the Hugging Face download pinned to a commit, the licence policy, and `dllm import`. |
 | `training/` | Gradients of the decoder, AdamW, fixed data order and checkpoints that resume bit for bit (`dllm finetune`). |
-| `server/` | The OpenAI (`app.py`, `contracts.py`) and Anthropic (`anthropic_api.py`, `anthropic_contracts.py`) wire formats and the chat page `static/chat.html`. |
+| `server/` | The OpenAI Chat Completions (`app.py`, `contracts.py`), OpenAI Responses (`responses_api.py`), Anthropic (`anthropic_api.py`, `anthropic_contracts.py`) and Ollama (`ollama_api.py`) wire formats, and the chat page `static/chat.html`. |
 | `mcp_server.py` | The model as an MCP server over stdio (tools, prompts, resources). |
 | `mcp_host.py` | The MCP client host: the model calls external MCP tools in a loop over `chat_stream`. |
 | `cli.py` | The `dllm` command. |
