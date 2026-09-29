@@ -97,12 +97,12 @@ def test_lowercase_normalizer_alone():
 
 
 def test_unsupported_normalizer_fails_at_load():
-    with pytest.raises(TokenizerError, match="normalizer 'Strip' is not supported"):
-        BpeTokenizer(minimal_spec(normalizer={"type": "Strip", "left": True, "right": True}))
+    with pytest.raises(TokenizerError, match="normalizer 'BertNormalizer' is not supported"):
+        BpeTokenizer(minimal_spec(normalizer={"type": "BertNormalizer"}))
     # Also when nested inside a sequence.
-    with pytest.raises(TokenizerError, match="normalizer 'Replace' is not supported"):
+    with pytest.raises(TokenizerError, match="normalizer 'Precompiled' is not supported"):
         BpeTokenizer(
-            minimal_spec(normalizer={"type": "Sequence", "normalizers": [{"type": "NFC"}, {"type": "Replace"}]})
+            minimal_spec(normalizer={"type": "Sequence", "normalizers": [{"type": "NFC"}, {"type": "Precompiled"}]})
         )
 
 

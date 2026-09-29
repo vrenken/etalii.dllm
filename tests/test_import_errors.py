@@ -451,10 +451,12 @@ def test_rope_settings_are_mapped(tmp_path, change, theta, scaling):
 
 
 @pytest.mark.parametrize("family", ["qwen2", "qwen3"])
-def test_sliding_window_attention_is_refused(tmp_path, family):
-    write_hf_checkpoint(tmp_path / "qwen", {**tiny_config(family), "use_sliding_window": True})
-    with pytest.raises(ModelImportError, match="sliding-window attention is not supported"):
-        import_model(tmp_path / "qwen", tmp_path / "out.dllm")
+def test_qwen_sliding_window_is_imported(tmp_path, family):
+    change = {"use_sliding_window": True, "sliding_window": 4, "max_window_layers": 1}
+    write_hf_checkpoint(tmp_path / "qwen", {**tiny_config(family), **change})
+    config = import_model(tmp_path / "qwen", tmp_path / "out.dllm").config
+    assert config.sliding_window == 4
+    assert [config.window(i) for i in range(config.layers)] == [None] + [4] * (config.layers - 1)
 
 
 def test_checkpoint_without_config_is_refused(tmp_path):

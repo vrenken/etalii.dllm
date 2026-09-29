@@ -30,7 +30,10 @@ TINY_IMPORT_FINGERPRINT = "1585fbbfe689fd0d52dc36a4b3668f3af07babda2f72c8bfd33d9
 
 # fingerprint() of the decoder's next-token logits for tests/test_transformer.py::PROMPT on the tiny imported models.
 TINY_LOGITS_FINGERPRINT = {
+    "granite": "d899150301a14e954bf92d5f768c0d74ca8fba8b7c60ed433a0e90e89704c5ca",
     "llama": "12a0878056708099f139e39c6948153b7ba152960259846ab9caa940863e1e29",
+    "mistral": "a03b36df3ec07340f1e54d9d2150a77afd8e08a261977d61d7d51c59248e075f",
+    "olmo2": "4ad8a7f8864541c90f8b7b358e0b7bfae11e966cdde3b3246f331a4f1916a49e",
     "qwen2": "9d284fb62e7360dc835fcd1dd9cac2b54c6bff5c66744d980c02025039330d0f",
     "qwen3": "be9c8d225e709f628a67fb3114a81fe94f4c61456e9228869171dbf0c6e3aefc",
 }
@@ -39,6 +42,7 @@ TINY_LOGITS_FINGERPRINT = {
 # for tests/test_training.py::TOKENS on the tiny imported models.
 GRADIENT_FINGERPRINT = {
     "llama": "d7c7892dd31fec99e21991a1555dae2e6a431cf8a7e0bef1857e9b3d16cca5c5",
+    "mistral": "c458fd0ed0194d5bcef7b150ca5fa3b853b589d3c4c02e44a763faefe19e6db6",
     "qwen2": "59dd1f723fda011ecefaa158fbb1557c05ddc03a97cbadae70d3c358c5081cf3",
     "qwen3": "86666c63aea685d30b8f66d665d7c221071c4b97c13213d1588718c8bd18cbd8",
 }
@@ -46,6 +50,7 @@ GRADIENT_FINGERPRINT = {
 # Fingerprint of the model.dllm exported after tests/test_training.py::RUN (6 AdamW steps on the ASCII data).
 FINETUNE_FINGERPRINT = {
     "llama": "8cce2d4c31c0db30903367d948b48a2cac91e0058659f839619a06577c2db5d8",
+    "mistral": "eb8535983feda9d1a8c1627c194e8fc97b3e970be901364db4939eca08b66ba1",
     "qwen2": "557ffcff23dfc853308c73c68534cef212ee3873741fd140c4978fad806a2964",
     "qwen3": "bd00cb4c7be0ebba8bc67300af300ea28054a8147f74480b788e7aa131d02514",
 }
@@ -81,5 +86,13 @@ REFERENCE_MODEL_FINGERPRINTS = {
     "qwen3": {  # greedy chat rendered with enable_thinking=False
         "import": "c34b4666335e7e0dbe110ee9b9fc78936b84391a57a420688fd78036ad6df5b7",
         "chat": "109ee1a8513bf1dad8a34b0483a0f3045fe18cbf7c03820e4e359cc20912201c",
+    },
+    "tinyllama": {
+        "import": "b02b4f3085396f3a0b20e07f5b875c9e4a0fbf996dcbc954953bc7d7346b4a4e",
+        "chat": "12608d6f03ed2ea7892990ed181b39a3d0df693637f168ca34008af1403d4bc3",
+    },
+    "olmo2": {
+        "import": "183baa6ee6dcc08d855a34f1531b7e5cd1d918c21c6e8bef4cebde7ec675d118",
+        "chat": "28bbe79bdd0ca41816a367ee7bb30120cb7072991d1eefa2e0cb16a1f1ca8767",
     },
 }

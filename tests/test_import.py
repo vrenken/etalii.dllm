@@ -288,3 +288,32 @@ def test_cli_import_and_inspect(tmp_path, capsys):
     output = capsys.readouterr().out
     assert "Apache-2.0" in output and "example/tiny" in output and TINY_IMPORT_FINGERPRINT in output
     assert cli(["import", str(tmp_path / "missing"), "-o", str(tmp_path / "x.dllm")]) == 1
+
+
+def test_sliding_window_layers_follow_the_hugging_face_config():
+    from etalii_dllm.importing.importer import hf_config
+
+    mistral = hf_config(tiny_config("mistral"))
+    assert (mistral.family, mistral.sliding_window, mistral.sliding_window_layers) == ("mistral", 3, None)
+    assert [mistral.window(i) for i in range(2)] == [3, 3]
+    assert hf_config({**tiny_config("mistral"), "sliding_window": None}).sliding_window is None
+    # Qwen2 slides only when asked, on the layers from max_window_layers on.
+    qwen = {**tiny_config("qwen2"), "sliding_window": 5, "max_window_layers": 1}
+    assert hf_config(qwen).sliding_window is None
+    windowed = hf_config({**qwen, "use_sliding_window": True})
+    assert (windowed.sliding_window_layers, windowed.window(0), windowed.window(1)) == ((1,), None, 5)
+    # transformers' own per-layer list wins.
+    listed = hf_config({**tiny_config("mistral"), "layer_types": ["sliding_attention", "full_attention"]})
+    assert listed.sliding_window_layers == (0,)
+    with pytest.raises(ModelImportError, match="layer_types"):
+        hf_config({**tiny_config("mistral"), "layer_types": ["chunked_attention", "full_attention"]})
+
+
+def test_models_without_a_window_keep_their_file_bytes(tmp_path):
+    """The window fields are written only when set, so earlier model files keep their exact bytes."""
+    write_hf_checkpoint(tmp_path / "tiny")
+    assert import_model(tmp_path / "tiny", tmp_path / "tiny.dllm").fingerprint == TINY_IMPORT_FINGERPRINT
+    write_hf_checkpoint(tmp_path / "mistral", tiny_config("mistral"))
+    import_model(tmp_path / "mistral", tmp_path / "mistral.dllm")
+    config = ModelFile(tmp_path / "mistral.dllm").config
+    assert (config.sliding_window, config.sliding_window_layers) == (3, None)

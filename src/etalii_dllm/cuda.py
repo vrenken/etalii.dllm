@@ -322,13 +322,33 @@ def rope(
 
 
 def attention(
-    q: CudaTensor, k: CudaTensor, v: CudaTensor, *, kv_len: int, scale: float, causal: bool, q_offset: int
+    q: CudaTensor,
+    k: CudaTensor,
+    v: CudaTensor,
+    *,
+    kv_len: int,
+    scale: float,
+    causal: bool,
+    q_offset: int,
+    window: int | None = None,
 ) -> CudaTensor:
     """Attention of ``q[q_len, q_heads, d]`` over the first ``kv_len`` rows of ``k`` and ``v`` (a KV cache may be
-    longer)."""
+    longer); ``window`` as in :func:`etalii_dllm.numerics.attention`."""
     q_len, q_heads, head_dim = q.shape
     kv_heads, value_dim = k.shape[1], v.shape[2]
     out = _kernels.cuda_attention(
-        q.array, k.array, v.array, q_len, kv_len, q_heads, kv_heads, head_dim, value_dim, scale, causal, q_offset
+        q.array,
+        k.array,
+        v.array,
+        q_len,
+        kv_len,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        scale,
+        causal,
+        q_offset,
+        window or 0,
     )
     return CudaTensor(out, (q_len, q_heads, value_dim))
