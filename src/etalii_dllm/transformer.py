@@ -123,6 +123,18 @@ class KVCache:
         del self.tokens[length:]
 
 
+def _rope_scaled(name: str, tensor: Tensor, config: TransformerConfig) -> Tensor:
+    """``tensor`` with the rows feeding the rotated dimensions of each query or key head multiplied (elementwise,
+    float32) by the LongRoPE attention factor; other tensors unchanged."""
+    if not name.endswith(("attention.q.weight", "attention.q.bias", "attention.k.weight", "attention.k.bias")):
+        return tensor
+    values = tensor.numpy()
+    heads = values.shape[0] // config.head_dim
+    rows = values.reshape(heads, config.head_dim, *values.shape[1:]).copy()
+    rows[:, : config.rotary_dimension] *= np.float32(config.rope_attention_factor)
+    return Tensor(rows.reshape(values.shape))
+
+
 class Transformer:
     """A decoder-only transformer with the architecture and tensor names of ``docs/model-format.md``."""
 
@@ -162,6 +174,12 @@ class Transformer:
                 name: Tensor(tensor.numpy() * residual) if name.endswith(scaled) else tensor
                 for name, tensor in weights.items()
             }
+        if config.rope_attention_factor != 1.0:
+            if config.qk_norm:
+                raise ValueError("a LongRoPE attention factor together with QK-norm is not supported")
+            # LongRoPE scales the rotated query and key dimensions by its attention factor. Rotation is linear, so
+            # scaling the rows of the q/k projections that produce those dimensions is the same map.
+            weights = {name: _rope_scaled(name, tensor, config) for name, tensor in weights.items()}
         head = weights["token_embedding.weight" if config.tie_word_embeddings else "lm_head.weight"]
         # Matrices are packed (or quantised, or uploaded to the GPU) once here; norms and biases stay plain (on the
         # GPU they are uploaded too); the embedding table stays on the host, which looks up the rows.
@@ -174,7 +192,9 @@ class Transformer:
             else:
                 self._w[name] = tensor
         self._lm_head = _prepare(head, quantize, self.device)
-        self._inv_freq = rope_inv_freq(config.head_dim, config.rope_theta, scaling=config.rope_scaling)
+        self._inv_freq = rope_inv_freq(
+            config.head_dim, config.rope_theta, rotary_dim=config.rotary_dimension, scaling=config.rope_scaling
+        )
         if self.device == "cuda":
             self._gpu_inv_freq = cuda.upload_raw(self._inv_freq)
 

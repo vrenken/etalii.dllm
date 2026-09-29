@@ -459,6 +459,75 @@ def test_qwen_sliding_window_is_imported(tmp_path, family):
     assert [config.window(i) for i in range(config.layers)] == [None] + [4] * (config.layers - 1)
 
 
+def test_phi3_longrope_and_partial_rotary_are_imported(tmp_path):
+    """The attention factor comes from max/original context as in transformers; "su" is Phi-3's old name for
+    LongRoPE; the context stops at the original one (the short factors); a window that never binds is dropped."""
+    import math
+
+    from etalii_dllm.importing.importer import hf_config
+
+    rope = {"type": "su", "short_factor": [1.0, 2.0], "long_factor": [3.0, 4.0]}
+    change = {"max_position_embeddings": 4096, "sliding_window": 1024, "rope_scaling": rope}
+    config = hf_config({**tiny_config("phi3"), **change})
+    assert config.rotary_dim == 4 and config.rotary_dimension == 4
+    assert config.context_length == 64 and config.sliding_window is None
+    assert config.rope_scaling == {
+        "rope_type": "longrope",
+        "short_factor": [1.0, 2.0],
+        "long_factor": [3.0, 4.0],
+        "original_max_position_embeddings": 64,
+        "attention_factor": config.rope_attention_factor,
+    }
+    assert config.rope_attention_factor == pytest.approx(math.sqrt(1 + math.log(64) / math.log(64)), abs=1e-15)
+    # transformers v5 layout: everything under rope_parameters.
+    v5 = {k: v for k, v in tiny_config("phi3").items() if k not in ("rope_scaling", "partial_rotary_factor")}
+    v5["rope_parameters"] = {
+        "rope_type": "longrope",
+        "rope_theta": 1e4,
+        "partial_rotary_factor": 0.75,
+        "original_max_position_embeddings": 32,
+        "factor": 1.0,
+        "short_factor": [1.0] * 3,
+        "long_factor": [1.0] * 3,
+    }
+    config = hf_config(v5)
+    assert config.rotary_dim == 6 and config.rope_theta == 1e4 and config.context_length == 32
+    assert config.rope_attention_factor == 1.0
+
+
+def test_phi3_without_rope_scaling_rotates_whole_heads(tmp_path):
+    from etalii_dllm.importing.importer import hf_config
+
+    plain = {**tiny_config("phi3"), "rope_scaling": None, "partial_rotary_factor": 1.0}
+    config = hf_config(plain)
+    assert config.rotary_dim is None and config.rope_scaling is None and config.context_length == 128
+    assert "rotary_dim" not in config.to_dict()
+
+
+@pytest.mark.parametrize(
+    ("rope", "message"),
+    [
+        ({"type": "longrope", "short_factor": [1.0, 1.0]}, "LongRoPE needs"),
+        ({"type": "longrope", "short_factor": [1.0], "long_factor": [1.0]}, "short_factor needs 2 values"),
+    ],
+)
+def test_bad_longrope_is_refused(tmp_path, rope, message):
+    write_hf_checkpoint(tmp_path / "phi", {**tiny_config("phi3"), "rope_scaling": rope})
+    with pytest.raises((ModelImportError, ValueError), match=message):
+        import_model(tmp_path / "phi", tmp_path / "out.dllm")
+
+
+def test_fused_tensor_of_the_wrong_size_is_refused(tmp_path):
+    config = tiny_config("phi3")
+    weights = write_hf_checkpoint(tmp_path / "phi", config)
+    weights["model.layers.0.mlp.gate_up_proj.weight"] = weights["model.layers.0.mlp.gate_up_proj.weight"][:-1]
+    write_safetensors(
+        tmp_path / "phi" / "model.safetensors", {name: ("F32", values) for name, values in weights.items()}
+    )
+    with pytest.raises(ModelImportError, match="does not split as expected"):
+        import_model(tmp_path / "phi", tmp_path / "out.dllm")
+
+
 def test_checkpoint_without_config_is_refused(tmp_path):
     write_hf_checkpoint(tmp_path / "tiny")
     (tmp_path / "tiny" / "config.json").unlink()

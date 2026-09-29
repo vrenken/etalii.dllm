@@ -225,7 +225,8 @@ def rope_inv_freq(
 
     ``scaling`` takes a Hugging Face ``rope_scaling`` dict: ``rope_type`` (or ``type``) ``"default"``, ``"linear"``
     (positions divided by ``factor``) or ``"llama3"`` (``factor``, ``low_freq_factor``, ``high_freq_factor``,
-    ``original_max_position_embeddings``).
+    ``original_max_position_embeddings``) or ``"longrope"`` (every frequency divided by its ``short_factor``; the
+    ``long_factor`` set is never used, see ``docs/model-format.md``).
     """
     dim = head_dim if rotary_dim is None else rotary_dim
     if dim <= 0 or dim % 2 or dim > head_dim:
@@ -256,6 +257,12 @@ def rope_inv_freq(
                 smooth = (original / wavelen - low) / (high - low)
                 scaled.append((1 - smooth) * f / factor + smooth * f)
         freqs = scaled
+    elif kind == "longrope":
+        assert scaling is not None
+        short = [float(f) for f in scaling["short_factor"]]
+        if len(short) != len(freqs):
+            raise ValueError(f"longrope short_factor needs {len(freqs)} values, got {len(short)}")
+        freqs = [f / s for f, s in zip(freqs, short, strict=True)]
     elif kind != "default":
         raise ValueError(f"unsupported rope scaling {kind!r}")
     return np.array(freqs, dtype=np.float64)

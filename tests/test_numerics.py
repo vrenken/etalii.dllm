@@ -161,6 +161,45 @@ def test_rope_inv_freq_rejects_bad_rotary_dims_and_scalings():
     freqs = numerics.rope_inv_freq(16, 10000.0, rotary_dim=8)
     np.testing.assert_allclose(freqs, 10000.0 ** (-np.arange(0, 8, 2) / 8), rtol=1e-14)
     assert np.array_equal(numerics.rope_inv_freq(8, scaling={"rope_type": "default"}), numerics.rope_inv_freq(8))
+    longrope = {"rope_type": "longrope", "short_factor": [2.0, 4.0], "long_factor": [8.0, 8.0]}
+    np.testing.assert_array_equal(
+        numerics.rope_inv_freq(8, rotary_dim=4, scaling=longrope), numerics.rope_inv_freq(8, rotary_dim=4) / [2, 4]
+    )
+    with pytest.raises(ValueError, match="longrope short_factor needs 4 values, got 2"):
+        numerics.rope_inv_freq(8, scaling=longrope)
+
+
+def test_config_rejects_bad_rotary_dims_and_longrope_with_qk_norm():
+    from dataclasses import replace
+
+    from etalii_dllm.architecture import TransformerConfig
+    from etalii_dllm.transformer import Transformer
+
+    base = TransformerConfig.from_dict(
+        {
+            "family": "phi3",
+            "vocabulary_size": 8,
+            "hidden_size": 8,
+            "intermediate_size": 8,
+            "layers": 1,
+            "heads": 1,
+            "kv_heads": 1,
+            "head_dim": 8,
+            "context_length": 16,
+            "rms_norm_eps": 1e-5,
+            "rope_theta": 1e4,
+        }
+    )
+    for rotary_dim in (0, 3, 10):
+        with pytest.raises(ValueError, match="rotary_dim must be even"):
+            replace(base, rotary_dim=rotary_dim)
+    longrope = {"rope_type": "longrope", "short_factor": [1.0] * 4, "attention_factor": 2.0}
+    with pytest.raises(ValueError, match="longrope short_factor needs 2 values"):
+        replace(base, rotary_dim=4, rope_scaling=longrope)
+    config = replace(base, rope_scaling=longrope, qk_norm=True)
+    tensors = {name: np.ones(shape, dtype=np.float32) for name, shape in config.tensor_shapes().items()}
+    with pytest.raises(ValueError, match="LongRoPE attention factor together with QK-norm"):
+        Transformer(config, tensors)
 
 
 def test_unknown_devices_and_approximations_are_rejected():

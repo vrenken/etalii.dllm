@@ -62,7 +62,7 @@ uses the first, API `logprobs` the second.
 
 - **`rope_inv_freq(head_dim, theta, rotary_dim, scaling)`** computes `theta^(-2i/rotary_dim)` as
   `exp(-(2i/rotary_dim) log theta)` in double with the kernels above, then applies Hugging Face `rope_scaling`:
-  `linear` or `llama3`. (Hugging Face computes these in float32; our values are closer to exact, so they will not
+  `linear`, `llama3` or `longrope` (each frequency divided by its `short_factor`). (Hugging Face computes these in float32; our values are closer to exact, so they will not
   match its bits, only its values to float precision.)
 - **`rope(x, positions, inv_freq, interleaved)`** rotates `x[tokens, heads, head_dim]`. The angle
   `position * inv_freq[i]` is formed in double and fed to `dllm::sin`/`dllm::cos`; the rotation is done in double and

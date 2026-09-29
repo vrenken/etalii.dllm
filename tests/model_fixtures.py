@@ -38,7 +38,8 @@ TINY_LLAMA_CONFIG = {
 def tiny_config(family: str) -> dict:
     """The tiny config for ``family``: Qwen2 unties the head; Qwen3 adds QK-norm and a head size of its own; Mistral
     slides a window of 3 tokens (shorter than the test prompts, so the window matters); OLMo 2 normalises outputs
-    instead of inputs and the whole query and key projections; Granite adds its four multipliers."""
+    instead of inputs and the whole query and key projections; Granite adds its four multipliers; Phi-3 fuses its
+    projections, rotates half of each (wider) head and uses LongRoPE with a window of 3."""
     config = {**TINY_LLAMA_CONFIG, "model_type": family}
     if family == "granite":
         config.update(
@@ -47,6 +48,22 @@ def tiny_config(family: str) -> dict:
             attention_multiplier=0.125,
             residual_multiplier=0.22,
             logits_scaling=8.0,
+        )
+    elif family == "phi3":
+        config.update(
+            architectures=["Phi3ForCausalLM"],
+            pad_token_id=0,
+            hidden_size=32,
+            tie_word_embeddings=False,
+            sliding_window=3,
+            partial_rotary_factor=0.5,
+            original_max_position_embeddings=64,
+            rope_scaling={
+                "type": "longrope",
+                "short_factor": [4.0, 1.0],
+                "long_factor": [2.0, 4.0],
+                "attention_factor": 4.0,
+            },
         )
     elif family == "olmo2":
         config.update(architectures=["Olmo2ForCausalLM"], tie_word_embeddings=False, attention_bias=False)
@@ -84,7 +101,7 @@ def hf_weights(config: dict, seed: int = 11) -> dict[str, np.ndarray]:
     family = config["model_type"]
     ours = TransformerConfig.from_dict(
         {
-            "family": family if family in ("granite", "mistral", "olmo2", "qwen2", "qwen3") else "llama",
+            "family": family if family in ("granite", "mistral", "olmo2", "phi3", "qwen2", "qwen3") else "llama",
             "vocabulary_size": config["vocab_size"],
             "hidden_size": config["hidden_size"],
             "intermediate_size": config["intermediate_size"],
@@ -134,6 +151,15 @@ def hf_weights(config: dict, seed: int = 11) -> dict[str, np.ndarray]:
             hf = f"model.layers.{layer}.{hf_rest}"
         values = fill_gaussian(seed * 1000 + index, int(np.prod(shape))).reshape(shape) * np.float32(0.1)
         weights[hf] = bf16_to_float32(to_bf16_bits(values))
+    if family == "phi3":  # fused projections, rows stacked q, k, v and gate, up
+        for layer in range(config["num_hidden_layers"]):
+            p = f"model.layers.{layer}."
+            weights[p + "self_attn.qkv_proj.weight"] = np.concatenate(
+                [weights.pop(p + f"self_attn.{x}_proj.weight") for x in "qkv"]
+            )
+            weights[p + "mlp.gate_up_proj.weight"] = np.concatenate(
+                [weights.pop(p + f"mlp.{x}_proj.weight") for x in ("gate", "up")]
+            )
     return weights
 
 

@@ -18,20 +18,25 @@ PROMPT = [1, 17, 42, 5, 63, 0, 9, 9, 30]
 
 
 def reference_logits(config: TransformerConfig, w: dict[str, np.ndarray], tokens: list[int]) -> np.ndarray:
-    """Straightforward float64 NumPy version of the Hugging Face Llama/Qwen2 forward pass (test-only; NumPy
+    """Straightforward float64 NumPy version of the Hugging Face Llama/Qwen2/Phi-3 forward pass (test-only; NumPy
     reductions are fine here because this is the yardstick, not the engine)."""
     w = {name: np.asarray(values, dtype=np.float64) for name, values in w.items()}
-    n, hd = len(tokens), config.head_dim
-    inv_freq = config.rope_theta ** (-np.arange(0, hd, 2, dtype=np.float64) / hd)
+    n, hd, rd = len(tokens), config.head_dim, config.rotary_dimension
+    inv_freq = config.rope_theta ** (-np.arange(0, rd, 2, dtype=np.float64) / rd)
+    if config.rope_scaling and config.rope_scaling["rope_type"] == "longrope":
+        inv_freq = inv_freq / np.array(config.rope_scaling["short_factor"])
     angles = np.arange(n, dtype=np.float64)[:, None] * inv_freq[None, :]
+    factor = config.rope_attention_factor
     cos, sin = np.cos(np.concatenate([angles, angles], 1)), np.sin(np.concatenate([angles, angles], 1))
+    cos, sin = cos * factor, sin * factor
 
     def norm(x, weight):
         return x / np.sqrt(np.mean(x * x, axis=-1, keepdims=True) + config.rms_norm_eps) * weight
 
-    def rotate(x):  # x: [n, heads, hd]
-        half = np.concatenate([-x[..., hd // 2 :], x[..., : hd // 2]], axis=-1)
-        return x * cos[:, None, :] + half * sin[:, None, :]
+    def rotate(x):  # x: [n, heads, hd]; only the first rd dimensions rotate
+        r, rest = x[..., :rd], x[..., rd:]
+        half = np.concatenate([-r[..., rd // 2 :], r[..., : rd // 2]], axis=-1)
+        return np.concatenate([r * cos[:, None, :] + half * sin[:, None, :], rest], axis=-1)
 
     def proj(x, name):
         out = x @ w[name + ".weight"].T
@@ -70,7 +75,7 @@ def reference_logits(config: TransformerConfig, w: dict[str, np.ndarray], tokens
     return norm(x, w["final_norm.weight"])[-1] @ head.T / config.logits_scaling
 
 
-@pytest.fixture(scope="module", params=["granite", "llama", "mistral", "olmo2", "qwen2", "qwen3"])
+@pytest.fixture(scope="module", params=["granite", "llama", "mistral", "olmo2", "phi3", "qwen2", "qwen3"])
 def model(request, tmp_path_factory) -> Transformer:
     directory = tmp_path_factory.mktemp(request.param)
     config = tiny_config(request.param)
