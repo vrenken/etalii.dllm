@@ -5,20 +5,29 @@ accumulation order, independent of how many tokens are processed together. Conse
 optimisation only: prefilling a prompt at once, feeding it token by token, or recomputing from scratch all give
 bit-identical logits (``tests/test_transformer.py``). Residual additions and the SwiGLU product are elementwise
 float32 operations, as in the reference implementations.
+
+With ``device="cuda"`` the weights, activations and KV cache live on the GPU and the same steps run there
+(:mod:`etalii_dllm.cuda`); only the embedding rows go up and the logits come back. The GPU kernels produce the CPU
+bits, so the logits, and the ``system_fingerprint``, do not depend on the device (``tests/test_cuda.py``).
 """
 
 from __future__ import annotations
 
 import hashlib
+import math
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
 
+from etalii_dllm import cuda
 from etalii_dllm.architecture import TransformerConfig
+from etalii_dllm.cuda import CudaTensor
 from etalii_dllm.modelfile import ModelFile
 from etalii_dllm.numerics import (
+    CudaQuantizedWeight,
+    CudaWeight,
     FloatArray,
     PackedWeight,
     QuantizedWeight,
@@ -34,10 +43,14 @@ from etalii_dllm.tensor import Tensor
 _MATRICES = tuple(f".{m}.weight" for m in ("q", "k", "v", "o", "gate", "up", "down"))
 
 
-def _prepare(weight: Tensor, quantize: str | None) -> PackedWeight | QuantizedWeight:
+Weight = PackedWeight | QuantizedWeight | CudaWeight | CudaQuantizedWeight
+
+
+def _prepare(weight: Tensor, quantize: str | None, device: str) -> Weight:
     if quantize and QuantizedWeight.supports(weight):
-        return QuantizedWeight(weight, quantize)
-    return PackedWeight(weight)
+        quantized = QuantizedWeight(weight, quantize)
+        return CudaQuantizedWeight(quantized) if device == "cuda" else quantized
+    return CudaWeight(weight) if device == "cuda" else PackedWeight(weight)
 
 
 def quantized_fingerprint(fingerprint: str, quantize: str | None) -> str:
@@ -50,14 +63,15 @@ def quantized_fingerprint(fingerprint: str, quantize: str | None) -> str:
 
 class KVCache:
     """Keys and values of the tokens processed so far, per layer, in ``[positions, kv_heads, head_dim]`` buffers
-    that grow by doubling. The stored rows are exactly what a full recompute would produce, so reading them back
-    cannot change a result."""
+    that grow by doubling (in GPU memory for ``device="cuda"``). The stored rows are exactly what a full recompute
+    would produce, so reading them back cannot change a result."""
 
-    def __init__(self, config: TransformerConfig) -> None:
+    def __init__(self, config: TransformerConfig, device: str = "cpu") -> None:
         self._config = config
+        self.device = device
         self.tokens: list[int] = []
-        self._keys: list[np.ndarray] = []
-        self._values: list[np.ndarray] = []
+        self._keys: list = []
+        self._values: list = []
 
     def __len__(self) -> int:
         return len(self.tokens)
@@ -70,6 +84,17 @@ class KVCache:
         while capacity < length:
             capacity *= 2
         shape = (capacity, self._config.kv_heads, self._config.head_dim)
+        if self.device == "cuda":
+            for layer in range(self._config.layers):
+                keys, values = CudaTensor.empty(shape), CudaTensor.empty(shape)
+                if layer < len(self._keys):
+                    self._keys[layer][: len(self)].copy_to(keys[: len(self)])
+                    self._values[layer][: len(self)].copy_to(values[: len(self)])
+                    self._keys[layer], self._values[layer] = keys, values
+                else:
+                    self._keys.append(keys)
+                    self._values.append(values)
+            return
         for layer in range(self._config.layers):
             keys = np.zeros(shape, dtype=np.float32)
             values = np.zeros(shape, dtype=np.float32)
@@ -87,6 +112,10 @@ class KVCache:
         """Stores rows ``start ..`` of ``layer`` and returns all keys and values up to the new end (views)."""
         end = start + keys.shape[0]
         self._reserve(end)
+        if isinstance(keys, CudaTensor):
+            keys.copy_to(self._keys[layer][start:end])
+            values.copy_to(self._values[layer][start:end])
+            return self._keys[layer][:end], self._values[layer][:end]
         self._keys[layer][start:end] = keys.numpy() if isinstance(keys, Tensor) else keys
         self._values[layer][start:end] = values.numpy() if isinstance(values, Tensor) else values
         return self._keys[layer][:end], self._values[layer][:end]
@@ -106,6 +135,7 @@ class Transformer:
         model_id: str = "dllm-transformer",
         weights_fingerprint: str = "",
         quantize: str | None = None,
+        device: str = "cpu",
     ) -> None:
         expected = config.tensor_shapes()
         missing = sorted(set(expected) - set(tensors))
@@ -113,6 +143,8 @@ class Transformer:
             raise ValueError(f"missing tensors: {missing}")
         self.config = config
         self.quantization = quantize
+        self.device = cuda.check_device(device)
+        """``"cpu"`` or ``"cuda"``; never changes the output, so it is not part of the fingerprint."""
         self.weights_fingerprint = quantized_fingerprint(weights_fingerprint, quantize)
         self._id = model_id
         weights = {name: Tensor(tensors[name]) for name in expected}
@@ -123,19 +155,34 @@ class Transformer:
         """The float32 source tensors (usually memory-mapped from the model file)."""
         self._embedding = weights["token_embedding.weight"].numpy()
         head = weights["token_embedding.weight" if config.tie_word_embeddings else "lm_head.weight"]
-        # Matrices are packed (or quantised) once here; norms, biases and the embedding table stay plain.
-        self._w: dict[str, Tensor | PackedWeight | QuantizedWeight] = {
-            name: _prepare(tensor, quantize) if name.endswith(_MATRICES) else tensor for name, tensor in weights.items()
-        }
-        self._lm_head = _prepare(head, quantize)
+        # Matrices are packed (or quantised, or uploaded to the GPU) once here; norms and biases stay plain (on the
+        # GPU they are uploaded too); the embedding table stays on the host, which looks up the rows.
+        self._w: dict[str, Tensor | Weight | CudaTensor] = {}
+        for name, tensor in weights.items():
+            if name.endswith(_MATRICES):
+                self._w[name] = _prepare(tensor, quantize, self.device)
+            elif self.device == "cuda" and name not in ("token_embedding.weight", "lm_head.weight"):
+                self._w[name] = CudaTensor.upload(tensor.numpy())
+            else:
+                self._w[name] = tensor
+        self._lm_head = _prepare(head, quantize, self.device)
         self._inv_freq = rope_inv_freq(config.head_dim, config.rope_theta, scaling=config.rope_scaling)
+        if self.device == "cuda":
+            self._gpu_inv_freq = cuda.upload_raw(self._inv_freq)
 
     @classmethod
-    def from_file(cls, path: str | Path, verify: bool = True, quantize: str | None = None) -> Transformer:
+    def from_file(
+        cls, path: str | Path, verify: bool = True, quantize: str | None = None, device: str = "cpu"
+    ) -> Transformer:
         model = ModelFile(path, verify=verify)
         source = model.source.get("repository") or Path(path).stem
         return cls(
-            model.config, model.tensors, model_id=str(source), weights_fingerprint=model.fingerprint, quantize=quantize
+            model.config,
+            model.tensors,
+            model_id=str(source),
+            weights_fingerprint=model.fingerprint,
+            quantize=quantize,
+            device=device,
         )
 
     @property
@@ -147,7 +194,7 @@ class Transformer:
         return self.config.vocabulary_size
 
     def new_cache(self) -> KVCache:
-        return KVCache(self.config)
+        return KVCache(self.config, self.device)
 
     def forward(self, tokens: Sequence[int]) -> FloatArray:
         """Next-token logits after ``tokens``, recomputed from scratch (no shared state, safe to call
@@ -158,7 +205,10 @@ class Transformer:
         """The final-norm hidden states ``[positions, hidden]`` (what the LM head sees), for embeddings."""
         if not tokens:
             raise ValueError("the decoder needs at least one token of context")
-        return self._layers([(list(tokens), 0, self.new_cache())]).numpy().copy()
+        segments = [(list(tokens), 0, self.new_cache())]
+        if self.device == "cuda":
+            return self._layers_gpu(segments).numpy()
+        return self._layers(segments).numpy().copy()
 
     def forward_cached(self, tokens: Sequence[int], cache: KVCache) -> FloatArray:
         """Next-token logits after ``tokens``, reusing the longest prefix already in ``cache`` and appending the
@@ -191,25 +241,26 @@ class Transformer:
                 common -= 1
             cache.truncate(common)
             segments.append((list(tokens[common:]), common, cache))
-        hidden = self._layers(segments).numpy()
         ends = np.cumsum([len(tokens) for tokens, _, _ in segments]) - 1
+        if self.device == "cuda":
+            states = self._layers_gpu(segments)
+            last = CudaTensor.empty((len(ends), self.config.hidden_size))
+            for i, end in enumerate(ends):
+                states[end : end + 1].copy_to(last[i : i + 1])
+            logits = cuda.linear(last, self._lm_head).numpy()  # type: ignore[arg-type]
+        else:
+            hidden = self._layers(segments).numpy()
+            logits = linear(np.ascontiguousarray(hidden[ends]), self._lm_head).numpy()
         for tokens, _, cache in segments:
             cache.tokens.extend(tokens)
-        logits = linear(np.ascontiguousarray(hidden[ends]), self._lm_head).numpy()
         return [row.copy() for row in logits]
 
     def _layers(self, segments: list[tuple[list[int], int, KVCache]]) -> Tensor:
         """Runs the new ``tokens`` of each ``(tokens, start, cache)`` segment, stacked, through the decoder."""
         config = self.config
         w = self._w
-        tokens = [t for segment, _, _ in segments for t in segment]
+        tokens, positions, bounds = self._embed(segments)
         count = len(tokens)
-        if any(not 0 <= t < config.vocabulary_size for t in tokens):
-            raise ValueError("token id out of range")
-        positions = np.concatenate(
-            [np.arange(start, start + len(segment), dtype=np.int64) for segment, start, _ in segments]
-        )
-        bounds = np.concatenate([[0], np.cumsum([len(segment) for segment, _, _ in segments])])
         x = np.ascontiguousarray(self._embedding[np.asarray(tokens, dtype=np.int64)])
         for layer in range(config.layers):
             p = f"layers.{layer}."
@@ -231,3 +282,53 @@ class Transformer:
             up = linear(h, w[p + "mlp.up.weight"]).numpy()
             x = x + linear(gate * up, w[p + "mlp.down.weight"]).numpy()
         return rms_norm(x, w["final_norm.weight"], config.rms_norm_eps)
+
+    def _embed(self, segments: list[tuple[list[int], int, KVCache]]) -> tuple[list[int], np.ndarray, np.ndarray]:
+        """(token ids, absolute positions, segment bounds) of the stacked new tokens."""
+        tokens = [t for segment, _, _ in segments for t in segment]
+        if any(not 0 <= t < self.config.vocabulary_size for t in tokens):
+            raise ValueError("token id out of range")
+        positions = np.concatenate(
+            [np.arange(start, start + len(segment), dtype=np.int64) for segment, start, _ in segments]
+        )
+        bounds = np.concatenate([[0], np.cumsum([len(segment) for segment, _, _ in segments])])
+        return tokens, positions, bounds
+
+    def _layers_gpu(self, segments: list[tuple[list[int], int, KVCache]]) -> CudaTensor:
+        """:meth:`_layers` on the GPU: the same steps in the same order, on device tensors."""
+        config = self.config
+        w: dict = self._w
+        tokens, positions, bounds = self._embed(segments)
+        count = len(tokens)
+        scale = 1.0 / math.sqrt(config.head_dim)
+        x = CudaTensor.upload(self._embedding[np.asarray(tokens, dtype=np.int64)])
+        on_gpu_positions = cuda.upload_raw(positions)
+        for layer in range(config.layers):
+            p = f"layers.{layer}."
+            h = cuda.rms_norm(x, w[p + "attention_norm.weight"], config.rms_norm_eps)
+            q = cuda.linear(h, w[p + "attention.q.weight"], w.get(p + "attention.q.bias"))
+            k = cuda.linear(h, w[p + "attention.k.weight"], w.get(p + "attention.k.bias"))
+            v = cuda.linear(h, w[p + "attention.v.weight"], w.get(p + "attention.v.bias"))
+            q = cuda.rope(q.reshape(count, config.heads, config.head_dim), on_gpu_positions, self._gpu_inv_freq)
+            k = cuda.rope(k.reshape(count, config.kv_heads, config.head_dim), on_gpu_positions, self._gpu_inv_freq)
+            v = v.reshape(count, config.kv_heads, config.head_dim)
+            parts = []
+            for (_, start, cache), lo, hi in zip(segments, bounds[:-1], bounds[1:], strict=True):
+                keys, values = cache.append(layer, start, k[lo:hi], v[lo:hi])
+                end = start + int(hi - lo)
+                parts.append(
+                    cuda.attention(q[lo:hi], keys, values, kv_len=end, scale=scale, causal=True, q_offset=start)
+                )
+            if len(parts) == 1:
+                attended = parts[0]
+            else:
+                attended = CudaTensor.empty((count, config.heads, config.head_dim))
+                for part, lo, hi in zip(parts, bounds[:-1], bounds[1:], strict=True):
+                    part.copy_to(attended[lo:hi])
+            flat = attended.reshape(count, config.heads * config.head_dim)
+            x = cuda.add(x, cuda.linear(flat, w[p + "attention.o.weight"]))
+            h = cuda.rms_norm(x, w[p + "mlp_norm.weight"], config.rms_norm_eps)
+            gate = cuda.linear(h, w[p + "mlp.gate.weight"])
+            up = cuda.linear(h, w[p + "mlp.up.weight"])
+            x = cuda.add(x, cuda.linear(cuda.swiglu(gate, up), w[p + "mlp.down.weight"]))
+        return cuda.rms_norm(x, w["final_norm.weight"], config.rms_norm_eps)

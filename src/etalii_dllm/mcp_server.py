@@ -171,5 +171,5 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="dllm-mcp", description="EtAlii.Dllm MCP server (stdio)")
     add_runtime_arguments(parser)
     args = parser.parse_args(argv)
-    use_model_file(args.model, args.quantize, args.threads)
+    use_model_file(args.model, args.quantize, args.threads, args.device)
     server.run("stdio")

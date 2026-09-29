@@ -29,13 +29,17 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
 
 - `cpp/include/dllm/`: header-only C++ kernels (`random.hpp`, `math.hpp` transcendentals, `nn.hpp` matmul/norm/RoPE/
   attention, `grad.hpp` their gradients plus cross-entropy and AdamW, `quant.hpp` Q8_0, `parallel.hpp` the thread pool,
-  `simd.hpp` the per-machine AVX2/SSE2/NEON dispatch; evaluation orders in `docs/kernels.md`); `cpp/kernels.cpp` binds them as
-  `etalii_dllm._kernels`. `CMakeLists.txt` sets the floating point flags; never add `-ffast-math`, `-O3 -march=native`
+  `simd.hpp` the per-machine AVX2/SSE2/NEON dispatch, `cuda.hpp` the CUDA backend; evaluation orders in `docs/kernels.md`);
+  `cpp/kernels.cpp` binds them as `etalii_dllm._kernels`. `cpp/cuda/kernels.cu` holds the GPU kernels: CMake embeds it
+  and `math.hpp` in the extension and `cuda.hpp` compiles them at run time with NVRTC (`--fmad=false`), loading the
+  driver and NVRTC dynamically, so nothing CUDA is needed to build. GPU kernels must run the CPU kernel's exact order
+  (one thread per output element, no atomics, no warp reductions) so they give the CPU bits (`tests/test_cuda.py`). `CMakeLists.txt` sets the floating point flags; never add `-ffast-math`, `-O3 -march=native`
   style reassociation flags or `-ffp-contract=fast`.
 - `src/etalii_dllm/`: `tensor` (aligned float32 `Tensor`), `numerics` (thin wrappers over `_kernels`, fingerprints),
   `sampling`, `tokenization`, `models`, `generation`, `chat`, `engine` (`DllmEngine`, the facade shared by every front
   end; `DLLM_MODEL`/`--model` selects a `model.dllm`), `transformer` (Llama/Qwen2 decoder + KV cache), `bpe` and
-  `chat_template` (the model's own tokenizer and Jinja template), `architecture` (`TransformerConfig`), `modelfile`
+  `chat_template` (the model's own tokenizer and Jinja template), `cuda` (the GPU backend: NVRTC discovery, `CudaTensor`, device
+  ops; `--device cuda`/`DLLM_DEVICE`), `architecture` (`TransformerConfig`), `modelfile`
   (the `model.dllm` container, `docs/model-format.md`), `importing` (safetensors/GGUF readers and `dllm import`),
   `training` (gradients, AdamW, data order, checkpoints and `dllm finetune`, `docs/training.md`), `grammar`
   (JSON-schema constrained decoding over a token trie), `tools` (tool calling in the Hermes `<tool_call>` format).

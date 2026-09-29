@@ -78,8 +78,10 @@ its portable choices cost nothing yet; that may change when performance work sta
 ## Open questions
 
 - Performance budget: how close can deterministic CPU kernels get to llama.cpp on the same hardware?
-- GPU: batch-invariant, fixed-order kernels on the GPU form their own "determinism domain" with their own
-  fingerprint; how much throughput does batch invariance cost there?
+- GPU: answered in part (issue #31). Running the CPU's per-output order in double precision, without contraction,
+  makes the GPU reproduce the CPU bits exactly, so it needs no fingerprint of its own (see
+  [kernels](../kernels.md#gpu)). The cost is double-precision throughput; whether a float32 GPU "determinism domain"
+  with its own fingerprint is worth the extra golden values remains open.
 - Quantisation: is integer-only inference (including softmax and normalisation in fixed point) accurate enough
   for small models? Integer accumulation is associative, which makes parallel kernels deterministic for free.
 

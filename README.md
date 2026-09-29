@@ -17,8 +17,8 @@ agents can use it without changes.
 
 ## Status
 
-Phases 1 to 5 (kernels, importing models, fine-tuning, API parity, MCP) done, and Phase 6 (performance) except GPU
-kernels. The full pipeline (tokenizer →
+Phases 1 to 6 (kernels, importing models, fine-tuning, API parity, MCP, performance) done, including a CUDA backend
+that reproduces the CPU bits on NVIDIA GPUs. The full pipeline (tokenizer →
 model → sampler → CLI / HTTP API / MCP server) runs end to end and is proven run-to-run bit-exact by CI (on Linux, Windows and macOS, which
 today even agree with each other). The transformer building blocks (aligned `Tensor`, batch-invariant matmul,
 RMSNorm, SiLU/GELU, RoPE and grouped-query attention, see [docs/kernels.md](docs/kernels.md)) are in place, and so are
@@ -128,7 +128,7 @@ Summarised from the [research notes](docs/research/deterministic-inference.md):
 | 3. Fine-tuning ✅ | Deterministic backprop and AdamW on top of imported weights, fixed data order, reproducible checkpoints |
 | 4. API parity ✅ | Streaming (SSE), tool/function calling, JSON-schema structured output, logprobs, Anthropic Messages endpoint, embeddings. See [HTTP API](docs/api.md) |
 | 5. MCP, both directions ✅ | Richer MCP server (prompts, resources); MCP client host so the model can call external tools during a chat. See [MCP](docs/mcp.md) |
-| 6. Performance | ✅ SIMD and multi-threading with fixed, batch-invariant reduction order; ✅ integer quantisation (Q8_0, associative int32 accumulation); ✅ batch-invariance stress tests; GPU kernels that keep bit-exactness (open: needs GPU hardware to verify). See [kernels](docs/kernels.md#threads-and-simd) |
+| 6. Performance ✅ | ✅ SIMD and multi-threading with fixed, batch-invariant reduction order; ✅ integer quantisation (Q8_0, associative int32 accumulation); ✅ batch-invariance stress tests; ✅ CUDA kernels that give the CPU's bits (`--device cuda`). See [kernels](docs/kernels.md#threads-and-simd) and [GPU](docs/kernels.md#gpu) |
 
 ## Working with Claude Code
 

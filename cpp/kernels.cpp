@@ -13,6 +13,7 @@
 #include <tuple>
 #include <vector>
 
+#include "dllm/cuda.hpp"
 #include "dllm/grad.hpp"
 #include "dllm/math.hpp"
 #include "dllm/nn.hpp"
@@ -288,6 +289,165 @@ NB_MODULE(_kernels, m) {
           "Instruction set the dispatched kernels use.");
     m.def("set_isa", &dllm::set_isa, nb::arg("name"),
           "Forces an instruction set ('portable', 'avx2' or 'best'); for tests. Never changes results.");
+
+    // CUDA backend (cuda.hpp): the same kernels on the GPU, with the same bits. etalii_dllm.cuda wraps these;
+    // shapes are kept in Python, so the functions take sizes and check them against the arrays' byte counts.
+    using dllm::cuda::Array;
+    nb::class_<Array>(m, "CudaArray", "A range of GPU memory (a weight, an activation, a KV cache).")
+        .def_prop_ro("bytes", &Array::bytes)
+        .def("view", &Array::view, nb::arg("offset"), nb::arg("bytes"), "A byte range of the same memory.");
+
+    m.def("cuda_device_count", &dllm::cuda::Runtime::device_count, "Number of CUDA devices the driver reports.");
+    m.def(
+        "cuda_initialize",
+        [](const std::string& nvrtc_path, int device) {
+            nb::gil_scoped_release release;
+            dllm::cuda::Runtime::instance().initialize(nvrtc_path, device);
+        },
+        nb::arg("nvrtc_path"), nb::arg("device") = 0,
+        "Loads the driver and NVRTC and compiles the kernels for `device` (only the first call does work).");
+    m.def(
+        "cuda_info",
+        []() -> std::optional<std::tuple<int, std::string, std::string, std::string>> {
+            const auto& runtime = dllm::cuda::Runtime::instance();
+            if (!runtime.ready()) {
+                return std::nullopt;
+            }
+            return std::make_tuple(runtime.device_index(), runtime.device_name(), runtime.compiler(),
+                                   runtime.architecture());
+        },
+        "(device index, device name, compiler, architecture) once initialised, else None.");
+
+    m.def(
+        "cuda_upload",
+        [](nb::ndarray<nb::ro, nb::c_contig, nb::device::cpu> values) {
+            const void* data = values.data();
+            const std::size_t bytes = values.nbytes();
+            nb::gil_scoped_release release;
+            return dllm::cuda::upload(data, bytes);
+        },
+        nb::arg("values"), "Copies a C-contiguous array to the GPU.");
+    m.def(
+        "cuda_empty",
+        [](std::size_t bytes) {
+            nb::gil_scoped_release release;
+            return dllm::cuda::empty(bytes);
+        },
+        nb::arg("bytes"), "Uninitialised GPU memory.");
+    m.def(
+        "cuda_download",
+        [](const Array& array, std::vector<std::size_t> shape) {
+            std::size_t n = 1;
+            for (std::size_t d : shape) {
+                n *= d;
+            }
+            require(n * sizeof(float) == array.bytes(), "shape does not match the array");
+            float* out;
+            auto result = make_array(shape, &out);
+            nb::gil_scoped_release release;
+            dllm::cuda::download(array, out);
+            return result;
+        },
+        nb::arg("array"), nb::arg("shape"), "Copies a float32 array back from the GPU (waits for its producers).");
+    m.def(
+        "cuda_upload_linear",
+        [](FloatMatrix w) {
+            std::vector<float> wt = dllm::cuda::transpose_linear(w.data(), w.shape(1), w.shape(0));
+            nb::gil_scoped_release release;
+            return dllm::cuda::upload(wt.data(), wt.size() * sizeof(float));
+        },
+        nb::arg("weight"), "Uploads a linear weight [out, in] (transposed to [in, out]) for cuda_linear.");
+    m.def(
+        "cuda_upload_q8",
+        [](Int8Matrix q, FloatMatrix scales) {
+            const std::size_t out_features = q.shape(0);
+            const std::size_t in_features = q.shape(1);
+            require(in_features % dllm::kQ8Block == 0, "Q8_0 needs in_features to be a multiple of 32");
+            require(scales.shape(0) == out_features && scales.shape(1) == in_features / dllm::kQ8Block,
+                    "scales must be [out_features, in_features / 32]");
+            std::vector<std::uint8_t> packed = dllm::cuda::pack_q8(q.data(), scales.data(), in_features, out_features);
+            nb::gil_scoped_release release;
+            return dllm::cuda::upload(packed.data(), packed.size());
+        },
+        nb::arg("q"), nb::arg("scales"), "Uploads Q8_0 weights (from quantize_q8_0) for cuda_linear_q8.");
+
+    m.def(
+        "cuda_linear",
+        [](const Array& x, std::size_t rows, std::size_t in_features, const Array& weight, std::size_t out_features,
+           std::optional<Array> bias) {
+            nb::gil_scoped_release release;
+            return dllm::cuda::linear(x, rows, in_features, weight, out_features, bias ? &*bias : nullptr);
+        },
+        nb::arg("x"), nb::arg("rows"), nb::arg("in_features"), nb::arg("weight"), nb::arg("out_features"),
+        nb::arg("bias").none() = nb::none(), "linear() on the GPU; the same bits.");
+    m.def(
+        "cuda_linear_q8",
+        [](const Array& x, std::size_t rows, std::size_t in_features, const Array& weight, std::size_t out_features,
+           std::optional<Array> bias) {
+            nb::gil_scoped_release release;
+            return dllm::cuda::linear_q8(x, rows, in_features, weight, out_features, bias ? &*bias : nullptr);
+        },
+        nb::arg("x"), nb::arg("rows"), nb::arg("in_features"), nb::arg("weight"), nb::arg("out_features"),
+        nb::arg("bias").none() = nb::none(), "linear_q8() on the GPU; the same bits.");
+    m.def(
+        "cuda_rms_norm",
+        [](const Array& x, std::size_t rows, std::size_t dim, std::optional<Array> weight, double eps,
+           bool add_unit_offset) {
+            nb::gil_scoped_release release;
+            return dllm::cuda::rms_norm(x, rows, dim, weight ? &*weight : nullptr, eps, add_unit_offset);
+        },
+        nb::arg("x"), nb::arg("rows"), nb::arg("dim"), nb::arg("weight").none(), nb::arg("eps"),
+        nb::arg("add_unit_offset") = false, "rms_norm() on the GPU; the same bits.");
+    m.def(
+        "cuda_activation",
+        [](const Array& x, int kind) {
+            nb::gil_scoped_release release;
+            return dllm::cuda::activation(x, kind);
+        },
+        nb::arg("x"), nb::arg("kind"), "silu (0), gelu (1) or gelu_tanh (2) on the GPU; the same bits.");
+    m.def(
+        "cuda_swiglu",
+        [](const Array& gate, const Array& up) {
+            nb::gil_scoped_release release;
+            return dllm::cuda::swiglu(gate, up);
+        },
+        nb::arg("gate"), nb::arg("up"), "float32 silu(gate) * up on the GPU.");
+    m.def(
+        "cuda_add",
+        [](const Array& a, const Array& b) {
+            nb::gil_scoped_release release;
+            return dllm::cuda::add(a, b);
+        },
+        nb::arg("a"), nb::arg("b"), "float32 a + b on the GPU.");
+    m.def(
+        "cuda_copy",
+        [](const Array& source, const Array& destination) {
+            nb::gil_scoped_release release;
+            dllm::cuda::copy(source, destination);
+        },
+        nb::arg("source"), nb::arg("destination"), "Copies source into destination (same size) on the GPU.");
+    m.def(
+        "cuda_rope",
+        [](const Array& x, const Array& positions, const Array& inv_freq, std::size_t tokens, std::size_t heads,
+           std::size_t head_dim, bool interleaved, bool inverse) {
+            nb::gil_scoped_release release;
+            return dllm::cuda::rope(x, positions, inv_freq, tokens, heads, head_dim, interleaved, inverse);
+        },
+        nb::arg("x"), nb::arg("positions"), nb::arg("inv_freq"), nb::arg("tokens"), nb::arg("heads"),
+        nb::arg("head_dim"), nb::arg("interleaved") = false, nb::arg("inverse") = false,
+        "rope() on the GPU (positions int64, inv_freq float64); the same bits.");
+    m.def(
+        "cuda_attention",
+        [](const Array& q, const Array& k, const Array& v, std::size_t q_len, std::size_t kv_len, std::size_t q_heads,
+           std::size_t kv_heads, std::size_t head_dim, std::size_t value_dim, double scale, bool causal,
+           std::size_t q_offset) {
+            nb::gil_scoped_release release;
+            return dllm::cuda::attention(q, k, v, q_len, kv_len, q_heads, kv_heads, head_dim, value_dim, scale, causal,
+                                         q_offset);
+        },
+        nb::arg("q"), nb::arg("k"), nb::arg("v"), nb::arg("q_len"), nb::arg("kv_len"), nb::arg("q_heads"),
+        nb::arg("kv_heads"), nb::arg("head_dim"), nb::arg("value_dim"), nb::arg("scale"), nb::arg("causal"),
+        nb::arg("q_offset"), "attention() on the GPU (reads the first kv_len keys and values); the same bits.");
 
     m.def(
         "matmul",

@@ -105,11 +105,25 @@ Speed options (they work the same for `dllm`, `dllm-server` and `dllm-mcp`):
 dllm --model smollm2-135m.dllm --threads 2 chat "Hi"            # default: all cores ($DLLM_THREADS)
 dllm --model smollm2-135m.dllm --quantize q8_0 chat "Hi"         # 8-bit weights ($DLLM_QUANTIZE)
 dllm --model smollm2-135m.dllm --quantize q8_0 info              # shows the quantised system_fingerprint
+dllm --model smollm2-135m.dllm --device cuda chat "Hi"           # NVIDIA GPU ($DLLM_DEVICE)
 ```
 
 `--threads` never changes the output, only the speed. `--quantize q8_0` runs the linear layers on 8-bit weights:
 faster and a quarter of the memory traffic, still deterministic, but the numbers differ slightly from the float
 model, so it reports its own `system_fingerprint`. Details: [kernels](kernels.md#threads-and-simd).
+
+`--device cuda` runs the model on an NVIDIA GPU and gives exactly the same output as the CPU (same tokens, same
+`system_fingerprint`), about twice as fast in float32 and about three times as fast with `--quantize q8_0`. It needs
+the NVIDIA driver and NVRTC, the CUDA runtime compiler; nothing CUDA is needed to install the package itself:
+
+```bash
+pip install -e ".[dev,cuda]"      # adds NVRTC (nvidia-cuda-nvrtc-cu12); a CUDA toolkit or PyTorch's copy works too
+dllm --model smollm2-135m.dllm --device cuda info    # prints the GPU, e.g. "cuda (NVIDIA GeForce RTX 4080, sm_89, ...)"
+```
+
+NVRTC is found automatically in the `nvidia-cuda-nvrtc` wheel, PyTorch, `$CUDA_PATH`/`$CUDA_HOME` or
+`/usr/local/cuda`; set `DLLM_NVRTC` to the library's full path (for example `nvrtc64_120_0.dll`) to pick one, and
+`DLLM_CUDA_DEVICE` to choose a GPU other than the first. macOS has no CUDA. Details: [kernels](kernels.md#gpu).
 
 ## 4. OpenAI- and Anthropic-compatible server
 
@@ -219,9 +233,11 @@ the reproducibility is achieved: [training](training.md).
   Qwen2.5-0.5B-Instruct (tokenizer, chat template, logits within 1e-3 and the same greedy answer; see
   `tests/test_reference_models.py`). Other Llama/Qwen2 models should work but are not checked; if one misbehaves,
   please open an issue with the `dllm inspect` output.
-- Speed: CPU only (no GPU yet). On a 4-core cloud VM, SmolLM2-135M reads a prompt at about 150 tokens per second
-  and generates about 20 tokens per second (about 35 with `--quantize q8_0`); Qwen2.5-0.5B is roughly four times
-  slower. Fine-tuning costs roughly three times as much per token as reading a prompt.
+- Speed: on a 4-core cloud VM, SmolLM2-135M reads a prompt at about 150 tokens per second and generates about 20
+  tokens per second (about 35 with `--quantize q8_0`); Qwen2.5-0.5B is roughly four times slower. On an RTX 4080,
+  Qwen2.5-0.5B generates about 40 tokens per second (about 110 with `--quantize q8_0`). The GPU backend computes in
+  double precision to match the CPU bits, so it is far slower than float32 GPU engines. Fine-tuning runs on the CPU
+  only and costs roughly three times as much per token as reading a prompt.
 - Tool calling works best with models trained for it (Qwen2.5-Instruct uses the same `<tool_call>` format the
   engine asks for). SmolLM2-135M does not know tools, so expect clumsy calls from it; constrained decoding still
   guarantees that every call names a real tool with arguments that fit its schema.
