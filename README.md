@@ -120,6 +120,11 @@ Summarised from the [research notes](docs/research/deterministic-inference.md):
 - **Golden hashes in CI.** Tests assert SHA-256 hashes of weights and generated tokens; any drift fails the build.
   SIMD and threads only ever split work between output elements, so they have not changed a single hash.
 
+## Architecture
+
+[docs/architecture](docs/architecture/README.md) describes how the pieces fit together (system context, layers,
+module map), with Mermaid diagrams.
+
 ## Roadmap
 
 | Phase | Goal |
