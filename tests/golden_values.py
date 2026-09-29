@@ -71,4 +71,8 @@ REFERENCE_MODEL_FINGERPRINTS = {
         # The same answer tokens as Qwen2.5-0.5B ("The capital of France is Paris."), so the same fingerprint.
         "chat": "7a75f8d55b99478a282d601c155df0fd6c5066b613db230b610612abbdc05c37",
     },
+    "qwen3": {  # set from the first Reference models run at the pinned commit
+        "import": "pending",
+        "chat": "pending",
+    },
 }
