@@ -49,6 +49,9 @@ class DecoderGradients:
             or config.qk_norm_scope != "head"
             or config.has_multipliers
             or config.rope_attention_factor != 1.0
+            or config.norm_unit_offset
+            or config.activation != "silu"
+            or config.local_rope_theta is not None
         ):
             raise ValueError(f"fine-tuning is not supported for the {config.family} architecture yet")
         self.config = config

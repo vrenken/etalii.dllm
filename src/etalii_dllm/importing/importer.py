@@ -81,6 +81,8 @@ _HF_POST_NORM_NAMES = {
     "post_attention_layernorm.weight": "attention_post_norm.weight",
     "post_feedforward_layernorm.weight": "mlp_post_norm.weight",
 }
+# Gemma normalises both.
+_HF_SANDWICH_NORM_NAMES = {**_HF_POST_NORM_NAMES, "pre_feedforward_layernorm.weight": "mlp_norm.weight"}
 _HF_GLOBAL_NAMES = {
     "model.embed_tokens.weight": "token_embedding.weight",
     "model.norm.weight": "final_norm.weight",
@@ -157,13 +159,21 @@ def _rotary_dim(config: dict[str, Any], head_dim: int) -> int | None:
 
 
 def hf_config(config: dict[str, Any], generation: dict[str, Any] | None = None) -> TransformerConfig:
-    """Maps a Hugging Face ``config.json`` (Granite, Llama, Mistral, OLMo 2, Phi-3, Qwen2 or Qwen3) to our
+    """Maps a Hugging Face ``config.json`` (Gemma 3, Granite, Llama, Mistral, OLMo 2, Phi-3, Qwen2 or Qwen3) to our
     description."""
-    family = config.get("model_type")
-    if family not in FAMILIES:
-        raise ModelImportError(f"model_type {family!r} is not supported (supported: {', '.join(FAMILIES)})")
-    if config.get("hidden_act", "silu") != "silu":
-        raise ModelImportError(f"activation {config.get('hidden_act')!r} is not supported")
+    model_type = config.get("model_type")
+    family = _HF_MODEL_TYPES.get(model_type)
+    if family is None:
+        hint = "; import the text-only Gemma 3 checkpoint (model_type gemma3_text)" if model_type == "gemma3" else ""
+        supported = ", ".join(sorted(_HF_MODEL_TYPES))
+        raise ModelImportError(f"model_type {model_type!r} is not supported (supported: {supported}){hint}")
+    hf_activation = config.get("hidden_activation") or config.get("hidden_act") or "silu"
+    activation = _HF_ACTIVATIONS.get(hf_activation)
+    if activation is None:
+        raise ModelImportError(f"activation {hf_activation!r} is not supported")
+    for capping in ("attn_logit_softcapping", "final_logit_softcapping"):
+        if config.get(capping) is not None:
+            raise ModelImportError(f"{capping} is not supported yet")
     if config.get("mlp_bias"):
         raise ModelImportError("MLP biases are not supported")
     window, window_layers = _sliding_window_from_hf(config, family)
@@ -171,6 +181,9 @@ def hf_config(config: dict[str, Any], generation: dict[str, Any] | None = None) 
     hidden = int(config["hidden_size"])
     head_dim = int(config.get("head_dim") or hidden // heads)
     theta, scaling = _rope_from_hf(config)
+    local_theta = None
+    if family == "gemma3":
+        theta, scaling, local_theta = _gemma3_rope_from_hf(config)
     context = int(config.get("max_position_embeddings", 2048))
     if scaling and scaling["rope_type"] == "longrope":
         # transformers switches to the long factors once a sequence outgrows the original context, which would make
@@ -198,19 +211,57 @@ def hf_config(config: dict[str, Any], generation: dict[str, Any] | None = None) 
             rope_theta=theta,
             rope_scaling=scaling,
             attention_bias=family == "qwen2" or bool(config.get("attention_bias", False)),
-            qk_norm=family in ("olmo2", "qwen3"),
+            qk_norm=family in ("gemma3", "olmo2", "qwen3"),
             qk_norm_scope="all" if family == "olmo2" else "head",
-            norm_placement="post" if family == "olmo2" else "pre",
-            tie_word_embeddings=bool(config.get("tie_word_embeddings", False)),
+            norm_placement={"olmo2": "post", "gemma3": "sandwich"}.get(family, "pre"),
+            norm_unit_offset=family == "gemma3",
+            activation=activation,
+            tie_word_embeddings=bool(config.get("tie_word_embeddings", family == "gemma3")),
             bos_token_id=None if bos is None else int(bos),
             eos_token_ids=tuple(eos),
             sliding_window=window,
             sliding_window_layers=window_layers,
             rotary_dim=_rotary_dim(config, head_dim),
+            local_rope_theta=local_theta,
             **_granite_multipliers(config, family),
+            **_gemma3_multipliers(config, family, hidden),
         )
     except ValueError as error:
         raise ModelImportError(str(error)) from error
+
+
+# model_type -> family; Gemma 3's text-only checkpoints are "gemma3_text".
+_HF_MODEL_TYPES = {name: name for name in FAMILIES if name != "gemma3"} | {"gemma3_text": "gemma3"}
+_HF_ACTIVATIONS = {"silu": "silu", "gelu_pytorch_tanh": "gelu_tanh"}
+
+
+def _gemma3_rope_from_hf(config: dict[str, Any]) -> tuple[float, dict[str, Any] | None, float]:
+    """``(theta, scaling, local theta)``: the full-attention layers take ``rope_theta`` and any scaling, the
+    sliding-window layers ``rope_local_base_freq`` and none (transformers v5 keeps both under ``rope_parameters``,
+    keyed by layer type)."""
+    parameters = config.get("rope_parameters")
+    if isinstance(parameters, dict) and "full_attention" in parameters:
+        full = parameters["full_attention"] or {}
+        local = parameters.get("sliding_attention") or {}
+        theta, scaling = _rope_from_hf({"rope_parameters": {"rope_theta": 1_000_000.0, **full}})
+        local_theta, local_scaling = _rope_from_hf({"rope_parameters": {"rope_theta": 10_000.0, **local}})
+    else:
+        theta, scaling = _rope_from_hf({**config, "rope_theta": config.get("rope_theta", 1_000_000.0)})
+        local_theta, local_scaling = float(config.get("rope_local_base_freq", 10_000.0)), None
+    if local_scaling is not None:
+        raise ModelImportError("RoPE scaling on Gemma 3's sliding-window layers is not supported")
+    return theta, scaling, local_theta
+
+
+def _gemma3_multipliers(config: dict[str, Any], family: str, hidden: int) -> dict[str, Any]:
+    """Gemma scales the embedding rows by ``sqrt(hidden_size)`` and the attention scores by
+    ``query_pre_attn_scalar ** -0.5``."""
+    if family != "gemma3":
+        return {}
+    return {
+        "embedding_multiplier": math.sqrt(hidden),
+        "attention_multiplier": float(config.get("query_pre_attn_scalar", 256)) ** -0.5,
+    }
 
 
 def _granite_multipliers(config: dict[str, Any], family: str) -> dict[str, Any]:
@@ -240,6 +291,9 @@ def _sliding_window_from_hf(config: dict[str, Any], family: str) -> tuple[int | 
         sliding = tuple(i for i, kind in enumerate(layer_types) if kind == "sliding_attention")
     elif family in ("qwen2", "qwen3"):
         sliding = tuple(range(int(config.get("max_window_layers", layers)), layers))
+    elif family == "gemma3":  # older configs: every sliding_window_pattern-th layer is global
+        pattern = int(config.get("sliding_window_pattern", 6))
+        sliding = tuple(i for i in range(layers) if (i + 1) % pattern)
     else:
         sliding = tuple(range(layers))
     if not sliding:
@@ -283,7 +337,8 @@ def _hf_name(name: str, config: TransformerConfig) -> str | None:
     if match:
         if match.group(2) == "self_attn.rotary_emb.inv_freq":
             return None
-        names = {**_HF_LAYER_NAMES, **_HF_POST_NORM_NAMES} if config.norm_placement == "post" else _HF_LAYER_NAMES
+        extra = {"post": _HF_POST_NORM_NAMES, "sandwich": _HF_SANDWICH_NORM_NAMES}.get(config.norm_placement, {})
+        names = {**_HF_LAYER_NAMES, **extra}
         if match.group(2) in names:
             return f"layers.{int(match.group(1))}.{names[match.group(2)]}"
     raise ModelImportError(f"unexpected tensor {name!r}")

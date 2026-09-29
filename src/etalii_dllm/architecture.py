@@ -14,9 +14,12 @@ from typing import Any
 # an RMSNorm over each query and key head before the rotary embedding (QK-norm); "mistral" is "llama", usually with
 # sliding-window attention; "olmo2" moves the norms after attention and the MLP and normalises the whole query and
 # key projections; "granite" is "llama" with four scalar multipliers; "phi3" is "llama" whose checkpoints fuse the
-# q/k/v and gate/up projections (imports split them), often with partial rotary embeddings and LongRoPE.
-FAMILIES = ("granite", "llama", "mistral", "olmo2", "phi3", "qwen2", "qwen3")
-NORM_PLACEMENTS = ("pre", "post")
+# q/k/v and gate/up projections (imports split them), often with partial rotary embeddings and LongRoPE; "gemma3"
+# normalises both the inputs and the outputs of attention and the MLP with (1 + weight) RMSNorms, gates with GELU
+# (tanh), scales the embeddings and gives its sliding-window layers a RoPE base of their own.
+FAMILIES = ("gemma3", "granite", "llama", "mistral", "olmo2", "phi3", "qwen2", "qwen3")
+NORM_PLACEMENTS = ("pre", "post", "sandwich")
+ACTIVATIONS = ("silu", "gelu_tanh")
 QK_NORM_SCOPES = ("head", "all")
 
 
@@ -41,9 +44,12 @@ class TransformerConfig:
     qk_norm_scope: str = "head"
     norm_placement: str = "pre"
     """``"pre"``: RMSNorm on the input of attention and of the MLP (Llama). ``"post"``: on their output, before it is
-    added to the residual stream (OLMo 2)."""
+    added to the residual stream (OLMo 2). ``"sandwich"``: both (Gemma)."""
+    norm_unit_offset: bool = False
+    """Gemma: every RMSNorm (the q/k norms and the final norm included) scales by ``1 + weight``."""
     tie_word_embeddings: bool = False
     activation: str = "silu"
+    """The MLP gate: ``silu`` (SwiGLU) or ``gelu_tanh`` (GeGLU with the tanh approximation, Gemma)."""
     # Rotary pairs (i, i + d/2) as in Hugging Face checkpoints. Imports convert other layouts to this one.
     rope_interleaved: bool = False
     bos_token_id: int | None = None
@@ -60,6 +66,8 @@ class TransformerConfig:
     """Sliding-window attention (Mistral): each query sees only the last ``sliding_window`` keys, itself included."""
     sliding_window_layers: tuple[int, ...] | None = None
     """The layers that use the sliding window; ``None`` means all of them."""
+    local_rope_theta: float | None = None
+    """Gemma 3: the RoPE base of the sliding-window layers, which use no RoPE scaling; ``None`` means ``rope_theta``."""
     rotary_dim: int | None = None
     """Partial rotary embeddings (Phi-4-mini): only the first ``rotary_dim`` dimensions of each head rotate; ``None``
     means all ``head_dim``."""
@@ -74,7 +82,7 @@ class TransformerConfig:
             raise ValueError("heads must be a multiple of kv_heads")
         if self.head_dim % 2:
             raise ValueError("head_dim must be even for rotary embeddings")
-        if self.activation != "silu":
+        if self.activation not in ACTIVATIONS:
             raise ValueError(f"unsupported activation {self.activation!r}")
         if self.qk_norm_scope not in QK_NORM_SCOPES:
             raise ValueError(f"unsupported qk_norm_scope {self.qk_norm_scope!r}")
@@ -96,6 +104,18 @@ class TransformerConfig:
     @property
     def attention_scale(self) -> float:
         return 1.0 / math.sqrt(self.head_dim) if self.attention_multiplier is None else self.attention_multiplier
+
+    @property
+    def has_pre_norms(self) -> bool:
+        return self.norm_placement in ("pre", "sandwich")
+
+    @property
+    def has_post_norms(self) -> bool:
+        return self.norm_placement in ("post", "sandwich")
+
+    def uses_local_rope(self, layer: int) -> bool:
+        """Whether ``layer`` rotates with ``local_rope_theta`` (a sliding-window layer of Gemma 3)."""
+        return self.local_rope_theta is not None and self.window(layer) is not None
 
     @property
     def rotary_dimension(self) -> int:
@@ -127,12 +147,13 @@ class TransformerConfig:
         values["eos_token_ids"] = list(self.eos_token_ids)
         if not self.qk_norm:  # model files written before QK-norm existed stay byte-identical
             del values["qk_norm"]
-        for name in ("sliding_window", "sliding_window_layers", "rotary_dim"):  # likewise
+        for name in ("sliding_window", "sliding_window_layers", "rotary_dim", "local_rope_theta"):  # likewise
             if values[name] is None:
                 del values[name]
         defaults = (
             ("qk_norm_scope", "head"),
             ("norm_placement", "pre"),
+            ("norm_unit_offset", False),
             ("embedding_multiplier", 1.0),
             ("attention_multiplier", None),
             ("residual_multiplier", 1.0),
@@ -160,7 +181,7 @@ class TransformerConfig:
         shapes: dict[str, tuple[int, ...]] = {"token_embedding.weight": (self.vocabulary_size, self.hidden_size)}
         for i in range(self.layers):
             p = f"layers.{i}."
-            if self.norm_placement == "pre":
+            if self.has_pre_norms:
                 shapes[p + "attention_norm.weight"] = (self.hidden_size,)
             shapes[p + "attention.q.weight"] = (q, self.hidden_size)
             shapes[p + "attention.k.weight"] = (kv, self.hidden_size)
@@ -174,10 +195,10 @@ class TransformerConfig:
                 shapes[p + "attention.q_norm.weight"] = (q if whole else self.head_dim,)
                 shapes[p + "attention.k_norm.weight"] = (kv if whole else self.head_dim,)
             shapes[p + "attention.o.weight"] = (self.hidden_size, q)
-            if self.norm_placement == "post":
+            if self.has_post_norms:
                 shapes[p + "attention_post_norm.weight"] = (self.hidden_size,)
                 shapes[p + "mlp_post_norm.weight"] = (self.hidden_size,)
-            else:
+            if self.has_pre_norms:
                 shapes[p + "mlp_norm.weight"] = (self.hidden_size,)
             shapes[p + "mlp.gate.weight"] = (self.intermediate_size, self.hidden_size)
             shapes[p + "mlp.up.weight"] = (self.intermediate_size, self.hidden_size)
