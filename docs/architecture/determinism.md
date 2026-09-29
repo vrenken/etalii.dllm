@@ -77,7 +77,7 @@ flowchart TB
         f6["math.hpp: exp, log, sin, cos, tanh, erf<br/>from + - * / and sqrt"]
         f7["random.hpp: xoshiro256** seeded by SplitMix64<br/>(DeterministicRandom)"]
         f8["sampling.py: total order<br/>(probability desc, token id asc)"]
-        f9["bpe.py, chat_template.py: ordinal,<br/>order-independent text handling"]
+        f9["bpe.py, chat_template.py: ordinal,<br/>order-independent text handling;<br/>unicode.py: pinned Unicode 15.1"]
         f10["engine.py derive_id: ids hashed<br/>from fingerprint + request"]
         f11["cuda.hpp, kernels.cu: CPU order per thread,<br/>--fmad=false, no atomics"]
     end

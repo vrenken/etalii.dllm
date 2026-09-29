@@ -143,6 +143,7 @@ AdamW from `grad.hpp`.
 | `batching.py` | Continuous batching: concurrent generations share one `forward_batch` per step, each keeping its solo bits. |
 | `sampling.py` | Temperature, top-k and top-p sampling with a seeded generator and ties broken on token id. |
 | `tokenization.py`, `bpe.py` | The byte tokenizer of the placeholder model, and byte-level BPE driven by a `tokenizer.json`. |
+| `unicode.py` | Normalisation, lower-casing and regex categories from Unicode 15.1 tables shipped in the package, so the Python version cannot change tokenization. |
 | `models.py` | The `LanguageModel` protocol and the seeded placeholder `BigramModel`. |
 | `transformer.py` | The Llama/Qwen2/Qwen3 decoder (RMSNorm, QK-norm, RoPE, grouped-query attention, SwiGLU) and its KV cache, on CPU or GPU, float32 or Q8_0. |
 | `lora.py` | LoRA adapters: merging `W + scale · B·A` with the `linear` kernel, adapter gradients, and the PEFT directory format. |

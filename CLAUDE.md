@@ -40,7 +40,7 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
 - `src/etalii_dllm/`: `tensor` (aligned float32 `Tensor`), `numerics` (thin wrappers over `_kernels`, fingerprints),
   `sampling`, `tokenization`, `models`, `generation`, `prompt_cache` (KV caches reused across requests),
   `batching` (concurrent generations share `forward_batch` steps), `chat`, `engine` (`DllmEngine`, the facade shared by every front
-  end; `DLLM_MODEL`/`--model` selects a `model.dllm`), `transformer` (Llama/Qwen2/Qwen3 decoder + KV cache), `bpe` and
+  end; `DLLM_MODEL`/`--model` selects a `model.dllm`), `transformer` (Llama/Qwen2/Qwen3 decoder + KV cache), `bpe`, `unicode` (Unicode tables pinned to one version) and
   `chat_template` (the model's own tokenizer and Jinja template), `cuda` (the GPU backend: NVRTC discovery, `CudaTensor`, device
   ops; `--device cuda`/`DLLM_DEVICE`), `architecture` (`TransformerConfig`), `modelfile`
   (the `model.dllm` container, `docs/model-format.md`), `importing` (safetensors/GGUF readers and `dllm import`),
@@ -72,7 +72,9 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
    `+ - * /` and `sqrt`, with an accuracy test.
 4. Kernels must not change strategy based on batch size or sequence length.
 5. Sorting must use a total order (break ties on index/token id).
-6. Text processing must not depend on set iteration order, `PYTHONHASHSEED` or locale.
+6. Text processing must not depend on set iteration order, `PYTHONHASHSEED`, locale or the installed Python/`regex`
+   Unicode version: use `etalii_dllm.unicode` (pinned Unicode 15.1 tables) instead of `unicodedata`, `str.lower`
+   and `regex` `\p{..}` classes.
 7. API responses must not contain clock- or entropy-derived values; derive ids from content.
 
 ## Golden values
