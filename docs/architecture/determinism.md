@@ -24,7 +24,7 @@ flowchart LR
         threads["thread count"]
         load["server load, concurrent requests"]
         batch["batch composition, prompt length"]
-        cache["KV cache use (prefill vs token by token)"]
+        cache["KV cache use, prompt cache hits<br/>(prefill vs token by token)"]
         device["device: cpu or cuda"]
         stream["streamed or not, front end used"]
     end
@@ -39,6 +39,9 @@ flowchart LR
   when there is one) names the model part of the input. Equal fingerprints and equal requests give equal responses.
 - **The seed defaults to 0.** A request without a seed is as reproducible as one with a seed; temperature 0 is
   greedy decoding and does not use the seed at all.
+- **One counter depends on history.** With the prompt cache on (the default), the usage fields `cached_tokens` /
+  `cache_read_input_tokens` report how much of the prompt an earlier request had already computed. The generated
+  tokens never depend on it; `--prompt-cache 0` makes whole responses byte-identical regardless of history.
 - **Hardware.** Identical output on *different* hardware is not promised, so kernels may use the fastest code path
   a machine offers as long as that path is fixed for the machine. Today the Linux, Windows and macOS CI runners
   happen to agree bit for bit, and the GPU reproduces the CPU.

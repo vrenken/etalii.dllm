@@ -10,7 +10,7 @@ these pages explain the structure around them and link there for detail.
 | --- | --- | --- |
 | Overview (this page) | System context, layers, module map, the one rule every layer follows | ✅ |
 | [Determinism by design](determinism.md) | Every source of nondeterminism and the layer that removes it | ✅ |
-| Inference pipeline | One chat request from messages to token stream | planned ([#65](https://github.com/vrenken/etalii.dllm/issues/65)) |
+| [Inference pipeline](inference.md) | One chat request from messages to token stream, KV and prompt caches, batching | ✅ |
 | Kernels and compute backends | The C++ layer, SIMD and thread dispatch, CUDA | planned ([#66](https://github.com/vrenken/etalii.dllm/issues/66)) |
 | Model import and format | From safetensors/GGUF to `model.dllm` to a running decoder | planned ([#67](https://github.com/vrenken/etalii.dllm/issues/67)) |
 | Front ends, APIs and MCP | How the CLI, servers and MCP share one engine | planned ([#68](https://github.com/vrenken/etalii.dllm/issues/68)) |
@@ -139,6 +139,8 @@ AdamW from `grad.hpp`.
 | `tools.py` | Tool calling in the Hermes `<tool_call>` format: presenting tools, constraining and parsing calls. |
 | `grammar.py` | Constrained decoding: byte-level JSON grammars and the token masks they induce over a token trie. |
 | `generation.py` | The autoregressive loop: forward pass, sample, append, repeat; stop sequences, logprobs, result fingerprint. |
+| `prompt_cache.py` | KV caches of earlier requests, lent to the next prompt that shares their prefix; saves work, never changes tokens. |
+| `batching.py` | Continuous batching: concurrent generations share one `forward_batch` per step, each keeping its solo bits. |
 | `sampling.py` | Temperature, top-k and top-p sampling with a seeded generator and ties broken on token id. |
 | `tokenization.py`, `bpe.py` | The byte tokenizer of the placeholder model, and byte-level BPE driven by a `tokenizer.json`. |
 | `models.py` | The `LanguageModel` protocol and the seeded placeholder `BigramModel`. |
