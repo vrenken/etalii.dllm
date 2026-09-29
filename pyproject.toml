@@ -32,7 +32,7 @@ dev = [
 # There is no CUDA on macOS, so there the extra installs nothing.
 cuda = ["nvidia-cuda-nvrtc-cu12>=12.1; sys_platform != 'darwin'"]
 # Hugging Face transformers as the reference the imported models are compared with (tests/test_reference_models.py).
-reference = ["torch>=2.4", "transformers>=4.50"]
+reference = ["torch>=2.4", "transformers>=4.50", "peft>=0.13"]
 
 [project.scripts]
 dllm = "etalii_dllm.cli:main"

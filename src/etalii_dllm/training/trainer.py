@@ -1,5 +1,6 @@
-"""Reproducible fine-tuning: full-parameter AdamW training of an imported model on a fixed data order, with
-checkpoints that resume bit for bit.
+"""Reproducible fine-tuning: AdamW training of an imported model on a fixed data order, with checkpoints that
+resume bit for bit. Either every parameter is trained, or (``RunConfig.lora``) only LoRA adapters on the linear
+layers, with the base weights frozen (:mod:`etalii_dllm.lora`).
 
 A step takes ``batch_size`` windows from :class:`~etalii_dllm.training.data.TrainingData`, computes each window's
 loss and gradients on its own (so a window's gradients do not depend on the rest of the batch), sums the gradients
@@ -26,6 +27,7 @@ from typing import Any
 import numpy as np
 
 from etalii_dllm.architecture import TransformerConfig
+from etalii_dllm.lora import LoraConfig, adapter_gradients, adapter_shapes, init_adapters, merged_weights, write_peft
 from etalii_dllm.modelfile import ModelFile, TensorSource, canonical_json, tensor_order, write_model_file
 from etalii_dllm.numerics import FloatArray
 from etalii_dllm.training.backprop import DecoderGradients
@@ -52,6 +54,8 @@ class RunConfig:
     sequence_length: int = 128
     seed: int = 0
     optimizer: AdamWConfig = field(default_factory=AdamWConfig)
+    lora: LoraConfig | None = None
+    """Train LoRA adapters of this shape instead of every parameter."""
 
     def __post_init__(self) -> None:
         if self.steps < 1 or self.batch_size < 1 or self.sequence_length < 1:
@@ -60,12 +64,18 @@ class RunConfig:
     def to_dict(self) -> dict[str, Any]:
         values = asdict(self)
         values["optimizer"] = self.optimizer.to_dict()
+        if self.lora is None:  # full fine-tuning runs keep the settings (and exported bytes) they always had
+            del values["lora"]
+        else:
+            values["lora"] = self.lora.to_dict()
         return values
 
     @classmethod
     def from_dict(cls, values: Mapping[str, Any]) -> RunConfig:
         values = dict(values)
         values["optimizer"] = AdamWConfig(**values["optimizer"])
+        if values.get("lora") is not None:
+            values["lora"] = LoraConfig.from_dict(values["lora"])
         return cls(**values)
 
 
@@ -78,7 +88,8 @@ class StepResult:
 
 
 class FineTuner:
-    """State of one fine-tuning run: parameters, optimizer moments, step and loss history."""
+    """State of one fine-tuning run: trained parameters (every weight, or the LoRA adapters), optimizer moments, step
+    and loss history."""
 
     def __init__(
         self,
@@ -102,9 +113,16 @@ class FineTuner:
         self.run = run
         self.base_fingerprint = base_fingerprint
         self.metadata = {key: metadata.get(key) for key in _METADATA_KEYS}
-        self.params: dict[str, FloatArray] = {
-            name: np.array(params[name], dtype=np.float32, order="C", copy=True) for name in tensor_order(shapes)
-        }
+        self.lora = run.lora
+        self.base: Mapping[str, np.ndarray] | None = None
+        if self.lora is None:
+            self.params: dict[str, FloatArray] = {
+                name: np.array(params[name], dtype=np.float32, order="C", copy=True) for name in tensor_order(shapes)
+            }
+        else:
+            self.base = params  # frozen: read, never written
+            shapes = adapter_shapes(config, self.lora)
+            self.params = init_adapters(config, self.lora, run.seed)
         self.optimizer = AdamW(run.optimizer, shapes)
         self.step = 0
         self.losses: list[float] = []
@@ -132,22 +150,39 @@ class FineTuner:
         scale = 1.0 / targets_total
         loss_total = 0.0
         gradients: dict[str, FloatArray] = {}
+        weights = self.weights()
         for window in windows:
-            loss, window_gradients = self._gradients.loss_and_gradients(
-                self.params, window[:-1], window[1:], scale=scale
-            )
+            loss, window_gradients = self._gradients.loss_and_gradients(weights, window[:-1], window[1:], scale=scale)
             loss_total += loss
             for name, gradient in window_gradients.items():
                 if name in gradients:
                     gradients[name] += gradient
                 else:
                     gradients[name] = gradient.copy()
+        if self.lora is not None:
+            gradients = self._adapter_gradients(gradients)
         self.step += 1
         learning_rate = self.run.optimizer.learning_rate_at(self.step, self.run.steps)
         norm = self.optimizer.step(self.params, gradients, self.step, learning_rate)
         mean_loss = loss_total / targets_total
         self.losses.append(mean_loss)
         return StepResult(self.step, mean_loss, learning_rate, norm)
+
+    def weights(self) -> Mapping[str, np.ndarray]:
+        """The model weights the run currently describes (with LoRA: the base with the adapters merged in)."""
+        if self.lora is None or self.base is None:
+            return self.params
+        return merged_weights(self.config, self.base, self.params, self.lora)
+
+    def _adapter_gradients(self, gradients: Mapping[str, FloatArray]) -> dict[str, FloatArray]:
+        assert self.lora is not None
+        result: dict[str, FloatArray] = {}
+        for name in self.params:
+            if name.endswith(".lora_a"):
+                weight = name[: -len(".lora_a")]
+                a, b = self.params[name], self.params[weight + ".lora_b"]
+                result[name], result[weight + ".lora_b"] = adapter_gradients(gradients[weight], a, b, self.lora.scale)
+        return result
 
     def train(
         self, *, until: int | None = None, on_step: Callable[[StepResult], None] | None = None
@@ -186,9 +221,16 @@ class FineTuner:
         }
         tensors = {
             name: TensorSource(tuple(values.shape), lambda values=values: values)
-            for name, values in self.params.items()
+            for name, values in self.weights().items()
         }
         return write_model_file(path, self.config, tensors, metadata)
+
+    def export_adapter(self, directory: str | Path) -> None:
+        """Writes the trained LoRA adapters as a PEFT adapter directory (``adapter_config.json`` and
+        ``adapter_model.safetensors``); ``dllm import DIR --base BASE`` or ``--adapter DIR`` apply it."""
+        if self.lora is None:
+            raise ValueError("only LoRA runs have an adapter to export")
+        write_peft(directory, self.params, self.lora, (self.metadata.get("source") or {}).get("repository"))
 
     def _checkpoint_tensors(self) -> Iterator[tuple[str, FloatArray]]:
         for name in tensor_order(self.params):
@@ -235,8 +277,9 @@ class FineTuner:
         return fingerprint
 
     @classmethod
-    def load_checkpoint(cls, path: str | Path, data: TrainingData) -> FineTuner:
-        """Restores a run from a checkpoint; ``data`` must be the data the run was started with."""
+    def load_checkpoint(cls, path: str | Path, data: TrainingData, base: ModelFile | None = None) -> FineTuner:
+        """Restores a run from a checkpoint; ``data`` must be the data the run was started with. A LoRA checkpoint
+        holds only the adapters, so it also needs ``base``, the model the run started from."""
         path = Path(path)
         raw = path.read_bytes()
         if len(raw) < _PREFIX.size:
@@ -261,14 +304,24 @@ class FineTuner:
             values = np.frombuffer(body, dtype=_DTYPE, count=math.prod(entry["shape"]), offset=begin)
             tensors[entry["name"]] = values.reshape(entry["shape"])
         config = TransformerConfig.from_dict(header["architecture"])
+        run = RunConfig.from_dict(header["run"])
+        saved = {name[len("param/") :]: values for name, values in tensors.items() if name.startswith("param/")}
+        if run.lora is not None:
+            if base is None:
+                raise CheckpointError(f"{path}: a LoRA checkpoint needs the base model it was trained from")
+            if base.fingerprint != header["base_fingerprint"]:
+                raise CheckpointError(f"{path}: the checkpoint was trained from a different base model")
         tuner = cls(
             config,
-            {name[len("param/") :]: values for name, values in tensors.items() if name.startswith("param/")},
+            saved if run.lora is None else base.tensors,  # type: ignore[union-attr]
             data,
-            RunConfig.from_dict(header["run"]),
+            run,
             base_fingerprint=header["base_fingerprint"],
             metadata=header["metadata"],
         )
+        if run.lora is not None:
+            for name in tuner.params:
+                tuner.params[name][...] = saved[name]
         for name in tuner.optimizer.m:
             tuner.optimizer.m[name][...] = tensors[f"adam_m/{name}"]
             tuner.optimizer.v[name][...] = tensors[f"adam_v/{name}"]

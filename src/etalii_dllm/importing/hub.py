@@ -24,6 +24,7 @@ ENDPOINT = "https://huggingface.co"
 # Files an import reads. Weights in other formats (.bin, .pt, .onnx) are never downloaded.
 WANTED = (
     "config.json",
+    "adapter_config.json",
     "generation_config.json",
     "tokenizer.json",
     "tokenizer_config.json",

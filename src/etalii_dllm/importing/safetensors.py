@@ -166,3 +166,23 @@ def open_checkpoint(directory: str | Path) -> dict[str, SafetensorsTensor]:
                 raise SafetensorsError(f"{directory}: tensor {tensor.name!r} appears in more than one shard")
             tensors[tensor.name] = tensor
     return tensors
+
+
+def write_safetensors(path: str | Path, tensors: dict[str, np.ndarray], metadata: dict[str, str] | None = None) -> None:
+    """Writes float32 ``tensors`` as a safetensors file: names sorted, data in that order, the header padded to 8
+    bytes with spaces, so equal tensors give equal bytes."""
+    header: dict[str, object] = {"__metadata__": dict(metadata)} if metadata else {}
+    offset = 0
+    arrays = []
+    for name in sorted(tensors):
+        values = np.ascontiguousarray(tensors[name], dtype="<f4")
+        header[name] = {"dtype": "F32", "shape": list(values.shape), "data_offsets": [offset, offset + values.nbytes]}
+        offset += values.nbytes
+        arrays.append(values)
+    encoded = json.dumps(header, separators=(",", ":"), sort_keys=True).encode()
+    encoded += b" " * (-len(encoded) % 8)
+    with Path(path).open("wb") as stream:
+        stream.write(struct.pack("<Q", len(encoded)))
+        stream.write(encoded)
+        for values in arrays:
+            stream.write(values.tobytes())

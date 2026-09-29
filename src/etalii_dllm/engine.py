@@ -36,6 +36,8 @@ from etalii_dllm.tools import AUTO, Tool, ToolChoice
 DEFAULT_MODEL_SEED = 42
 MODEL_ENVIRONMENT_VARIABLE = "DLLM_MODEL"
 """Path of a ``model.dllm`` file for the front ends to serve; the placeholder bigram model when unset."""
+ADAPTER_ENVIRONMENT_VARIABLE = "DLLM_ADAPTER"
+"""A PEFT LoRA adapter directory merged into ``DLLM_MODEL`` when it is loaded; none when unset."""
 QUANTIZE_ENVIRONMENT_VARIABLE = "DLLM_QUANTIZE"
 """Weight quantisation for the served model (``q8_0``); float32 weights when unset or ``none``."""
 DEVICE_ENVIRONMENT_VARIABLE = "DLLM_DEVICE"
@@ -173,10 +175,13 @@ class DllmEngine:
         quantize: str | None = None,
         device: str = "cpu",
         prompt_cache: int = DEFAULT_PROMPT_CACHE_SIZE,
+        adapter: str | Path | None = None,
     ) -> DllmEngine:
         """An engine for an imported ``model.dllm``: its decoder, BPE tokenizer and chat template. ``quantize``
         (``"q8_0"``) runs the linear layers on quantised weights; that changes the output, and so the
-        ``system_fingerprint``. ``device="cuda"`` runs the decoder on the GPU with the same output."""
+        ``system_fingerprint``. ``device="cuda"`` runs the decoder on the GPU with the same output. ``adapter``, a
+        PEFT LoRA adapter directory, is merged into the weights first, exactly as ``dllm import ADAPTER --base``
+        merges it, so the output and the ``system_fingerprint`` equal those of the merged file."""
         from etalii_dllm.bpe import from_model_header, special_token_text
         from etalii_dllm.modelfile import ModelFile
         from etalii_dllm.transformer import Transformer
@@ -185,11 +190,19 @@ class DllmEngine:
         if file.tokenizer is None:
             raise ValueError(f"{path}: the model file has no tokenizer")
         model_id = str(file.source.get("repository") or Path(path).stem)
+        tensors: Mapping[str, np.ndarray] = file.tensors
+        weights_fingerprint = file.fingerprint
+        if adapter:
+            from etalii_dllm.lora import apply_adapter
+            from etalii_dllm.modelfile import data_fingerprint
+
+            tensors, _ = apply_adapter(file.config, file.tensors, adapter)
+            weights_fingerprint = data_fingerprint(tensors)
         model = Transformer(
             file.config,
-            file.tensors,
+            tensors,
             model_id=model_id,
-            weights_fingerprint=file.fingerprint,
+            weights_fingerprint=weights_fingerprint,
             quantize=quantize,
             device=device,
         )
@@ -411,9 +424,11 @@ def use_model_file(
     threads: int | None = None,
     device: str | None = None,
     prompt_cache: int | None = None,
+    adapter: str | Path | None = None,
 ) -> None:
     """Makes the front ends serve ``path`` (sets ``DLLM_MODEL``, and ``DLLM_QUANTIZE``/``DLLM_DEVICE``/
-    ``DLLM_PROMPT_CACHE`` when ``quantize``/``device``/``prompt_cache`` are given) and resets the default engine.
+    ``DLLM_PROMPT_CACHE``/``DLLM_ADAPTER`` when ``quantize``/``device``/``prompt_cache``/``adapter`` are given) and
+    resets the default engine.
     ``threads`` sets the kernel thread count; it, ``device`` and ``prompt_cache`` never change the output."""
     if path:
         os.environ[MODEL_ENVIRONMENT_VARIABLE] = str(path)
@@ -423,15 +438,21 @@ def use_model_file(
         os.environ[DEVICE_ENVIRONMENT_VARIABLE] = device
     if prompt_cache is not None:
         os.environ[PROMPT_CACHE_ENVIRONMENT_VARIABLE] = str(prompt_cache)
+    if adapter:
+        os.environ[ADAPTER_ENVIRONMENT_VARIABLE] = str(adapter)
     if threads is not None:
         set_threads(threads)
     default_engine.cache_clear()
 
 
 def add_runtime_arguments(parser: argparse.ArgumentParser) -> None:
-    """The ``--model``, ``--quantize``, ``--threads``, ``--device`` and ``--prompt-cache`` options every front end
-    shares."""
+    """The ``--model``, ``--adapter``, ``--quantize``, ``--threads``, ``--device`` and ``--prompt-cache`` options every
+    front end shares."""
     parser.add_argument("--model", help="model.dllm file to use (default: $DLLM_MODEL, else the placeholder model)")
+    parser.add_argument(
+        "--adapter",
+        help="PEFT LoRA adapter directory to merge into the model when it loads (default: $DLLM_ADAPTER, else none)",
+    )
     parser.add_argument(
         "--quantize",
         choices=("none", *QUANTIZATIONS),
@@ -490,5 +511,9 @@ def default_engine() -> DllmEngine:
     if not path:
         return DllmEngine.create_default()
     return DllmEngine.from_model_file(
-        path, quantize=configured_quantization(), device=configured_device(), prompt_cache=configured_prompt_cache()
+        path,
+        quantize=configured_quantization(),
+        device=configured_device(),
+        prompt_cache=configured_prompt_cache(),
+        adapter=os.environ.get(ADAPTER_ENVIRONMENT_VARIABLE) or None,
     )

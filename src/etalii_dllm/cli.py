@@ -35,6 +35,7 @@ def _import(args: argparse.Namespace) -> int:
             licence_file=args.licence_file,
             accept_licence=args.accept_licence,
             cache=args.cache,
+            base=args.base,
         )
     except (ModelImportError, OSError) as error:
         print(f"dllm import: {error}", file=sys.stderr)
@@ -68,6 +69,12 @@ def _inspect(args: argparse.Namespace) -> int:
             f"fine-tuned:         {tuning['steps_completed']} steps from {tuning['base_fingerprint'][:16]}"
             f" on data {tuning['data_fingerprint'][:16]}, final loss {tuning['final_loss']}"
         )
+    if model.adapter:
+        lora = model.adapter["lora"]
+        print(
+            f"adapter:            LoRA rank {lora['rank']} alpha {lora['alpha']} on {','.join(lora['targets'])},"
+            f" merged into {model.adapter['base_fingerprint'][:16]}"
+        )
     print(f"system_fingerprint: {model.fingerprint}")
     return 0
 
@@ -79,6 +86,7 @@ def _finetune(args: argparse.Namespace) -> int:
         AdamWConfig,
         CheckpointError,
         FineTuner,
+        LoraConfig,
         RunConfig,
         StepResult,
         TrainingData,
@@ -86,6 +94,9 @@ def _finetune(args: argparse.Namespace) -> int:
         read_documents,
     )
 
+    if not args.output and not args.adapter_output:
+        print("dllm finetune: pass -o/--output, --adapter-output, or both", file=sys.stderr)
+        return 1
     try:
         base = ModelFile(args.base)
         engine = DllmEngine.from_model_file(args.base, verify=False)
@@ -97,7 +108,7 @@ def _finetune(args: argparse.Namespace) -> int:
         documents = read_documents(args.data, render)
         data = TrainingData.from_documents(documents, engine.tokenizer.encode, args.sequence_length, separator)
         if args.resume:
-            tuner = FineTuner.load_checkpoint(args.resume, data)
+            tuner = FineTuner.load_checkpoint(args.resume, data, base)
         else:
             optimizer = AdamWConfig(
                 learning_rate=args.learning_rate,
@@ -107,7 +118,12 @@ def _finetune(args: argparse.Namespace) -> int:
                 schedule=args.schedule,
                 min_learning_rate=args.min_learning_rate,
             )
-            run = RunConfig(args.steps, args.batch_size, args.sequence_length, args.seed, optimizer)
+            lora = None
+            if args.lora_rank:
+                targets = tuple(t.strip() for t in args.lora_targets.split(",") if t.strip())
+                alpha = args.lora_alpha if args.lora_alpha is not None else float(args.lora_rank)
+                lora = LoraConfig(args.lora_rank, alpha, targets)
+            run = RunConfig(args.steps, args.batch_size, args.sequence_length, args.seed, optimizer, lora)
             tuner = FineTuner.from_model_file(base, data, run)
     except (ModelFileError, TrainingDataError, CheckpointError, OSError, ValueError) as error:
         print(f"dllm finetune: {error}", file=sys.stderr)
@@ -127,9 +143,16 @@ def _finetune(args: argparse.Namespace) -> int:
     tuner.train(on_step=report)
     if args.checkpoint:
         print(f"checkpoint:         {args.checkpoint} ({tuner.save_checkpoint(args.checkpoint)[:16]})")
-    fingerprint = tuner.export(args.output)
-    print(f"wrote:              {args.output}")
-    print(f"system_fingerprint: {fingerprint}")
+    if args.adapter_output:
+        if tuner.lora is None:
+            print("dllm finetune: --adapter-output needs a LoRA run (--lora-rank)", file=sys.stderr)
+            return 1
+        tuner.export_adapter(args.adapter_output)
+        print(f"adapter:            {args.adapter_output}")
+    if args.output:
+        fingerprint = tuner.export(args.output)
+        print(f"wrote:              {args.output}")
+        print(f"system_fingerprint: {fingerprint}")
     return 0
 
 
@@ -172,6 +195,7 @@ def main(argv: list[str] | None = None) -> int:
     importer.add_argument("--licence-file", help="licence text, when the source does not include it")
     importer.add_argument("--accept-licence", action="store_true", help="import a model that is not Apache/MIT")
     importer.add_argument("--cache", help="download cache for hf: sources")
+    importer.add_argument("--base", help="the model.dllm to merge a PEFT LoRA adapter source into")
 
     inspect = commands.add_parser("inspect", help="show a model.dllm file's architecture, source and licence")
     inspect.add_argument("path")
@@ -180,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
     finetune = commands.add_parser("finetune", help="fine-tune a model.dllm reproducibly (AdamW, fixed data order)")
     finetune.add_argument("base", help="the model.dllm file to start from")
     finetune.add_argument("--data", required=True, help=".txt file, or .jsonl with {'text'} or {'messages'} lines")
-    finetune.add_argument("-o", "--output", required=True, help="the fine-tuned model.dllm file to write")
+    finetune.add_argument("-o", "--output", help="the fine-tuned model.dllm file to write (LoRA: adapters merged)")
     finetune.add_argument("--steps", type=int, default=100)
     finetune.add_argument("--batch-size", type=int, default=8)
     finetune.add_argument("--sequence-length", type=int, default=128)
@@ -194,6 +218,12 @@ def main(argv: list[str] | None = None) -> int:
     finetune.add_argument("--checkpoint", help="checkpoint file to write (at the end and every --checkpoint-every)")
     finetune.add_argument("--checkpoint-every", type=int, default=0)
     finetune.add_argument("--resume", help="continue from this checkpoint (run settings come from it)")
+    finetune.add_argument("--lora-rank", type=int, default=0, help="train LoRA adapters of this rank, not all weights")
+    finetune.add_argument("--lora-alpha", type=float, help="LoRA scale numerator (default: the rank, so scale 1)")
+    finetune.add_argument(
+        "--lora-targets", default="q,k,v,o,gate,up,down", help="linear layers to adapt (comma separated)"
+    )
+    finetune.add_argument("--adapter-output", help="LoRA runs: write the adapters as a PEFT directory here")
 
     args = parser.parse_args(argv)
     if args.command == "finetune":
@@ -202,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
         return _import(args)
     if args.command == "inspect":
         return _inspect(args)
-    use_model_file(args.model, args.quantize, args.threads, args.device, args.prompt_cache)
+    use_model_file(args.model, args.quantize, args.threads, args.device, args.prompt_cache, args.adapter)
     try:
         engine = default_engine()
     except cuda.CudaUnavailableError as error:

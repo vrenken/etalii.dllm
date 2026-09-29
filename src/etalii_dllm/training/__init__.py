@@ -5,6 +5,7 @@ See ``docs/training.md``.
 
 from __future__ import annotations
 
+from etalii_dllm.lora import LoraConfig
 from etalii_dllm.training.backprop import DecoderGradients
 from etalii_dllm.training.data import TrainingData, TrainingDataError, read_documents
 from etalii_dllm.training.optimizer import AdamW, AdamWConfig
@@ -16,6 +17,7 @@ __all__ = [
     "CheckpointError",
     "DecoderGradients",
     "FineTuner",
+    "LoraConfig",
     "RunConfig",
     "StepResult",
     "TrainingData",

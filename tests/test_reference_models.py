@@ -192,6 +192,53 @@ def test_tiny_checkpoint_matches_transformers(family, tmp_path):
         np.testing.assert_allclose(ours.forward(tokens[:end]), expected, rtol=0, atol=1e-5)
 
 
+@pytest.mark.parametrize("family", ["llama", "qwen3"])
+def test_lora_adapters_match_peft(family, tmp_path):
+    """PEFT adapters import with the same math PEFT applies, and adapters trained here load in PEFT."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    peft = pytest.importorskip("peft")
+    from etalii_dllm import lora
+    from etalii_dllm.modelfile import ModelFile
+
+    write_hf_checkpoint(tmp_path / "checkpoint", tiny_config(family))
+    import_model(tmp_path / "checkpoint", tmp_path / "base.dllm")
+    tokens = [1, 17, 42, 5, 63, 0, 9, 9, 30]
+
+    def hf_model():
+        return transformers.AutoModelForCausalLM.from_pretrained(
+            tmp_path / "checkpoint", dtype=torch.float32, attn_implementation="eager"
+        ).eval()
+
+    # PEFT -> us: random A and B (init_lora_weights=False), every linear layer, rsLoRA scaling.
+    torch.manual_seed(0)
+    settings = peft.LoraConfig(
+        r=4, lora_alpha=8, init_lora_weights=False, use_rslora=True, task_type="CAUSAL_LM",
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+    )  # fmt: skip
+    peft_model = peft.get_peft_model(hf_model(), settings).eval()
+    peft_model.save_pretrained(tmp_path / "from-peft")
+    import_model(tmp_path / "from-peft", tmp_path / "merged.dllm", base=tmp_path / "base.dllm", licence="mit")
+    ours = Transformer.from_file(tmp_path / "merged.dllm")
+    with torch.no_grad():
+        expected = peft_model(torch.tensor([tokens])).logits[0, -1].numpy()
+    np.testing.assert_allclose(ours.forward(tokens), expected, rtol=0, atol=1e-5)
+
+    # us -> PEFT: an adapter written by write_peft loads in PeftModel with the same logits as our merge.
+    base = ModelFile(tmp_path / "base.dllm")
+    config = lora.LoraConfig(2, 4.0, ("q", "v", "down"))
+    adapters = lora.init_adapters(base.config, config, 3)
+    for name in adapters:
+        if name.endswith(".lora_b"):
+            adapters[name] = adapters[name] + np.float32(0.05)
+    lora.write_peft(tmp_path / "ours", adapters, config)
+    loaded = peft.PeftModel.from_pretrained(hf_model(), tmp_path / "ours").eval()
+    merged = Transformer(base.config, lora.merged_weights(base.config, base.tensors, adapters, config))
+    with torch.no_grad():
+        expected = loaded(torch.tensor([tokens])).logits[0, -1].numpy()
+    np.testing.assert_allclose(merged.forward(tokens), expected, rtol=0, atol=1e-5)
+
+
 # ---------------------------------------------------------------------------------------------------------------
 # Real models: tokenizer and chat template
 

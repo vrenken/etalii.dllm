@@ -23,7 +23,8 @@ from etalii_dllm.importing import hub
 from etalii_dllm.importing.gguf import GgufFile
 from etalii_dllm.importing.licences import PERMISSIVE, STANDARD_TEXTS
 from etalii_dllm.importing.safetensors import open_checkpoint
-from etalii_dllm.modelfile import TensorSource, write_model_file
+from etalii_dllm.lora import ADAPTER_CONFIG, AdapterError, adapter_files, apply_adapter
+from etalii_dllm.modelfile import ModelFile, TensorSource, write_model_file
 
 
 class ModelImportError(ValueError):
@@ -445,10 +446,12 @@ def import_model(
     accept_licence: bool = False,
     cache: str | Path | None = None,
     opener: hub.Opener | None = None,
+    base: str | Path | None = None,
 ) -> ImportResult:
     """Imports ``source`` (a checkpoint directory, a ``.gguf`` file, or ``hf:org/name[@revision]``) into
     ``output``. ``repository``/``revision`` record provenance for local sources; ``licence`` overrides the licence
-    the source states; ``licence_file`` supplies its text."""
+    the source states; ``licence_file`` supplies its text. With ``base`` (a ``model.dllm``), ``source`` is a PEFT
+    LoRA adapter and ``output`` is the base model with the adapter merged into its weights."""
     source_text = str(source)
     if source_text.startswith("hf:"):
         repo, rev = hub.parse_reference(source_text)
@@ -456,6 +459,12 @@ def import_model(
         path, repository, revision = snapshot.directory, snapshot.repository, snapshot.revision
     else:
         path = Path(source)
+    if (path / ADAPTER_CONFIG).exists():
+        if base is None:
+            raise ModelImportError(f"{source} is a LoRA adapter; pass --base <model.dllm> to merge it into")
+        return _import_adapter(path, output, base, repository, revision, licence, accept_licence)
+    if base is not None:
+        raise ModelImportError(f"{source} is not a LoRA adapter (no {ADAPTER_CONFIG}); --base is for adapters")
     if path.is_dir():
         converted = _convert_huggingface(path)
     elif path.is_file() and path.suffix.lower() == ".gguf":
@@ -483,3 +492,61 @@ def import_model(
         },
     )
     return ImportResult(Path(output), fingerprint, converted.config, source_record, licence_record)
+
+
+def _import_adapter(
+    directory: Path,
+    output: str | Path,
+    base_path: str | Path,
+    repository: str | None,
+    revision: str | None,
+    licence: str | None,
+    accept_licence: bool,
+) -> ImportResult:
+    """Writes ``base_path`` with the PEFT adapter in ``directory`` merged into its weights (:mod:`etalii_dllm.lora`)."""
+    base = ModelFile(base_path)
+    try:
+        weights, lora = apply_adapter(base.config, base.tensors, directory)
+    except AdapterError as error:
+        raise ModelImportError(str(error)) from error
+    card = _model_card(directory)
+    spdx = licence or card.get("license")
+    if not spdx:
+        raise ModelImportError("the adapter does not state a licence; check its card and pass --licence <spdx-id>")
+    canonical = PERMISSIVE.get(spdx.lower())
+    if canonical is None and not accept_licence:
+        raise ModelImportError(
+            f"adapter licence {spdx!r} is not Apache-2.0 or MIT; read it and pass --accept-licence to import anyway "
+            "(the merged model will be marked not redistributable)"
+        )
+    subject = repository or directory.name
+    record = dict(base.licence)
+    attribution = str(record.get("attribution", ""))
+    unmodified = "; the weights are otherwise unmodified."
+    if attribution.endswith(unmodified):
+        attribution = attribution[: -len(unmodified)] + "."
+    record["attribution"] = (
+        f"{attribution} LoRA adapter {subject}, licensed under {canonical or spdx}, merged by EtAlii.Dllm; "
+        "modified weights."
+    ).strip()
+    record["redistributable"] = bool(record.get("redistributable")) and canonical is not None
+    source: dict[str, Any] = {"format": "peft"}
+    if repository:
+        source["repository"] = repository
+    if revision:
+        source["revision"] = revision
+    source["files"] = _file_hashes([p for p in adapter_files(directory) if p.exists()], directory)
+    adapter = {
+        "base_fingerprint": base.fingerprint,
+        "lora": lora.to_dict(),
+        "licence": canonical or spdx,
+        "source": source,
+    }
+    metadata = {key: base.header.get(key) for key in ("source", "tokenizer", "chat_template", "fine_tuning")}
+    metadata["licence"] = record
+    metadata["adapter"] = adapter
+    tensors = {
+        name: TensorSource(tuple(values.shape), lambda values=values: values) for name, values in weights.items()
+    }
+    fingerprint = write_model_file(output, base.config, tensors, metadata)
+    return ImportResult(Path(output), fingerprint, base.config, dict(base.source), record)
