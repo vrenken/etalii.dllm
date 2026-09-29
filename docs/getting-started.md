@@ -38,7 +38,7 @@ cd etalii.dllm
 python -m venv .venv
 source .venv/bin/activate          # Windows (PowerShell): .venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
-pytest                              # optional: about 370 tests, ten seconds or so
+pytest                              # optional: about 1000 tests, under a minute (docs/testing.md)
 ```
 
 Check the installation with the built-in placeholder model (a tiny random bigram table, so its text is gibberish,

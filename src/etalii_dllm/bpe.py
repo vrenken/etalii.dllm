@@ -146,7 +146,7 @@ def _split_by(pattern: regex.Pattern[str], text: str, behavior: str, invert: boo
         merged = []
         previous: bool | None = None
         for piece, is_match in pieces:
-            if is_match and previous is True:
+            if is_match == previous:  # tokenizers merges runs of either kind (with invert, runs of delimiters)
                 merged[-1] += piece
             else:
                 merged.append(piece)
