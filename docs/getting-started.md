@@ -15,7 +15,7 @@ suite, golden hashes included. pip picks the right one for your machine from the
 ```bash
 python -m venv .venv
 source .venv/bin/activate          # Windows (PowerShell): .venv\Scripts\Activate.ps1
-pip install etalii-dllm --find-links https://github.com/vrenken/etalii.dllm/releases/expanded_assets/v0.1.0
+pip install etalii-dllm --find-links https://github.com/vrenken/etalii.dllm/releases/expanded_assets/v0.2.0
 ```
 
 Add `"etalii-dllm[cuda]"` instead of `etalii-dllm` for the GPU backend (Linux and Windows). Then continue with
