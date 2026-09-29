@@ -16,6 +16,8 @@
 #include <thread>
 #include <vector>
 
+#include "fpenv.hpp"
+
 #if defined(__unix__) || defined(__APPLE__)
 #include <unistd.h>
 #define DLLM_HAS_FORK 1
@@ -107,6 +109,7 @@ private:
         stopping_ = false;
         for (std::size_t i = 0; i < count; ++i) {
             workers_.emplace_back([this, seen = generation_]() mutable {
+                enter_canonical_fp_environment();  // a new thread may inherit a non-default state
                 for (;;) {
                     {
                         std::unique_lock<std::mutex> lock(mutex_);

@@ -8,6 +8,7 @@
 // point flags in CMakeLists.txt forbid the compiler from contracting anything into FMA on its own.
 #pragma once
 
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -75,9 +76,23 @@ inline Isa best_isa() {
     return isa_supported(Isa::avx2) ? Isa::avx2 : Isa::portable;
 }
 
+// DLLM_ISA=portable (or avx2) forces a path at start-up, e.g. to check in CI that every path gives the golden bits;
+// an unknown or unsupported value means the best one.
+inline Isa initial_isa() {
+    if (const char* value = std::getenv("DLLM_ISA")) {
+        const std::string name(value);
+        for (Isa isa : {Isa::portable, Isa::avx2}) {
+            if (name == isa_name(isa) && isa_supported(isa)) {
+                return isa;
+            }
+        }
+    }
+    return best_isa();
+}
+
 // The instruction set the dispatched kernels use; fixed at start-up unless a test overrides it.
 inline Isa& active_isa() {
-    static Isa isa = best_isa();
+    static Isa isa = initial_isa();
     return isa;
 }
 

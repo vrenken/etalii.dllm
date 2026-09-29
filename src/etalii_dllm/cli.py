@@ -164,6 +164,8 @@ def main(argv: list[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
 
     commands.add_parser("info", help="show the model id and system fingerprint")
+    verify = commands.add_parser("verify", help="one fingerprint to compare with another machine (same bits?)")
+    verify.add_argument("--json", action="store_true", help="print the report as JSON")
 
     generate = commands.add_parser("generate", help="continue a prompt")
     generate.add_argument("--prompt", default="")
@@ -249,6 +251,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"device:             {device}" + (f" ({gpu.name}, {gpu.architecture}, {gpu.compiler})" if gpu else ""))
         return 0
 
+    if args.command == "verify":
+        return _verify(engine, args.json)
+
     options = SamplingOptions(temperature=args.temperature, top_k=args.top_k, top_p=args.top_p, seed=args.seed)
     if args.command == "chat":
         return _chat(engine, args, options)
@@ -262,6 +267,25 @@ def main(argv: list[str] | None = None) -> int:
         file=sys.stderr,
     )
     return 0
+
+
+def _verify(engine: DllmEngine, as_json: bool) -> int:
+    from etalii_dllm import verify
+
+    report = verify.run(engine)
+    if as_json:
+        print(json.dumps(report.as_dict(), indent=2, sort_keys=True))
+    else:
+        for name, value in report.environment.items():
+            print(f"{name + ':':<20}{value}")
+        print()
+        for name, value in report.parts.items():
+            reference = verify.REFERENCE.get(name)
+            note = "" if not reference else ("  (as released)" if value == reference else "  (DIFFERS from release)")
+            print(f"{name + ':':<20}{value[:32]}{note}")
+        print(f"\nverify:             {report.fingerprint}")
+        print("Equal verify fingerprints (same model and options) mean the two machines give the same bits.")
+    return 1 if report.mismatches else 0
 
 
 def _write(text: str) -> None:

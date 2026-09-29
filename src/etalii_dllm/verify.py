@@ -1,0 +1,168 @@
+"""``dllm verify``: one fingerprint that says whether two machines give the same bits (issue #100).
+
+It runs a fixed workload and hashes every result: the kernels on fixed inputs, the pinned Unicode handling, and, with
+the engine's model, a tokenized corpus, the logits of a prompt and a greedy and a sampled answer. Equal ``verify``
+fingerprints on two machines mean they compute the same bits; a differing part shows where they diverge. The
+model-independent parts are also compared with the values this release was built with (``REFERENCE``), so a single
+machine can already tell whether it matches.
+
+Nothing here reads a clock or any entropy, so the report itself is reproducible.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import math
+import platform
+import sys
+from dataclasses import dataclass, field
+from importlib import metadata
+from typing import Any
+
+import numpy as np
+
+from etalii_dllm import __version__, numerics, unicode
+from etalii_dllm.sampling import GREEDY, SamplingOptions
+
+PROMPT = "The capital of France is"
+MAX_TOKENS = 16
+SAMPLED = SamplingOptions(temperature=0.8, seed=7)
+
+# Text that exercises normalisation, case, categories and scripts (Latin, CJK, Hangul, Greek, Cyrillic, emoji,
+# compatibility and combining characters, letters new in Unicode 15/15.1), escaped to keep the source ASCII.
+CORPUS = [
+    "Hello, world! I'm sure you'll see they've done it.",
+    "Numbers: 1234567890, 3.14159, -42 and 2026-09-29.",
+    (
+        "\u00dcn\u00efc\u00f6d\u00e9: caf\u00e9, na\u00efve, Stra\u00dfe, \u65e5\u672c\u8a9e\u306e\u30c6"
+        "\u30ad\u30b9\u30c8, \u4e2d\u6587, \ud55c\uad6d\uc5b4, \u0395\u03bb\u03bb\u03b7\u03bd\u03b9\u03ba"
+        "\u03ac \u039f\u0394\u03a5\u03a3\u03a3\u0395\u03a5\u03a3, \u0440\u0443\u0441\u0441\u043a\u0438\u0439"
+    ),
+    "Compatibility: \ufb01 \u2460 \uff21 \u212b \u2126, combining: e\u0301 q\u0323\u0307, jamo: \u1100\u1161\u11a8",
+    (
+        "Emoji \U0001f680\U0001f525\U0001f44d\U0001f3fd, symbols \u00a9\u00ae\u2122 \u2264\u2265\u2260 \u2211"
+        "\u222b, newer letters: \U00031350\U0002ebf0"
+    ),
+    "  leading spaces,\ttabs\tand\n\nnew lines\r\n",
+]
+
+# The model-independent parts as computed when this release was built (tests/test_verify.py keeps them current).
+REFERENCE = {
+    "kernels": "b47cb0a7e81cfc06a73435e64342e7fe3efadf608511a77a32071045c32cd66d",
+    "unicode": "72dd232a0b75a6974a793c2c5293ea57bad7d586b37286090ed5b059cf048caa",
+}
+
+
+def _sha256(*parts: bytes) -> str:
+    digest = hashlib.sha256()
+    for part in parts:
+        digest.update(len(part).to_bytes(8, "little"))
+        digest.update(part)
+    return digest.hexdigest()
+
+
+def _gaussian(seed: int, *shape: int) -> np.ndarray:
+    return numerics.fill_gaussian(seed, math.prod(shape)).reshape(shape)
+
+
+def kernels_fingerprint() -> str:
+    """Every kernel family on fixed pseudo-random inputs: float32 and Q8_0 linear, matmul, norm, activations, RoPE,
+    attention, softmax and the transcendentals."""
+    x, w, bias = _gaussian(1, 8, 64), _gaussian(2, 48, 64), _gaussian(3, 48)
+    q, k, v = _gaussian(4, 8, 4, 16), _gaussian(5, 8, 2, 16), _gaussian(6, 8, 2, 16)
+    outputs = [
+        numerics.linear(x, w, bias),
+        numerics.linear(x, numerics.QuantizedWeight(w), bias),
+        numerics.matmul(x, np.ascontiguousarray(w.T)),
+        numerics.rms_norm(x, _gaussian(7, 64), 1e-6),
+        numerics.silu(x),
+        numerics.gelu(x),
+        numerics.gelu(x, approximate="tanh"),
+        numerics.rope(q, np.arange(8) * 97, numerics.rope_inv_freq(16, 10000.0)),
+        numerics.attention(q, k, v),
+        numerics.softmax(_gaussian(8, 256)),
+    ]
+    arguments = np.linspace(-20.0, 20.0, 257)
+    scalars = np.array(
+        [
+            f(float(a))
+            for f in (numerics.exp, numerics.sin, numerics.cos, numerics.tanh, numerics.erf)
+            for a in arguments
+        ]
+        + [numerics.log(float(a)) for a in np.linspace(1e-3, 1e3, 257)],
+        dtype="<f8",
+    )
+    return _sha256(*(np.asarray(o, dtype="<f4").tobytes() for o in outputs), scalars.tobytes())
+
+
+def unicode_fingerprint() -> str:
+    """The pinned Unicode handling on the corpus: the four normal forms, lower-casing and a category split."""
+    words = unicode.compile(r"\p{L}+|\p{N}+|\p{M}+|\p{P}+|\p{S}+|\p{Z}+|\p{C}+")
+    parts: list[bytes] = []
+    for text in CORPUS:
+        for form in ("NFC", "NFD", "NFKC", "NFKD"):
+            parts.append(unicode.normalize(form, text).encode("utf-8"))
+        parts.append(unicode.lower(text).encode("utf-8"))
+        parts.append("\x00".join(m.group() for m in words.finditer(text)).encode("utf-8"))
+    return _sha256(*parts)
+
+
+def environment(engine: Any) -> dict[str, str]:
+    """What could make two machines differ, for the report (not part of the fingerprint)."""
+
+    def version(package: str) -> str:
+        try:
+            return metadata.version(package)
+        except metadata.PackageNotFoundError:
+            return "not installed"
+
+    import unicodedata
+
+    device = getattr(engine.model, "device", "cpu")
+    return {
+        "etalii-dllm": __version__,
+        "python": sys.version.split()[0],
+        "platform": f"{platform.system()} {platform.machine()}",
+        "instruction set": numerics.instruction_set(),
+        "threads": str(numerics.threads()),
+        "device": device,
+        "fp environment": "default" if numerics.fp_environment_is_canonical() else "changed (NumPy is affected)",
+        "unicode tables": f"{unicode.unicode_version()} (Python's own: {unicodedata.unidata_version}, not used)",
+        "numpy": np.__version__,
+        "regex": version("regex"),
+        "jinja2": version("jinja2"),
+        "model": engine.model.id,
+        "system_fingerprint": engine.system_fingerprint,
+    }
+
+
+@dataclass
+class Report:
+    parts: dict[str, str]
+    environment: dict[str, str]
+    mismatches: list[str] = field(default_factory=list)
+
+    @property
+    def fingerprint(self) -> str:
+        return _sha256(*(f"{name}={value}".encode() for name, value in self.parts.items()))[:32]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "verify": self.fingerprint,
+            "parts": self.parts,
+            "reference_mismatches": self.mismatches,
+            "environment": self.environment,
+        }
+
+
+def run(engine: Any) -> Report:
+    """Runs the workload with ``engine`` (its model, tokenizer and sampler)."""
+    parts = {"kernels": kernels_fingerprint(), "unicode": unicode_fingerprint()}
+    parts["tokenizer"] = numerics.fingerprint(
+        [t for text in CORPUS for t in [*engine.tokenizer.encode(text), -1]], dtype="<i4"
+    )
+    parts["logits"] = numerics.fingerprint(np.asarray(engine.model.forward(engine.tokenizer.encode(PROMPT))))
+    parts["greedy"] = engine.complete(PROMPT, MAX_TOKENS, GREEDY).fingerprint
+    parts["sampled"] = engine.complete(PROMPT, MAX_TOKENS, SAMPLED).fingerprint
+    mismatches = [name for name, value in REFERENCE.items() if value and parts[name] != value]
+    return Report(parts, environment(engine), mismatches)

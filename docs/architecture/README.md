@@ -20,8 +20,8 @@ these pages explain the structure around them and link there for detail.
 ## The one rule
 
 Everything below serves a single requirement: on the same hardware, the same weights, prompt, context window and
-sampling options give the same output bits on every run, whatever the load, batching or thread scheduling. Output
-across *different* hardware may differ. That rule decides where code lives:
+sampling options give the same output bits on every run, whatever the load, batching or thread scheduling, and on
+every supported machine. That rule decides where code lives:
 
 - Anything that reduces floating point numbers (sums, dot products, matmul, softmax, norms, attention) is a C++
   kernel with one documented order, never NumPy, BLAS or a GPU library.
@@ -143,6 +143,8 @@ AdamW from `grad.hpp`.
 | `batching.py` | Continuous batching: concurrent generations share one `forward_batch` per step, each keeping its solo bits. |
 | `sampling.py` | Temperature, top-k and top-p sampling with a seeded generator and ties broken on token id. |
 | `tokenization.py`, `bpe.py` | The byte tokenizer of the placeholder model, and BPE (byte-level or SentencePiece-style) driven by a `tokenizer.json`. |
+| `verify.py` | `dllm verify`: one fingerprint of a fixed workload (kernels, Unicode, tokenizer, logits, answers) to compare machines. |
+| `unicode.py` | Normalisation, lower-casing and regex categories from Unicode 15.1 tables shipped in the package, so the Python version cannot change tokenization. |
 | `models.py` | The `LanguageModel` protocol and the seeded placeholder `BigramModel`. |
 | `transformer.py` | The Llama/Qwen2/Qwen3 decoder (RMSNorm, QK-norm, RoPE, grouped-query attention, SwiGLU) and its KV cache, on CPU or GPU, float32 or Q8_0. |
 | `lora.py` | LoRA adapters: merging `W + scale · B·A` with the `linear` kernel, adapter gradients, and the PEFT directory format. |
@@ -167,6 +169,7 @@ AdamW from `grad.hpp`.
 | `include/dllm/grad.hpp` | Backward kernels, cross-entropy and the AdamW update, with the same ordering rules. |
 | `include/dllm/quant.hpp` | Q8_0 quantisation with exact integer block sums. |
 | `include/dllm/parallel.hpp` | A thread pool whose tasks own disjoint outputs, so the thread count never changes a bit. |
+| `include/dllm/fpenv.hpp` | Runs every binding in the IEEE default floating point state (no flush-to-zero), whatever the process set. |
 | `include/dllm/simd.hpp` | AVX2, SSE2 or NEON variants picked once per machine; lanes hold different outputs, never parts of one sum. |
 | `include/dllm/cuda.hpp`, `cuda/kernels.cu` | The CUDA backend, compiled at run time by NVRTC with `--fmad=false`; one thread per output element. |
 | `kernels.cpp` | The nanobind bindings (`etalii_dllm._kernels`); kept thin. |
