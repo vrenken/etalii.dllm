@@ -252,6 +252,31 @@ dllm --model smollm2-135m-tuned.dllm chat "..."
 Each step prints its loss. `--resume run.dllmckpt` continues a stopped run. All options, the data format and how
 the reproducibility is achieved: [training](training.md).
 
+## 7. Docker
+
+The server also comes as an image for linux/amd64 and linux/arm64, published with every release as
+`ghcr.io/vrenken/etalii-dllm:<version>` and `:latest` (`:edge` follows `develop`). It runs `dllm-server` on port
+5080, chat page included. Put a model in a volume at `/models/model.dllm`, or let the container import one on its
+first start:
+
+```bash
+# Import SmolLM2 into the volume on first start, then serve it (later starts reuse the file)
+docker run -p 5080:5080 -v dllm-models:/models \
+  -e DLLM_IMPORT=hf:HuggingFaceTB/SmolLM2-135M-Instruct ghcr.io/vrenken/etalii-dllm:latest
+
+# Serve a model you already converted
+docker run -p 5080:5080 -v "$PWD/smollm2-135m.dllm:/models/model.dllm:ro" ghcr.io/vrenken/etalii-dllm:latest
+
+# The other front ends and options work too
+docker run --rm -v dllm-models:/models ghcr.io/vrenken/etalii-dllm:latest dllm chat "Hi"
+docker run -p 5080:5080 -v dllm-models:/models -e DLLM_QUANTIZE=q8_0 -e DLLM_THREADS=4 ghcr.io/vrenken/etalii-dllm:latest
+docker run --gpus all -p 5080:5080 -v dllm-models:/models -e DLLM_DEVICE=cuda ghcr.io/vrenken/etalii-dllm:latest
+```
+
+`DLLM_IMPORT_ARGS` passes extra options to the import (for example `--accept-licence`). The image contains the
+`[cuda]` extra, so `--gpus all` (NVIDIA container toolkit) is all a GPU needs. On the same machine, the container
+gives byte-identical responses to a native install. Build it yourself with `docker build -t etalii-dllm .`.
+
 ## What does not work yet
 
 - Two real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct and

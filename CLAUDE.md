@@ -20,6 +20,7 @@ ruff check . && ruff format --check .    # CI runs both
 dllm generate --prompt "Hi" --temperature 0.8 --seed 7
 dllm-server                  # http://localhost:5080/v1/chat/completions
 dllm-mcp                     # MCP over stdio
+docker build -t etalii-dllm .   # server image (Dockerfile, docker/entrypoint.sh); published by .github/workflows/docker.yml
 ```
 
 Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the package in editable mode and puts

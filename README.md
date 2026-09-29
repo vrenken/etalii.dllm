@@ -131,7 +131,7 @@ Summarised from the [research notes](docs/research/deterministic-inference.md):
 | 4. API parity ✅ | Streaming (SSE), tool/function calling, JSON-schema structured output, logprobs, Anthropic Messages endpoint, embeddings. See [HTTP API](docs/api.md) |
 | 5. MCP, both directions ✅ | Richer MCP server (prompts, resources); MCP client host so the model can call external tools during a chat. See [MCP](docs/mcp.md) |
 | 6. Performance ✅ | ✅ SIMD and multi-threading with fixed, batch-invariant reduction order; ✅ integer quantisation (Q8_0, associative int32 accumulation); ✅ batch-invariance stress tests; ✅ CUDA kernels that give the CPU's bits (`--device cuda`). See [kernels](docs/kernels.md#threads-and-simd) and [GPU](docs/kernels.md#gpu) |
-| 7. Usability and releases | ✅ Pre-built wheels for Linux, Windows and macOS and tagged GitHub releases ([releasing](docs/releasing.md)); PyPI; ✅ the CUDA install route checked in CI; a Docker image; ✅ a web chat UI at `/` of `dllm-server`; a larger verified model (Qwen2.5-1.5B) |
+| 7. Usability and releases | ✅ Pre-built wheels for Linux, Windows and macOS and tagged GitHub releases ([releasing](docs/releasing.md)); PyPI; ✅ the CUDA install route checked in CI; ✅ a Docker image (`ghcr.io/vrenken/etalii-dllm`); ✅ a web chat UI at `/` of `dllm-server`; a larger verified model (Qwen2.5-1.5B) |
 
 ## Working with Claude Code
 

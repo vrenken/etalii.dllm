@@ -7,6 +7,7 @@ name: Release
 # - Pull requests that touch the build: build and test only.
 # - A pushed tag v<version>: build, test, and release that tag. The tag must match src/etalii_dllm/__init__.py.
 # - Run workflow with "release" ticked: build, test, then tag the commit v<version> and release it.
+# - Every release also publishes the Docker image ghcr.io/<owner>/etalii-dllm:<version> and :latest (docker.yml).
 # - PyPI upload only when the repository variable PYPI_PUBLISH is "true" (trusted publishing, environment "pypi").
 on:
   push:
@@ -96,6 +97,15 @@ jobs:
         run: |
           gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
             --title "EtAlii.Dllm $TAG" --generate-notes
+
+  docker:
+    needs: [sdist, github-release]
+    uses: ./.github/workflows/docker.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      tags: ${{ needs.sdist.outputs.version }},latest
 
   pypi:
     needs: [sdist, wheels, github-release]
