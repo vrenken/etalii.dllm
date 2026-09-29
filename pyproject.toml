@@ -22,10 +22,11 @@ dependencies = [
 
 [project.optional-dependencies]
 # gguf, safetensors and tokenizers are the reference implementations the import and tokenizer tests compare against.
-# openai and anthropic are the official SDKs the API tests drive the server with; jsonschema checks structured output.
+# openai, anthropic and ollama are the official clients the API tests drive the server with; jsonschema checks
+# structured output.
 dev = [
   "pytest>=8", "httpx>=0.27", "ruff>=0.6", "gguf>=0.17", "safetensors>=0.4", "tokenizers>=0.20",
-  "openai>=1.60", "anthropic>=0.60", "jsonschema>=4.20",
+  "openai>=1.60", "anthropic>=0.60", "ollama>=0.6", "jsonschema>=4.20",
 ]
 # NVRTC, the CUDA runtime compiler the GPU backend needs (--device cuda); the NVIDIA driver provides the rest.
 # There is no CUDA on macOS, so there the extra installs nothing.

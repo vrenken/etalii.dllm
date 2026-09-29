@@ -11,7 +11,7 @@ requirement instead of a best-effort hint:
 That holds regardless of server load, batch composition or thread scheduling. Identical output across *different*
 hardware is not a goal; where it comes for free (as it does today) it is a bonus, not a promise.
 
-The model speaks the protocols the rest of the ecosystem already uses (the OpenAI and Anthropic HTTP APIs, with
+The model speaks the protocols the rest of the ecosystem already uses (the OpenAI, Anthropic and Ollama HTTP APIs, with
 streaming, tool calling and JSON-schema structured output, and the Model Context Protocol), so existing clients and
 agents can use it without changes.
 
@@ -27,7 +27,7 @@ a Llama/Qwen2 decoder whose KV cache cannot change its output, the models' own B
 `--model` on every front end. The real SmolLM2-135M-Instruct, Qwen2.5-0.5B-Instruct and Qwen2.5-1.5B-Instruct imports match Hugging Face
 `transformers` (logits within about 2e-5, identical greedy answers), checked in CI. `dllm finetune` trains an imported model further with AdamW, reproducibly: equal
 runs, and runs resumed from a checkpoint, write byte-identical models (see [docs/training.md](docs/training.md)).
-The HTTP API speaks both OpenAI and Anthropic, with streaming, tool calling, JSON-schema structured output
+The HTTP API speaks OpenAI, Anthropic and Ollama, with streaming, tool calling, JSON-schema structured output
 (constrained decoding), logprobs and embeddings; streamed and non-streamed answers are identical (see
 [docs/api.md](docs/api.md)).
 The kernels run on all cores with SIMD (AVX2, SSE2 or NEON) and still give the same bits as the plain scalar loops,
@@ -53,7 +53,7 @@ pytest
 dllm info
 dllm generate --prompt "Hello" --temperature 0.8 --seed 7
 
-# OpenAI- and Anthropic-compatible HTTP server on http://localhost:5080 (see docs/api.md)
+# OpenAI-, Anthropic- and Ollama-compatible HTTP server on http://localhost:5080 (see docs/api.md)
 dllm-server
 curl http://localhost:5080/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"model":"dllm","messages":[{"role":"user","content":"Hi"}],"temperature":0.7,"seed":5}'
@@ -96,7 +96,7 @@ to Python through [nanobind](https://github.com/wjakob/nanobind). Python orchest
 | `cpp/` | C++ kernels: `include/dllm/random.hpp` (RNG), `include/dllm/math.hpp` (exp, log, sin, cos, tanh, erf, sum, dot, softmax, log-softmax), `include/dllm/nn.hpp` (linear/matmul, RMSNorm, SiLU/GELU, RoPE, attention), `include/dllm/grad.hpp` (their gradients, cross-entropy, AdamW), `kernels.cpp` (Python bindings). Evaluation orders: [docs/kernels.md](docs/kernels.md) |
 | `src/etalii_dllm/` | Python package: `tensor` (aligned float32 `Tensor`), `numerics`, `sampling`, `tokenization`, `models`, `generation` (streaming, stop sequences, logprobs), `grammar` (constrained decoding), `tools` (tool calling), `chat`, `engine` (shared facade) |
 | `src/etalii_dllm/training/` | Fine-tuning: decoder gradients, AdamW, fixed data order, checkpoints. See [docs/training.md](docs/training.md) |
-| `src/etalii_dllm/server/` | HTTP API, FastAPI: OpenAI (`/v1/models`, `/v1/chat/completions`, `/v1/embeddings`) and Anthropic (`/v1/messages`); a chat page at `/` (`static/chat.html`). See [docs/api.md](docs/api.md) |
+| `src/etalii_dllm/server/` | HTTP API, FastAPI: OpenAI (`/v1/models`, `/v1/chat/completions`, `/v1/embeddings`) Anthropic (`/v1/messages`) and Ollama (`/api/chat`, `/api/generate`, ...); a chat page at `/` (`static/chat.html`). See [docs/api.md](docs/api.md) |
 | `src/etalii_dllm/mcp_server.py` | Model Context Protocol server (stdio, official `mcp` SDK): `chat`, `generate` and `model_info` tools, model card/chat template/determinism resources, prompts. See [docs/mcp.md](docs/mcp.md) |
 | `src/etalii_dllm/mcp_host.py` | MCP client host: the model calls external MCP servers' tools during a chat (`dllm chat --mcp-config`) |
 | `src/etalii_dllm/cli.py` | `dllm` command line tool |
@@ -137,7 +137,7 @@ module map), with Mermaid diagrams.
 | 5. MCP, both directions ✅ | Richer MCP server (prompts, resources); MCP client host so the model can call external tools during a chat. See [MCP](docs/mcp.md) |
 | 6. Performance ✅ | ✅ SIMD and multi-threading with fixed, batch-invariant reduction order; ✅ integer quantisation (Q8_0, associative int32 accumulation); ✅ batch-invariance stress tests; ✅ CUDA kernels that give the CPU's bits (`--device cuda`). See [kernels](docs/kernels.md#threads-and-simd) and [GPU](docs/kernels.md#gpu) |
 | 7. Usability and releases | ✅ Pre-built wheels for Linux, Windows and macOS and tagged GitHub releases ([releasing](docs/releasing.md)); PyPI; ✅ the CUDA install route checked in CI; ✅ a Docker image (`ghcr.io/vrenken/etalii-dllm`); ✅ a web chat UI at `/` of `dllm-server`; ✅ a larger verified model (Qwen2.5-1.5B) |
-| 8. Serving and ecosystem | ✅ Prompt caching across requests with the same bits as a cold run ([prompt caching](docs/api.md#prompt-caching)); ✅ concurrent requests decoded as one batch, each keeping its solo bits ([batching](docs/api.md#concurrent-requests)); Ollama-compatible API; OpenAI Responses API; Qwen3 (verified Qwen3-0.6B); LoRA fine-tuning and PEFT adapter import |
+| 8. Serving and ecosystem | ✅ Prompt caching across requests with the same bits as a cold run ([prompt caching](docs/api.md#prompt-caching)); ✅ concurrent requests decoded as one batch, each keeping its solo bits ([batching](docs/api.md#concurrent-requests)); ✅ Ollama-compatible API ([Ollama API](docs/api.md#ollama-api)); OpenAI Responses API; Qwen3 (verified Qwen3-0.6B); LoRA fine-tuning and PEFT adapter import |
 
 ## Working with Claude Code
 

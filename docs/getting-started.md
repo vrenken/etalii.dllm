@@ -156,7 +156,7 @@ NVRTC is found automatically in the `nvidia-cuda-nvrtc` wheel, PyTorch, `$CUDA_P
 `/usr/local/cuda`; set `DLLM_NVRTC` to the library's full path (for example `nvrtc64_120_0.dll`) to pick one, and
 `DLLM_CUDA_DEVICE` to choose a GPU other than the first. macOS has no CUDA. Details: [kernels](kernels.md#gpu).
 
-## 4. OpenAI- and Anthropic-compatible server
+## 4. OpenAI-, Anthropic- and Ollama-compatible server
 
 ```bash
 dllm-server --model smollm2-135m.dllm        # http://127.0.0.1:5080, --host/--port to change
@@ -213,6 +213,9 @@ message = client.messages.create(
 )
 print(message.content[0].text)
 ```
+
+Ollama clients work too: point them at `http://127.0.0.1:5080` (for example `ollama.Client(host=...)` in Python or
+Open WebUI's Ollama URL); see [Ollama API](api.md#ollama-api).
 
 The response ids and `system_fingerprint` are derived from the request and the weights, so identical requests get
 byte-identical responses, and a streamed answer is identical to the non-streamed one. The server reuses the work of

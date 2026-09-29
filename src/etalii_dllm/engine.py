@@ -83,6 +83,8 @@ class ChatRequest:
     call_id_prefix: str = "call_"
     request_id: str = ""
     """Seed for the tool call ids (see :meth:`DllmEngine.derive_id`)."""
+    prompt: str | None = None
+    """A raw prompt used as is instead of rendering ``messages`` (Ollama's ``raw`` mode); no tools then."""
 
 
 @dataclass(frozen=True)
@@ -278,8 +280,10 @@ class DllmEngine:
         schemas, ...) before any token is generated."""
         tools = [] if request.tool_choice.mode == "none" else list(request.tools)
         tooling.validate_tools(tools, request.tool_choice)
+        if request.prompt is not None and tools:
+            raise ValueError("a raw prompt cannot use tools")
         constraint = self._constraint(request, tools)
-        prompt = self.render_chat(request.messages, tools)
+        prompt = request.prompt if request.prompt is not None else self.render_chat(request.messages, tools)
         generation = self._generator.stream(
             prompt,
             request.max_tokens,
