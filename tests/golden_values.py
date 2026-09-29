@@ -20,6 +20,8 @@ KERNEL_FINGERPRINTS = {
     "gelu_tanh": "a000c1fda83bd19d6b6932ae3e97b3451f5fd1bdfbef6cdc4fb38a82c6bd5647",
     "rope": "9cd1ae74870656556f13dca8726d1e4430a1cc68934c2b5e06b5529ccfd77158",
     "attention": "c7e16ac447a7dcb06878fa1d122a7d19370d1d95502a21027bf2551f4a6ba18d",
+    # Phase 6: Q8_0 quantised linear (weights and activations in 32-blocks, exact int32 sums).
+    "linear_q8": "af1ce52d09c0a94215a627172f03c4043ca982583fe4d083dd98e9dd5ee00407",
 }
 
 # Fingerprint of tests/model_fixtures.py's tiny bf16 checkpoint imported to model.dllm (format version 1). It pins

@@ -2,6 +2,8 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/optional.h>
+#include <nanobind/stl/string.h>
+#include <nanobind/stl/vector.h>
 #include <nanobind/stl/tuple.h>
 
 #include <cmath>
@@ -14,6 +16,9 @@
 #include "dllm/grad.hpp"
 #include "dllm/math.hpp"
 #include "dllm/nn.hpp"
+#include "dllm/parallel.hpp"
+#include "dllm/quant.hpp"
+#include "dllm/simd.hpp"
 #include "dllm/random.hpp"
 
 namespace nb = nanobind;
@@ -24,6 +29,9 @@ using DoubleVector = nb::ndarray<const double, nb::ndim<1>, nb::c_contig, nb::de
 using IndexVector = nb::ndarray<const std::int64_t, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
 using OwnedFloatArray = nb::ndarray<nb::numpy, float>;
 using MutableFloatTensor = nb::ndarray<float, nb::c_contig, nb::device::cpu>;
+using Int8Matrix = nb::ndarray<const std::int8_t, nb::ndim<2>, nb::c_contig, nb::device::cpu>;
+using FloatMatrix = nb::ndarray<const float, nb::ndim<2>, nb::c_contig, nb::device::cpu>;
+using OwnedInt8Array = nb::ndarray<nb::numpy, std::int8_t>;
 
 namespace {
 
@@ -39,6 +47,17 @@ OwnedFloatArray make_array(std::vector<std::size_t> shape, float** data) {
     *data = static_cast<float*>(buffer);
     nb::capsule owner(buffer, [](void* p) noexcept { ::operator delete[](p, std::align_val_t(kAlignment)); });
     return OwnedFloatArray(buffer, shape.size(), shape.data(), owner);
+}
+
+OwnedInt8Array make_int8_array(std::vector<std::size_t> shape, std::int8_t** data) {
+    std::size_t n = 1;
+    for (std::size_t d : shape) {
+        n *= d;
+    }
+    void* buffer = ::operator new[](n == 0 ? kAlignment : n, std::align_val_t(kAlignment));
+    *data = static_cast<std::int8_t*>(buffer);
+    nb::capsule owner(buffer, [](void* p) noexcept { ::operator delete[](p, std::align_val_t(kAlignment)); });
+    return OwnedInt8Array(buffer, shape.size(), shape.data(), owner);
 }
 
 std::vector<std::size_t> shape_of(const FloatTensor& t) {
@@ -160,12 +179,115 @@ NB_MODULE(_kernels, m) {
             shape.back() = out_features;
             float* out;
             auto result = make_array(shape, &out);
+            nb::gil_scoped_release release;
             dllm::linear(x.data(), w.data(), bias ? bias->data() : nullptr, out, leading_rows(x), in_features,
                          out_features);
             return result;
         },
         nb::arg("x"), nb::arg("weight"), nb::arg("bias").none() = nb::none(),
         "x[..., in] @ weight[out, in]^T (+ bias), fixed order, double accumulator.");
+
+    m.def(
+        "linear_reference",
+        [](FloatTensor x, FloatTensor w, std::optional<FloatVector> bias) {
+            require(x.ndim() >= 1 && w.ndim() == 2 && w.shape(1) == x.shape(x.ndim() - 1), "shapes do not match");
+            require(!bias || bias->shape(0) == w.shape(0), "bias length must equal out_features");
+            auto shape = shape_of(x);
+            shape.back() = w.shape(0);
+            float* out;
+            auto result = make_array(shape, &out);
+            dllm::linear_reference(x.data(), w.data(), bias ? bias->data() : nullptr, out, leading_rows(x),
+                                   w.shape(1), w.shape(0));
+            return result;
+        },
+        nb::arg("x"), nb::arg("weight"), nb::arg("bias").none() = nb::none(),
+        "The single-threaded scalar statement of linear()'s order (for tests).");
+
+    m.def(
+        "pack_linear",
+        [](FloatTensor w) {
+            require(w.ndim() == 2, "weight must be [out_features, in_features]");
+            const std::size_t out_features = w.shape(0);
+            const std::size_t in_features = w.shape(1);
+            float* out;
+            auto result = make_array({dllm::panel_count(out_features), in_features, dllm::kPanel}, &out);
+            nb::gil_scoped_release release;
+            dllm::pack_linear(w.data(), out, in_features, out_features);
+            return result;
+        },
+        nb::arg("weight"), "Weights [out, in] repacked into panels [ceil(out / 16), in, 16] for linear_packed.");
+
+    m.def(
+        "linear_packed",
+        [](FloatTensor x, FloatTensor packed, std::size_t out_features, std::optional<FloatVector> bias) {
+            require(x.ndim() >= 1, "x must have at least one dimension");
+            const std::size_t in_features = x.shape(x.ndim() - 1);
+            require(packed.ndim() == 3 && packed.shape(0) == dllm::panel_count(out_features) &&
+                        packed.shape(1) == in_features && packed.shape(2) == dllm::kPanel,
+                    "packed weight does not match x and out_features");
+            require(!bias || bias->shape(0) == out_features, "bias length must equal out_features");
+            auto shape = shape_of(x);
+            shape.back() = out_features;
+            float* out;
+            auto result = make_array(shape, &out);
+            nb::gil_scoped_release release;
+            dllm::linear_packed(x.data(), packed.data(), bias ? bias->data() : nullptr, out, leading_rows(x),
+                                in_features, out_features);
+            return result;
+        },
+        nb::arg("x"), nb::arg("packed"), nb::arg("out_features"), nb::arg("bias").none() = nb::none(),
+        "linear() with weights from pack_linear(); the same bits.");
+
+    m.def(
+        "quantize_q8_0",
+        [](FloatMatrix w) {
+            const std::size_t rows = w.shape(0);
+            const std::size_t cols = w.shape(1);
+            require(cols % dllm::kQ8Block == 0, "Q8_0 needs in_features to be a multiple of 32");
+            std::int8_t* q;
+            float* scales;
+            auto q_array = make_int8_array({rows, cols}, &q);
+            auto s_array = make_array({rows, cols / dllm::kQ8Block}, &scales);
+            nb::gil_scoped_release release;
+            for (std::size_t r = 0; r < rows; ++r) {
+                dllm::quantize_q8_0(w.data() + r * cols, q + r * cols, scales + r * (cols / dllm::kQ8Block), cols);
+            }
+            return std::make_tuple(q_array, s_array);
+        },
+        nb::arg("weight"), "(int8 values [out, in], float32 scales [out, in / 32]) of a Q8_0 quantised matrix.");
+
+    m.def(
+        "linear_q8",
+        [](FloatTensor x, Int8Matrix q, FloatMatrix scales, std::optional<FloatVector> bias) {
+            require(x.ndim() >= 1, "x must have at least one dimension");
+            const std::size_t in_features = x.shape(x.ndim() - 1);
+            const std::size_t out_features = q.shape(0);
+            require(q.shape(1) == in_features, "weight in_features does not match the last dimension of x");
+            require(in_features % dllm::kQ8Block == 0, "Q8_0 needs in_features to be a multiple of 32");
+            require(scales.shape(0) == out_features && scales.shape(1) == in_features / dllm::kQ8Block,
+                    "scales must be [out_features, in_features / 32]");
+            require(!bias || bias->shape(0) == out_features, "bias length must equal out_features");
+            auto shape = shape_of(x);
+            shape.back() = out_features;
+            float* out;
+            auto result = make_array(shape, &out);
+            nb::gil_scoped_release release;
+            dllm::linear_q8(x.data(), q.data(), scales.data(), bias ? bias->data() : nullptr, out, leading_rows(x),
+                            in_features, out_features);
+            return result;
+        },
+        nb::arg("x"), nb::arg("q"), nb::arg("scales"), nb::arg("bias").none() = nb::none(),
+        "Q8_0 linear: activations quantised per 32-block, exact int32 block sums, combined in double in block order.");
+
+    m.def(
+        "set_threads", [](std::size_t n) { dllm::ThreadPool::global().set_threads(n); }, nb::arg("n"),
+        "Number of kernel threads (0: DLLM_THREADS or the hardware concurrency). Never changes results.");
+    m.def("threads", []() { return dllm::ThreadPool::global().threads(); }, "Current number of kernel threads.");
+    m.def("supported_isas", &dllm::supported_isas, "Instruction sets the dispatched kernels can use on this CPU.");
+    m.def("isa", []() { return std::string(dllm::isa_name(dllm::active_isa())); },
+          "Instruction set the dispatched kernels use.");
+    m.def("set_isa", &dllm::set_isa, nb::arg("name"),
+          "Forces an instruction set ('portable', 'avx2' or 'best'); for tests. Never changes results.");
 
     m.def(
         "matmul",
@@ -231,6 +353,7 @@ NB_MODULE(_kernels, m) {
             require(q_offset >= 0, "q_offset must be non-negative");
             float* out;
             auto result = make_array({q_len, q.shape(1), v.shape(2)}, &out);
+            nb::gil_scoped_release release;
             dllm::attention(q.data(), k.data(), v.data(), out, q_len, kv_len, q.shape(1), k.shape(1), q.shape(2),
                             v.shape(2), scale, causal, static_cast<std::size_t>(q_offset));
             return result;
@@ -257,7 +380,10 @@ NB_MODULE(_kernels, m) {
             if (with_bias) {
                 db_array = make_array({out_features}, &db);
             }
-            dllm::linear_backward(x.data(), w.data(), dy.data(), dx, dw, db, rows, in_features, out_features);
+            {
+                nb::gil_scoped_release release;
+                dllm::linear_backward(x.data(), w.data(), dy.data(), dx, dw, db, rows, in_features, out_features);
+            }
             return std::make_tuple(dx_array, dw_array, db_array);
         },
         nb::arg("x"), nb::arg("weight"), nb::arg("dy"), nb::arg("with_bias") = false,

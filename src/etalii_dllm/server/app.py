@@ -27,6 +27,7 @@ from etalii_dllm.engine import (
     ResponseFormat,
     TextDelta,
     ToolCallEvent,
+    add_runtime_arguments,
     default_engine,
     use_model_file,
 )
@@ -278,7 +279,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="EtAlii.Dllm OpenAI- and Anthropic-compatible server")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5080)
-    parser.add_argument("--model", help="model.dllm file to serve (default: $DLLM_MODEL, else the placeholder model)")
+    add_runtime_arguments(parser)
     args = parser.parse_args()
-    use_model_file(args.model)
+    use_model_file(args.model, args.quantize, args.threads)
     uvicorn.run(app, host=args.host, port=args.port)

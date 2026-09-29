@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "dllm/math.hpp"
+#include "dllm/parallel.hpp"
 
 namespace dllm {
 
@@ -23,13 +24,13 @@ namespace dllm {
 // dx, dw and db may each be null when that gradient is not needed.
 inline void linear_backward(const float* x, const float* w, const float* dy, float* dx, float* dw, float* db,
                             std::size_t rows, std::size_t in_features, std::size_t out_features) {
-    std::vector<double> acc(in_features);
+    // Rows of dx, and rows of dw with their db entry, are independent tasks for the thread pool; each keeps the
+    // accumulation order above.
     if (dx != nullptr) {
-        for (std::size_t r = 0; r < rows; ++r) {
+        parallel_for(rows, [&](std::size_t r) {
+            thread_local std::vector<double> acc;
+            acc.assign(in_features, 0.0);
             const float* dyr = dy + r * out_features;
-            for (std::size_t k = 0; k < in_features; ++k) {
-                acc[k] = 0.0;
-            }
             for (std::size_t n = 0; n < out_features; ++n) {
                 const double g = dyr[n];
                 const float* wn = w + n * in_features;
@@ -40,13 +41,12 @@ inline void linear_backward(const float* x, const float* w, const float* dy, flo
             for (std::size_t k = 0; k < in_features; ++k) {
                 dx[r * in_features + k] = static_cast<float>(acc[k]);
             }
-        }
+        });
     }
     if (dw != nullptr || db != nullptr) {
-        for (std::size_t n = 0; n < out_features; ++n) {
-            for (std::size_t k = 0; k < in_features; ++k) {
-                acc[k] = 0.0;
-            }
+        parallel_for(out_features, [&](std::size_t n) {
+            thread_local std::vector<double> acc;
+            acc.assign(in_features, 0.0);
             double bias_acc = 0.0;
             for (std::size_t r = 0; r < rows; ++r) {
                 const double g = dy[r * out_features + n];
@@ -66,7 +66,7 @@ inline void linear_backward(const float* x, const float* w, const float* dy, flo
             if (db != nullptr) {
                 db[n] = static_cast<float>(bias_acc);
             }
-        }
+        });
     }
 }
 

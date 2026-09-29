@@ -17,7 +17,8 @@ agents can use it without changes.
 
 ## Status
 
-Phases 1 (kernels), 2 (importing models), 3 (fine-tuning) and 4 (API parity) done. The full pipeline (tokenizer →
+Phases 1 to 5 (kernels, importing models, fine-tuning, API parity, MCP) done, and Phase 6 (performance) except GPU
+kernels. The full pipeline (tokenizer →
 model → sampler → CLI / HTTP API / MCP server) runs end to end and is proven run-to-run bit-exact by CI (on Linux, Windows and macOS, which
 today even agree with each other). The transformer building blocks (aligned `Tensor`, batch-invariant matmul,
 RMSNorm, SiLU/GELU, RoPE and grouped-query attention, see [docs/kernels.md](docs/kernels.md)) are in place, and so are
@@ -29,6 +30,9 @@ runs, and runs resumed from a checkpoint, write byte-identical models (see [docs
 The HTTP API speaks both OpenAI and Anthropic, with streaming, tool calling, JSON-schema structured output
 (constrained decoding), logprobs and embeddings; streamed and non-streamed answers are identical (see
 [docs/api.md](docs/api.md)).
+The kernels run on all cores with SIMD (AVX2, SSE2 or NEON) and still give the same bits as the plain scalar loops,
+whatever the thread count or batch, and `--quantize q8_0` runs 8-bit weights with exact integer accumulation (see
+[docs/kernels.md](docs/kernels.md#threads-and-simd)).
 Without a model file the engine falls back to a seeded placeholder (a bigram table).
 
 ## Quick start
@@ -112,7 +116,7 @@ Summarised from the [research notes](docs/research/deterministic-inference.md):
   chosen by thread scheduling or batch size (batch invariance), so concurrent requests cannot change each other's output.
 - **Total-order sampling.** Ties break on token id, so sorting never depends on algorithm stability.
 - **Golden hashes in CI.** Tests assert SHA-256 hashes of weights and generated tokens; any drift fails the build.
-  Hashes may become per-hardware once kernels use hardware-specific instructions.
+  SIMD and threads only ever split work between output elements, so they have not changed a single hash.
 
 ## Roadmap
 
@@ -124,7 +128,7 @@ Summarised from the [research notes](docs/research/deterministic-inference.md):
 | 3. Fine-tuning ✅ | Deterministic backprop and AdamW on top of imported weights, fixed data order, reproducible checkpoints |
 | 4. API parity ✅ | Streaming (SSE), tool/function calling, JSON-schema structured output, logprobs, Anthropic Messages endpoint, embeddings. See [HTTP API](docs/api.md) |
 | 5. MCP, both directions ✅ | Richer MCP server (prompts, resources); MCP client host so the model can call external tools during a chat. See [MCP](docs/mcp.md) |
-| 6. Performance | SIMD and multi-threading with fixed, batch-invariant reduction order, integer quantisation (associative int32 accumulation), GPU kernels that keep bit-exactness |
+| 6. Performance | ✅ SIMD and multi-threading with fixed, batch-invariant reduction order; ✅ integer quantisation (Q8_0, associative int32 accumulation); ✅ batch-invariance stress tests; GPU kernels that keep bit-exactness (open: needs GPU hardware to verify). See [kernels](docs/kernels.md#threads-and-simd) |
 
 ## Working with Claude Code
 

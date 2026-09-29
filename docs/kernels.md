@@ -11,8 +11,8 @@ makes the output reproducible. Changing it is a deliberate, golden-value-changin
 - Each output element has its own accumulation. Loops may be tiled or reordered across outputs, but never inside
   one accumulation, so an output's bits do not depend on the batch size, the sequence length, the tile sizes or
   which other rows are computed alongside it (**batch invariance**).
-- No kernel switches strategy on input size. There is no threading yet; when it comes (Phase 6) it will partition
-  outputs, not reductions.
+- No kernel switches strategy on input size. Threads partition outputs, never reductions (see
+  [threads and SIMD](#threads-and-simd)).
 - Transcendentals come from `math.hpp` (built from `+ - * /` and `sqrt` only), never from the C runtime.
 
 ## Tensor
@@ -43,7 +43,10 @@ uses the first, API `logprobs` the second.
 
 - **`linear(x, weight, bias)`**: `x[..., in] @ weight[out, in]^T + bias` (PyTorch `nn.Linear` layout; leading
   dimensions are flattened into rows). Output `[r, n]` is `sum_k x[r, k] * w[n, k]` over `k` ascending, plus
-  `bias[n]` in double, rounded once. Tiles of 16 rows by 64 columns only order the visits.
+  `bias[n]` in double, rounded once. `linear_reference` in `nn.hpp` states exactly that as a plain loop; the fast
+  `linear` computes the same bits (see [threads and SIMD](#threads-and-simd)). `weight` may also be a
+  `PackedWeight` (the same matrix pre-arranged for the SIMD kernel, same bits) or a `QuantizedWeight`
+  ([Q8_0](#q8_0-quantisation), different bits).
 - **`matmul(a, b)`**: `a[m, k] @ b[k, n]`. Tiled over 64 columns and 256-deep slices of `k`, with one double
   accumulator per output kept across the depth slices, so the sum still runs over `k` ascending and each output
   equals `dot(a[i, :], b[:, j])` bit for bit.
@@ -81,6 +84,61 @@ For each (query, head), independently:
 
 Keys beyond the causal horizon are never read, so the result does not depend on how long the KV cache is, and a
 prefill of `n` tokens gives exactly the same bits as decoding them one at a time (`tests/test_kernels.py`).
+
+## Threads and SIMD
+
+Phase 6 made the kernels fast without touching the order above. Two facts make that possible:
+
+1. **Every output element owns its accumulation.** Work is split by output element, never inside a sum, so how the
+   work is split, how many threads there are and which thread runs what cannot change a bit. `parallel.hpp` is a
+   small persistent pool (`DLLM_THREADS`, `--threads`, or `numerics.set_threads`; default: all cores). A kernel
+   called while the pool is busy (another request's kernel) runs on the calling thread, which gives the same bits.
+2. **SIMD lanes are different outputs.** `linear` groups outputs in panels of 16 whose weights are repacked to
+   `[in][16]` (`PackedWeight` does it once at load time). One SIMD register then holds the accumulators of 4 (AVX2)
+   or 2 (SSE2, NEON) *different* outputs, which all advance through `k` ascending together. Each lane still does
+   exactly `acc += x[k] * w[k]` in double. A product of two floats is exact in double (24 + 24 significant bits
+   fit in 53), so a fused multiply-add rounds exactly once, like the separate multiply and add: FMA gives the same
+   bits here. (The compiler is still forbidden to contract anything on its own.)
+
+`attention` runs one task per (query, head) row and scores four keys at a time, each with its own dot-product
+accumulator; `linear_backward` runs one task per row of `dx` and per row of `dweight`.
+
+The code path is chosen once per process from the CPU (`simd.hpp`): `avx2` (AVX2 + FMA, x86-64 with GCC/Clang)
+or `portable` (SSE2 on x86-64, NEON on arm64, plain C++ elsewhere). `numerics.instruction_set()` reports it, and
+the tests force every supported path and thread count and require the bits of `linear_reference`
+(`tests/test_batch_invariance.py`). All golden hashes from before Phase 6 are unchanged.
+
+Measured on a 4-core cloud VM (Xeon, AVX2) with SmolLM2-135M, float32 weights:
+
+| | before Phase 6 | 1 thread | 4 threads | 4 threads, Q8_0 |
+| --- | --- | --- | --- | --- |
+| Prompt, 64 tokens | 15 s | 1.0 s | 0.43 s | 0.53 s |
+| Generation, per token | 346 ms | 99 ms | 46 ms | 27 ms |
+
+Generation is limited by memory bandwidth (every weight is read once per token), which is what Q8_0 helps with.
+
+## Q8_0 quantisation
+
+`--quantize q8_0` (or `DLLM_QUANTIZE=q8_0`, `QuantizedWeight`) runs the linear layers on 8-bit weights, a quarter
+of the memory traffic. The layout is fixed: blocks of 32 consecutive inputs of one output row share a float32 scale.
+
+- **Quantising** a block (weights at load time, activations on every call): `amax = max |x_i|`, `d = amax / 127`
+  (float), `q_i = round(x_i * (1 / d))` with round-half-to-even implemented with exact operations (independent of
+  the floating point environment), clamped to ±127. An all-zero block has `d = 0` and `q = 0`.
+- **Accumulating**: per block the 32 products are summed in `int32`. Integer addition is associative and cannot
+  overflow here (32 · 127 · 127 < 2³¹), so that sum may run in any order and is vectorised freely. Blocks are then
+  combined per output in double, blocks ascending: `acc += (double(d_x) * double(d_w)) * double(isum)`, plus the
+  bias, rounded once.
+
+Quantised output is deterministic but not the float output: it gets its own `system_fingerprint` (the weights
+fingerprint hashed with `:q8_0`), and the tests check it against an exact reference and its golden hash. Layers
+whose input size is not a multiple of 32 stay float32. Embedding lookups stay float32; the LM head is quantised.
+
+## GPU
+
+Not yet (issue #31). The design carries over: one GPU thread per output element running the documented order,
+no atomics and no split-K reductions, with `math.hpp` compiled for the device, would even reproduce the CPU bits.
+What is missing is hardware to prove it: neither the CI runners nor the cloud sessions have a GPU.
 
 ## Gradients (`grad.hpp`)
 
