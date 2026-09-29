@@ -12,7 +12,7 @@ these pages explain the structure around them and link there for detail.
 | [Determinism by design](determinism.md) | Every source of nondeterminism and the layer that removes it | ✅ |
 | [Inference pipeline](inference.md) | One chat request from messages to token stream, KV and prompt caches, batching | ✅ |
 | [Kernels and compute backends](kernels.md) | The C++ layer, SIMD and thread dispatch, CUDA, the build | ✅ |
-| Model import and format | From safetensors/GGUF to `model.dllm` to a running decoder | planned ([#67](https://github.com/vrenken/etalii.dllm/issues/67)) |
+| [Model import and format](models.md) | From safetensors/GGUF to `model.dllm` to a running decoder | ✅ |
 | Front ends, APIs and MCP | How the CLI, servers and MCP share one engine | planned ([#68](https://github.com/vrenken/etalii.dllm/issues/68)) |
 | Fine-tuning | One reproducible training step, checkpoints and resume | planned ([#69](https://github.com/vrenken/etalii.dllm/issues/69)) |
 | Build, CI and releases | Workflows, wheels, the Docker image | planned ([#70](https://github.com/vrenken/etalii.dllm/issues/70)) |
