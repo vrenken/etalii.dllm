@@ -14,7 +14,7 @@ these pages explain the structure around them and link there for detail.
 | [Kernels and compute backends](kernels.md) | The C++ layer, SIMD and thread dispatch, CUDA, the build | ✅ |
 | [Model import and format](models.md) | From safetensors/GGUF to `model.dllm` to a running decoder | ✅ |
 | [Front ends, APIs and MCP](front-ends.md) | How the CLI, the OpenAI, Anthropic and Ollama APIs and MCP share one engine | ✅ |
-| Fine-tuning | One reproducible training step, checkpoints and resume | planned ([#69](https://github.com/vrenken/etalii.dllm/issues/69)) |
+| [Fine-tuning](training.md) | One reproducible training step, checkpoints and resume | ✅ |
 | Build, CI and releases | Workflows, wheels, the Docker image | planned ([#70](https://github.com/vrenken/etalii.dllm/issues/70)) |
 
 ## The one rule
