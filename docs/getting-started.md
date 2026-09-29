@@ -130,8 +130,8 @@ dllm --model smollm2-135m.dllm chat "Invent a cat" --json-schema '{"type": "obje
   "properties": {"name": {"type": "string"}, "age": {"type": "integer"}}, "required": ["name", "age"]}'
 ```
 
-Determinism: the same model file, prompt, options and seed give the same tokens every time on the same machine,
-also under concurrent load, where `dllm-server` decodes simultaneous requests as one batch to serve them faster
+Determinism: the same model file, prompt, options and seed give the same tokens every time, on any supported
+machine, also under concurrent load, where `dllm-server` decodes simultaneous requests as one batch to serve them faster
 ([concurrent requests](api.md#concurrent-requests)). Temperature 0 (the default) is greedy decoding.
 
 Speed options (they work the same for `dllm`, `dllm-server` and `dllm-mcp`):
@@ -314,6 +314,18 @@ docker run --gpus all -p 5080:5080 -v dllm-models:/models -e DLLM_DEVICE=cuda gh
 `DLLM_IMPORT_ARGS` passes extra options to the import (for example `--accept-licence`). The image contains the
 `[cuda]` extra, so `--gpus all` (NVIDIA container toolkit) is all a GPU needs. On the same machine, the container
 gives byte-identical responses to a native install. Build it yourself with `docker build -t etalii-dllm .`.
+
+To check that two machines really give the same bits, run `dllm verify` on both (with the same `--model`,
+`--quantize` and `--device` options) and compare the last line:
+
+```bash
+dllm --model smollm2-135m.dllm verify
+```
+
+It runs a fixed workload (every kernel, the Unicode handling, the model's tokenizer, logits, a greedy and a sampled
+answer) and prints one fingerprint per part plus a combined `verify:` line, together with the environment (Python,
+instruction set, device). The kernel and Unicode parts are also compared with the values of the release, so a single
+machine already shows `(as released)` or `(DIFFERS from release)`; `--json` prints the report as JSON.
 
 ## What does not work yet
 

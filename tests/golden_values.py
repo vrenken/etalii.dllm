@@ -62,6 +62,9 @@ LORA_FINETUNE_FINGERPRINT = {
 CONSTRAINED_FINGERPRINT = "979b6d7e752cd5b30ba187fd03c7919367f6494b05b0cdb537f0e12eff149c61"
 EMBEDDING_FINGERPRINT = "6cea233a8a650a422c82e849cd5d0c77d223c38d1e9b92f3d84603a3ba4db177"
 
+# Phase 10 (#100): `dllm verify` with the placeholder model; the same on every machine.
+VERIFY_FINGERPRINT = "3ffd534d1fadce8a267c510806baa2fc"
+
 # Phase 2 real models (tests/test_reference_models.py): the import fingerprint of the pinned checkpoint, and
 # GenerationResult.fingerprint of the greedy chat answer to test_reference_models.CHAT. Phase 10 (#99) adds the
 # sampled answer (SAMPLED) and the float32 bits of the last-position logits of PROMPTS (float32 and Q8_0 weights);
@@ -77,6 +80,9 @@ REFERENCE_MODEL_FINGERPRINTS = {
     "qwen2.5": {
         "import": "9bf78203fabbc1d93a5f387456ff1d755d7fef36396351c911f51656c898eb99",
         "chat": "7a75f8d55b99478a282d601c155df0fd6c5066b613db230b610612abbdc05c37",
+        "sampled": "7a75f8d55b99478a282d601c155df0fd6c5066b613db230b610612abbdc05c37",  # the same answer
+        "logits": "cafb17dbac5ba9251af7a494246a70f258d6de372bab1a273897f07e74993404",
+        "logits_q8_0": "e599b1133d04f3c72c0e6e32c24f78c9ea4d67db3424e7e8f0f54c05aa6fa831",
     },
     "qwen2.5-1.5b": {
         "import": "626d11f6abd38e28450448eae2574b29de3212825a143f37bdbf145673e8556d",

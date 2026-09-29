@@ -122,7 +122,8 @@ Phase 6 made the kernels fast without touching the order above. Two facts make t
 accumulator; `linear_backward` runs one task per row of `dx` and per row of `dweight`.
 
 The code path is chosen once per process from the CPU (`simd.hpp`): `avx2` (AVX2 + FMA, x86-64 with GCC/Clang)
-or `portable` (SSE2 on x86-64, NEON on arm64, plain C++ elsewhere). `numerics.instruction_set()` reports it, and
+or `portable` (SSE2 on x86-64, NEON on arm64, plain C++ elsewhere). `numerics.instruction_set()` reports it,
+`DLLM_ISA=portable` forces the portable path (for checks; it never changes the bits), and
 the tests force every supported path and thread count and require the bits of `linear_reference`
 (`tests/test_batch_invariance.py`). All golden hashes from before Phase 6 are unchanged.
 
@@ -151,6 +152,33 @@ of the memory traffic. The layout is fixed: blocks of 32 consecutive inputs of o
 Quantised output is deterministic but not the float output: it gets its own `system_fingerprint` (the weights
 fingerprint hashed with `:q8_0`), and the tests check it against an exact reference and its golden hash. Layers
 whose input size is not a multiple of 32 stay float32. Embedding lookups stay float32; the LM head is quantised.
+
+## Portable determinism
+
+Since Phase 10 the same inputs give the same bits on every supported machine, not only run to run on one. Nothing in
+the kernels had to change for that; the rules that already made them reproducible also make them portable:
+
+- **Only basic IEEE operations.** `+ - * /` and `sqrt` are correctly rounded on every IEEE 754 machine; everything
+  else (`exp`, `sin`, `erf`, ...) is built from them in `math.hpp`. No libm, no `-ffast-math`, no compiler
+  contraction (`-ffp-contract=off`, `/fp:precise`, NVRTC `--fmad=false`).
+- **One order, double accumulators.** Every reduction runs in the order above on every path. SIMD lanes and GPU
+  threads hold different outputs, never parts of one sum, so AVX2, SSE2, NEON, scalar and CUDA do the same
+  operations per output. The only fused operation, the FMA in `linear`, multiplies two floats, which is exact in
+  double, so it rounds exactly like the separate multiply and add. Q8_0's integer sums are exact in any order.
+- **A known floating point environment** ([above](#floating-point-environment)) on every call.
+- **Pinned text handling.** The tokenizer's Unicode normalisation, lower-casing and `\p{..}` classes come from
+  Unicode 15.1 tables shipped in the package (`etalii_dllm.unicode`), not from the installed Python or `regex`.
+  What still comes from them (`\s`, `str.isspace`, the case folding of the contraction patterns) is pinned by
+  `tests/test_unicode.py`, so a version that changes it fails the tests rather than the output.
+
+CI checks it: the golden hashes on Linux, Windows and macOS, and the real SmolLM2-135M and Qwen2.5-0.5B logits (float32
+and Q8_0), greedy and sampled answers on all five release platforms (Linux x86-64 and arm64, Windows, macOS arm64
+and Intel), each with the best and the portable SIMD path (`DLLM_ISA=portable` forces the latter). `dllm verify`
+prints one fingerprint to compare two machines by hand.
+
+Out of scope: accelerators without IEEE float64 (Apple GPUs through Metal, most NPUs) and fast paths whose
+reduction order the hardware chooses (tensor cores, split-K, warp shuffles). The price of portability is the price
+of determinism itself: double accumulators and a fixed order, which is why the GPU backend runs in double precision.
 
 ## GPU
 

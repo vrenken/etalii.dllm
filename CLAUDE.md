@@ -5,9 +5,9 @@ Guidance for Claude Code sessions working in this repository.
 ## Project
 
 EtAlii.Dllm is a deterministic LLM written from scratch in Python, with the numeric kernels in C++. The one
-non-negotiable requirement: on the same hardware, the same weights, prompt and context window produce bit-identical
-output on every run, regardless of load, batching or thread scheduling. Identical output across different hardware
-is not required. Vision and roadmap: `README.md`. Background: `docs/research/`.
+non-negotiable requirement: the same weights, prompt and context window produce bit-identical output on every run,
+regardless of load, batching or thread scheduling, and (since Phase 10) on every supported machine: x86-64/arm64 CPUs,
+every SIMD path and NVIDIA GPUs give the same bits (`docs/kernels.md#portable-determinism`). Vision and roadmap: `README.md`. Background: `docs/research/`.
 Weights come from importing small open-weight models (Apache 2.0/MIT by default), not from training from scratch;
 see `docs/research/model-import.md`. `huggingface.co` is blocked by the default cloud network policy.
 
@@ -68,7 +68,7 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
    reduction (`parallel.hpp`); SIMD lanes hold different outputs, and every variant must equal the scalar reference
    (`linear_reference`) bit for bit on every thread count (`tests/test_batch_invariance.py`). Integer sums (Q8_0)
    are exact, so their order is free.
-3. Prefer the portable kernels in `math.hpp` over `std::exp`, `math.exp` and `numpy.exp`; add new ones built from
+3. Use the portable kernels in `math.hpp` instead of `std::exp`, `math.exp` and `numpy.exp`; add new ones built from
    `+ - * /` and `sqrt`, with an accuracy test.
 4. Kernels must not change strategy based on batch size or sequence length.
 5. Sorting must use a total order (break ties on index/token id).
@@ -79,8 +79,11 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
 
 ## Golden values
 
-Reproducibility tests assert exact SHA-256 hashes. CI runs them on Linux, Windows and macOS; today all agree, but if a
-hardware-specific kernel makes them diverge, key the golden values per platform rather than forcing portability.
+Reproducibility tests assert exact SHA-256 hashes, and every platform must give the same ones: CI runs them on Linux,
+Windows and macOS, and the real-model `*_golden` tests on all five release platforms with every SIMD path
+(`DLLM_ISA`). Never key golden values per platform; a platform that differs is a determinism bug. New kernels must
+equal the scalar reference bit for bit on every path, so only exact operations may differ between paths (an FMA of a
+product that is exact in double, integer sums in any order).
 If a hash changes:
 - unintentionally: it is a determinism bug, find it; do not update the constant.
 - intentionally (new weights, new sampler semantics): update `tests/golden_values.py` and say why in the commit

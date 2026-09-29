@@ -1,7 +1,7 @@
 # Determinism by design
 
-EtAlii.Dllm promises one thing above everything else: the same inputs on the same hardware give the same output
-bits, every run, whatever else the machine is doing. This page shows what "the same inputs" means, where a normal
+EtAlii.Dllm promises one thing above everything else: the same inputs give the same output bits, every run,
+whatever else the machine is doing, and on every supported machine (Phase 10). This page shows what "the same inputs" means, where a normal
 LLM stack loses determinism, and which part of this code base removes each cause. The research behind it is in
 [deterministic inference](../research/deterministic-inference.md); the exact kernel orders are in
 [kernels](../kernels.md).
@@ -182,8 +182,9 @@ flowchart LR
 ```
 
 A golden hash that changes without an intended semantic change is treated as a determinism bug to find, never as
-a constant to update. If a future hardware-specific kernel makes platforms disagree, the golden values get keyed
-per platform instead of forcing the kernels to be portable.
+a constant to update. The golden values are the same on every platform, and the real-model ones are checked on all
+five release platforms and every SIMD path; a platform that disagrees is a bug, never a reason to key the values
+per platform.
 
 ## What this means for users
 
