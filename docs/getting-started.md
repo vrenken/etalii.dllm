@@ -277,6 +277,19 @@ dllm --model smollm2-135m-tuned.dllm chat "..."
 Each step prints its loss. `--resume run.dllmckpt` continues a stopped run. All options, the data format and how
 the reproducibility is achieved: [training](training.md).
 
+LoRA trains small adapters instead of all weights, and they work with the PEFT ecosystem:
+
+```bash
+dllm finetune smollm2-135m.dllm --data my-data.jsonl --lora-rank 8 --adapter-output my-adapter \
+    --steps 50 --learning-rate 1e-3
+dllm --model smollm2-135m.dllm --adapter my-adapter chat "..."          # or DLLM_ADAPTER=my-adapter
+dllm import my-adapter --base smollm2-135m.dllm -o smollm2-135m-lora.dllm   # merge into a new model file
+dllm import ./some-peft-adapter --base qwen2.5-0.5b.dllm -o tuned.dllm     # a PEFT adapter trained elsewhere
+```
+
+Applying an adapter at load time and serving the merged file give the same answers bit for bit, with the same
+`system_fingerprint`. Details: [LoRA adapters](training.md#lora-adapters).
+
 ## 7. Docker
 
 The server also comes as an image for linux/amd64 and linux/arm64, published with every release as

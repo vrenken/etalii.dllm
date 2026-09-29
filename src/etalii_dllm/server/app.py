@@ -296,5 +296,5 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=5080)
     add_runtime_arguments(parser)
     args = parser.parse_args()
-    use_model_file(args.model, args.quantize, args.threads, args.device, args.prompt_cache)
+    use_model_file(args.model, args.quantize, args.threads, args.device, args.prompt_cache, args.adapter)
     uvicorn.run(app, host=args.host, port=args.port)

@@ -38,6 +38,7 @@ same source twice gives byte-identical files (`tests/test_import.py`).
 | `tokenizer` | Hugging Face: `tokenizer.json`, `tokenizer_config.json` and `special_tokens_map.json` verbatim. GGUF: the `tokenizer.*` metadata. The BPE tokenizer (#14) reads this |
 | `chat_template` | The model's Jinja chat template, or `null` |
 | `fine_tuning` | Only in models written by `dllm finetune`: base model fingerprint, data fingerprint, run settings, steps completed and final loss (see [training](training.md)) |
+| `adapter` | Only in models written by `dllm import ADAPTER --base BASE`: the base model fingerprint, the LoRA settings (`rank`, `alpha`, `targets`, `rslora`), the adapter's licence and its source files (see [training](training.md#lora-adapters)) |
 
 ## Tensor names
 

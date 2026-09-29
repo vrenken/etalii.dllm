@@ -50,6 +50,13 @@ FINETUNE_FINGERPRINT = {
     "qwen3": "bd00cb4c7be0ebba8bc67300af300ea28054a8147f74480b788e7aa131d02514",
 }
 
+# Phase 8. Fingerprint of the model.dllm exported after tests/test_lora.py::RUN (6 AdamW steps on rank-2 LoRA
+# adapters of every linear layer): the base with the trained adapters merged in.
+LORA_FINETUNE_FINGERPRINT = {
+    "llama": "05fd6d263be7b2f600637127b9f425ac5a699c51f4b5622eec8f50c888ccbedc",
+    "qwen3": "bb2e772b7a102b02be51cb894da3676a2c557956f156f5be5c30ea7a93ba9799",
+}
+
 # Phase 4. fingerprint() of the tokens of tests/test_generation.py's schema-constrained chat (placeholder model,
 # temperature 0.8, seed 11), and of the placeholder model's mean-pooled embedding of "embed this text".
 CONSTRAINED_FINGERPRINT = "979b6d7e752cd5b30ba187fd03c7919367f6494b05b0cdb537f0e12eff149c61"

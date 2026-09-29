@@ -43,7 +43,8 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
   `chat_template` (the model's own tokenizer and Jinja template), `cuda` (the GPU backend: NVRTC discovery, `CudaTensor`, device
   ops; `--device cuda`/`DLLM_DEVICE`), `architecture` (`TransformerConfig`), `modelfile`
   (the `model.dllm` container, `docs/model-format.md`), `importing` (safetensors/GGUF readers and `dllm import`),
-  `training` (gradients, AdamW, data order, checkpoints and `dllm finetune`, `docs/training.md`), `grammar`
+  `training` (gradients, AdamW, data order, checkpoints and `dllm finetune`, `docs/training.md`), `lora` (LoRA
+  adapters, always merged into the weights; the PEFT format), `grammar`
   (JSON-schema constrained decoding over a token trie), `tools` (tool calling in the Hermes `<tool_call>` format).
   Tests compare against the reference packages `gguf`, `safetensors` and `tokenizers` (dev dependencies).
 - `src/etalii_dllm/server/` (OpenAI `app.py` and `responses_api.py`, Anthropic `anthropic_api.py`, Ollama `ollama_api.py`, the browser chat page `static/chat.html`

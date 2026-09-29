@@ -5,8 +5,9 @@ base model, data file and settings give a byte-identical fine-tuned `model.dllm`
 checkpoint and resumed ends in exactly the same bytes as one that ran straight through. The code is in
 `src/etalii_dllm/training/`; the gradient kernels are in `cpp/include/dllm/grad.hpp`.
 
-This is roadmap Phase 3. It is full-parameter fine-tuning of the Llama/Qwen2/Qwen3 decoder; there is no pre-training from
-scratch (weights come from [importing open models](research/model-import.md)) and no LoRA yet.
+This is roadmap Phase 3, with LoRA added in Phase 8. It trains either every parameter of the Llama/Qwen2/Qwen3
+decoder or [LoRA adapters](#lora-adapters) on its linear layers; there is no pre-training from scratch (weights come
+from [importing open models](research/model-import.md)).
 
 ## Usage
 
@@ -34,6 +35,44 @@ dllm finetune smollm2-135m.dllm --data my-data.jsonl -o smollm2-135m-tuned.dllm 
 | `--seed` | 0 | Seeds the data order (there is no other randomness: no dropout) |
 
 Adam's betas are 0.9 and 0.999 and epsilon is 1e-8 (the PyTorch defaults).
+
+## LoRA adapters
+
+`--lora-rank r` trains low-rank adapters instead of the weights: each adapted linear layer `W` (`[out, in]`) gets
+`A` (`[r, in]`) and `B` (`[out, r]`) and becomes `W + (alpha / r) * B @ A`. The base weights stay frozen, and only
+the adapters have AdamW moments, so checkpoints and adapter files are small.
+
+```bash
+dllm finetune smollm2-135m.dllm --data my-data.jsonl --lora-rank 8 --lora-alpha 16 \
+    --adapter-output my-adapter -o smollm2-135m-lora.dllm --steps 200 --learning-rate 1e-3
+dllm --model smollm2-135m.dllm --adapter my-adapter chat "..."      # apply the adapter when the model loads
+dllm --model smollm2-135m-lora.dllm chat "..."                     # the same answer from the merged file
+dllm import my-adapter --base smollm2-135m.dllm -o merged.dllm     # merge it later (same bytes as -o above)
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--lora-rank` | 0 (off) | Adapter rank |
+| `--lora-alpha` | the rank | Scale numerator; the adapter is scaled by `alpha / rank` |
+| `--lora-targets` | `q,k,v,o,gate,up,down` | Adapted linear layers |
+| `--adapter-output` | none | Write the adapters as a PEFT directory |
+
+`-o` writes the base model with the adapters merged in; `--adapter-output` writes a Hugging Face
+[PEFT](https://github.com/huggingface/peft) adapter (`adapter_config.json`, `adapter_model.safetensors`), which
+PEFT loads as it is. Adapters trained with PEFT import the same way (`dllm import DIR --base BASE`, also
+`hf:org/adapter`); DoRA, per-layer ranks, bias training and `modules_to_save` are refused. Resuming a LoRA
+checkpoint needs the base model again (it is the positional argument, as when the run started).
+
+Determinism: an adapter is only ever used by merging it into the weights (`W + scale * B @ A` with the `linear`
+kernel, then elementwise float32), whether that happens in a file or when the model loads. Both routes give the same
+weights, the same `system_fingerprint` and the same output bits. Training runs the decoder on the merged weights and
+gets the adapter gradients from the merged weight's gradient (`dA = scale * B^T dW`, `dB = scale * dW A^T`). That
+keeps training exactly consistent with inference, at the price of the full backward pass: a LoRA step costs about
+as much compute as a full fine-tuning step, but needs far less optimizer memory. New adapters start with `A`
+Gaussian (standard deviation `1 / rank`) from `--seed` and `B` zero, so step 0 is the base model exactly.
+`tests/test_lora.py` checks the adapter gradients against finite differences, byte-identical and resumed LoRA runs,
+and that merged and load-time adapters give the same bits; `tests/test_reference_models.py` checks both PEFT
+directions against the `peft` library.
 
 ## Data
 

@@ -105,8 +105,9 @@ def write_model_file(
         "fingerprint": _FINGERPRINT_PLACEHOLDER,
         **{key: metadata.get(key) for key in ("source", "licence", "tokenizer", "chat_template")},
     }
-    if metadata.get("fine_tuning") is not None:  # only fine-tuned models carry the section
-        header["fine_tuning"] = metadata["fine_tuning"]
+    for section in ("fine_tuning", "adapter"):  # only fine-tuned models and merged adapters carry these
+        if metadata.get(section) is not None:
+            header[section] = metadata[section]
     header_bytes = canonical_json(header)
     header_bytes += b" " * _pad(_PREFIX.size + len(header_bytes))
     path = Path(path)
@@ -125,6 +126,16 @@ def write_model_file(
         fingerprint = digest.hexdigest()
         _replace_placeholder(stream, header_bytes, fingerprint)
     return fingerprint
+
+
+def data_fingerprint(tensors: Mapping[str, np.ndarray]) -> str:
+    """The fingerprint :func:`write_model_file` would record for ``tensors``: the SHA-256 of their float32 bytes in
+    tensor order, each padded to the alignment. Identifies weights that are only held in memory."""
+    digest = hashlib.sha256()
+    for name in tensor_order(tensors):
+        data = np.ascontiguousarray(tensors[name], dtype=_DTYPE).tobytes()
+        digest.update(data + b"\0" * _pad(len(data)))
+    return digest.hexdigest()
 
 
 def _replace_placeholder(stream: BinaryIO, header_bytes: bytes, fingerprint: str) -> None:
@@ -192,6 +203,11 @@ class ModelFile:
     @property
     def fine_tuning(self) -> dict[str, Any] | None:
         return self.header.get("fine_tuning")
+
+    @property
+    def adapter(self) -> dict[str, Any] | None:
+        """The LoRA adapter merged into the weights, when the file was written by an adapter import."""
+        return self.header.get("adapter")
 
     def verify(self) -> None:
         """Re-hashes the tensor data and checks it against the recorded fingerprint."""
