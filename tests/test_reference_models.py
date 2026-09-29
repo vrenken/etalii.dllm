@@ -63,8 +63,10 @@ REFERENCE_MODELS = {
     "tinyllama": ReferenceModel(
         "TinyLlama/TinyLlama-1.1B-Chat-v1.0", "fe8a4ea1ffedaf415f4da2f062534de366a451e6", "Apache-2.0"
     ),
-    # Post-norms and QK-norm over the whole projections; pinned to main until CI resolves the commit.
-    "olmo2": ReferenceModel("allenai/OLMo-2-0425-1B-Instruct", "main", "Apache-2.0"),
+    # Post-norms and QK-norm over the whole projections.
+    "olmo2": ReferenceModel(
+        "allenai/OLMo-2-0425-1B-Instruct", "48d788eca847d4d7548f375ad03d3c9312f6139e", "Apache-2.0"
+    ),
 }
 
 # Extra chat template variables per model for the greedy chat: Qwen3 answers directly instead of thinking first.
