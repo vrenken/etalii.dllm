@@ -14,7 +14,6 @@ bits, so the logits, and the ``system_fingerprint``, do not depend on the device
 from __future__ import annotations
 
 import hashlib
-import math
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -154,6 +153,15 @@ class Transformer:
         self.tensors: Mapping[str, Tensor] = weights
         """The float32 source tensors (usually memory-mapped from the model file)."""
         self._embedding = weights["token_embedding.weight"].numpy()
+        if config.residual_multiplier != 1.0:
+            # Granite scales the outputs of attention and the MLP before the residual add; scaling the two output
+            # projections once (elementwise, float32) is the same map and keeps CPU and GPU on one code path.
+            residual = np.float32(config.residual_multiplier)
+            scaled = ("attention.o.weight", "mlp.down.weight")
+            weights = {
+                name: Tensor(tensor.numpy() * residual) if name.endswith(scaled) else tensor
+                for name, tensor in weights.items()
+            }
         head = weights["token_embedding.weight" if config.tie_word_embeddings else "lm_head.weight"]
         # Matrices are packed (or quantised, or uploaded to the GPU) once here; norms and biases stay plain (on the
         # GPU they are uploaded too); the embedding table stays on the host, which looks up the rows.
@@ -251,6 +259,8 @@ class Transformer:
         else:
             hidden = self._layers(segments).numpy()
             logits = linear(np.ascontiguousarray(hidden[ends]), self._lm_head).numpy()
+        if self.config.logits_scaling != 1.0:
+            logits = logits / np.float32(self.config.logits_scaling)
         for tokens, _, cache in segments:
             cache.tokens.extend(tokens)
         return [row.copy() for row in logits]
@@ -261,7 +271,7 @@ class Transformer:
         w = self._w
         tokens, positions, bounds = self._embed(segments)
         count = len(tokens)
-        x = np.ascontiguousarray(self._embedding[np.asarray(tokens, dtype=np.int64)])
+        x = self._embeddings(tokens)
         for layer in range(config.layers):
             p = f"layers.{layer}."
             post = config.norm_placement == "post"
@@ -283,7 +293,15 @@ class Transformer:
             for (_, start, cache), lo, hi in zip(segments, bounds[:-1], bounds[1:], strict=True):
                 keys, values = cache.append(layer, start, k[lo:hi], v[lo:hi])
                 attended.append(
-                    attention(q[lo:hi], keys, values, causal=True, q_offset=start, window=config.window(layer)).numpy()
+                    attention(
+                        q[lo:hi],
+                        keys,
+                        values,
+                        scale=config.attention_scale,
+                        causal=True,
+                        q_offset=start,
+                        window=config.window(layer),
+                    ).numpy()
                 )
             a = attended[0] if len(attended) == 1 else np.concatenate(attended)
             out = linear(a.reshape(count, config.heads * config.head_dim), w[p + "attention.o.weight"])
@@ -298,6 +316,12 @@ class Transformer:
                 out = rms_norm(out, w[p + "mlp_post_norm.weight"], config.rms_norm_eps)
             x = x + out.numpy()
         return rms_norm(x, w["final_norm.weight"], config.rms_norm_eps)
+
+    def _embeddings(self, tokens: list[int]) -> np.ndarray:
+        rows = self._embedding[np.asarray(tokens, dtype=np.int64)]
+        if self.config.embedding_multiplier != 1.0:
+            rows = rows * np.float32(self.config.embedding_multiplier)
+        return np.ascontiguousarray(rows, dtype=np.float32)
 
     def _embed(self, segments: list[tuple[list[int], int, KVCache]]) -> tuple[list[int], np.ndarray, np.ndarray]:
         """(token ids, absolute positions, segment bounds) of the stacked new tokens."""
@@ -316,8 +340,8 @@ class Transformer:
         w: dict = self._w
         tokens, positions, bounds = self._embed(segments)
         count = len(tokens)
-        scale = 1.0 / math.sqrt(config.head_dim)
-        x = CudaTensor.upload(self._embedding[np.asarray(tokens, dtype=np.int64)])
+        scale = config.attention_scale
+        x = CudaTensor.upload(self._embeddings(tokens))
         on_gpu_positions = cuda.upload_raw(positions)
         for layer in range(config.layers):
             p = f"layers.{layer}."

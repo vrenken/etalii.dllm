@@ -56,7 +56,8 @@ flowchart LR
 
 `import_model` accepts three kinds of source and turns each into the same intermediate form: a
 `TransformerConfig`, a list of named float32 tensors, the tokenizer files, the chat template and the licence it
-found. Five decoder families are supported: Llama (SmolLM2, TinyLlama), Mistral (Llama with sliding-window
+found. Six decoder families are supported: Llama (SmolLM2, TinyLlama), Granite (Llama with four scalar
+multipliers; the residual one is folded into the output projections when the model loads), Mistral (Llama with sliding-window
 attention: each query sees only the last `sliding_window` keys), OLMo 2 (RMSNorm on the outputs of attention and the
 MLP instead of their inputs, and QK-norm over the whole projections), Qwen2 (Qwen2.5, which adds biases on the q, k and v
 projections) and Qwen3 (which adds QK-norm, an RMSNorm over each query and key head before RoPE, stored as
@@ -148,12 +149,14 @@ classDiagram
         verify()
     }
     class TransformerConfig {
-        family: llama, mistral, olmo2, qwen2 or qwen3
+        family: granite, llama, mistral, olmo2, qwen2 or qwen3
         vocabulary_size, hidden_size
         layers, heads, kv_heads, head_dim
         rope_theta, rope_scaling
         attention_bias, qk_norm, qk_norm_scope, norm_placement
         tie_word_embeddings, sliding_window, sliding_window_layers
+        embedding_multiplier, attention_multiplier
+        residual_multiplier, logits_scaling
         eos_token_ids
     }
     class Transformer {

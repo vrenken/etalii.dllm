@@ -6,14 +6,15 @@ Imported models are mapped onto this one description and onto one set of tensor 
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
 # Families the decoder implements. "qwen2" is "llama" with biases on the q/k/v projections; "qwen3" is "llama" with
 # an RMSNorm over each query and key head before the rotary embedding (QK-norm); "mistral" is "llama", usually with
 # sliding-window attention; "olmo2" moves the norms after attention and the MLP and normalises the whole query and
-# key projections.
-FAMILIES = ("llama", "mistral", "olmo2", "qwen2", "qwen3")
+# key projections; "granite" is "llama" with four scalar multipliers.
+FAMILIES = ("granite", "llama", "mistral", "olmo2", "qwen2", "qwen3")
 NORM_PLACEMENTS = ("pre", "post")
 QK_NORM_SCOPES = ("head", "all")
 
@@ -46,6 +47,14 @@ class TransformerConfig:
     rope_interleaved: bool = False
     bos_token_id: int | None = None
     eos_token_ids: tuple[int, ...] = field(default_factory=tuple)
+    embedding_multiplier: float = 1.0
+    """Granite: the embedding rows are multiplied by this before the first layer."""
+    attention_multiplier: float | None = None
+    """Granite: the attention score scale; ``None`` means ``1 / sqrt(head_dim)``."""
+    residual_multiplier: float = 1.0
+    """Granite: the outputs of attention and the MLP are scaled by this before the residual add."""
+    logits_scaling: float = 1.0
+    """Granite: the logits are divided by this."""
     sliding_window: int | None = None
     """Sliding-window attention (Mistral): each query sees only the last ``sliding_window`` keys, itself included."""
     sliding_window_layers: tuple[int, ...] | None = None
@@ -74,6 +83,16 @@ class TransformerConfig:
         ):
             raise ValueError("sliding_window_layers must be layer indices")
 
+    @property
+    def attention_scale(self) -> float:
+        return 1.0 / math.sqrt(self.head_dim) if self.attention_multiplier is None else self.attention_multiplier
+
+    @property
+    def has_multipliers(self) -> bool:
+        """Whether any Granite multiplier differs from the plain Llama value."""
+        multipliers = (self.embedding_multiplier, self.attention_multiplier, self.residual_multiplier)
+        return multipliers != (1.0, None, 1.0) or self.logits_scaling != 1.0
+
     def window(self, layer: int) -> int | None:
         """The attention window of ``layer``: ``None`` for full causal attention."""
         if self.sliding_window is None:
@@ -90,7 +109,15 @@ class TransformerConfig:
         for name in ("sliding_window", "sliding_window_layers"):  # likewise
             if values[name] is None:
                 del values[name]
-        for name, default in (("qk_norm_scope", "head"), ("norm_placement", "pre")):
+        defaults = (
+            ("qk_norm_scope", "head"),
+            ("norm_placement", "pre"),
+            ("embedding_multiplier", 1.0),
+            ("attention_multiplier", None),
+            ("residual_multiplier", 1.0),
+            ("logits_scaling", 1.0),
+        )
+        for name, default in defaults:
             if values[name] == default:
                 del values[name]
         if values.get("sliding_window_layers") is not None:

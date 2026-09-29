@@ -44,7 +44,7 @@ class DecoderGradients:
     def __init__(self, config: TransformerConfig) -> None:
         if config.rope_interleaved:
             raise ValueError("training expects the Hugging Face rotary layout (imports convert to it)")
-        if config.norm_placement != "pre" or config.qk_norm_scope != "head":
+        if config.norm_placement != "pre" or config.qk_norm_scope != "head" or config.has_multipliers:
             raise ValueError(f"fine-tuning is not supported for the {config.family} architecture yet")
         self.config = config
         self.inv_freq = rope_inv_freq(config.head_dim, config.rope_theta, scaling=config.rope_scaling)

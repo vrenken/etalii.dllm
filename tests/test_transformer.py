@@ -37,7 +37,7 @@ def reference_logits(config: TransformerConfig, w: dict[str, np.ndarray], tokens
         out = x @ w[name + ".weight"].T
         return out + w[name + ".bias"] if name + ".bias" in w else out
 
-    x = w["token_embedding.weight"][tokens]
+    x = w["token_embedding.weight"][tokens] * config.embedding_multiplier
     group = config.heads // config.kv_heads
     mask = np.triu(np.full((n, n), -np.inf), 1)
     for i in range(config.layers):
@@ -56,20 +56,21 @@ def reference_logits(config: TransformerConfig, w: dict[str, np.ndarray], tokens
         v = proj(h, p + "attention.v").reshape(n, config.kv_heads, hd)
         out = np.empty((n, config.heads, hd))
         for head in range(config.heads):
-            scores = q[:, head] @ k[:, head // group].T / np.sqrt(hd) + layer_mask
+            scores = q[:, head] @ k[:, head // group].T * config.attention_scale + layer_mask
             probs = np.exp(scores - scores.max(-1, keepdims=True))
             out[:, head] = (probs / probs.sum(-1, keepdims=True)) @ v[:, head // group]
-        attended = out.reshape(n, -1) @ w[p + "attention.o.weight"].T
+        attended = out.reshape(n, -1) @ w[p + "attention.o.weight"].T * config.residual_multiplier
         x = x + (norm(attended, w[p + "attention_post_norm.weight"]) if post else attended)
         h = x if post else norm(x, w[p + "mlp_norm.weight"])
         gate = h @ w[p + "mlp.gate.weight"].T
         mlp = (gate / (1 + np.exp(-gate)) * (h @ w[p + "mlp.up.weight"].T)) @ w[p + "mlp.down.weight"].T
+        mlp = mlp * config.residual_multiplier
         x = x + (norm(mlp, w[p + "mlp_post_norm.weight"]) if post else mlp)
     head = w["token_embedding.weight"] if config.tie_word_embeddings else w["lm_head.weight"]
-    return norm(x, w["final_norm.weight"])[-1] @ head.T
+    return norm(x, w["final_norm.weight"])[-1] @ head.T / config.logits_scaling
 
 
-@pytest.fixture(scope="module", params=["llama", "mistral", "olmo2", "qwen2", "qwen3"])
+@pytest.fixture(scope="module", params=["granite", "llama", "mistral", "olmo2", "qwen2", "qwen3"])
 def model(request, tmp_path_factory) -> Transformer:
     directory = tmp_path_factory.mktemp(request.param)
     config = tiny_config(request.param)

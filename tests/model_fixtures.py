@@ -38,9 +38,17 @@ TINY_LLAMA_CONFIG = {
 def tiny_config(family: str) -> dict:
     """The tiny config for ``family``: Qwen2 unties the head; Qwen3 adds QK-norm and a head size of its own; Mistral
     slides a window of 3 tokens (shorter than the test prompts, so the window matters); OLMo 2 normalises outputs
-    instead of inputs and the whole query and key projections."""
+    instead of inputs and the whole query and key projections; Granite adds its four multipliers."""
     config = {**TINY_LLAMA_CONFIG, "model_type": family}
-    if family == "olmo2":
+    if family == "granite":
+        config.update(
+            architectures=["GraniteForCausalLM"],
+            embedding_multiplier=12.0,
+            attention_multiplier=0.125,
+            residual_multiplier=0.22,
+            logits_scaling=8.0,
+        )
+    elif family == "olmo2":
         config.update(architectures=["Olmo2ForCausalLM"], tie_word_embeddings=False, attention_bias=False)
     elif family == "mistral":
         config.update(architectures=["MistralForCausalLM"], sliding_window=3, tie_word_embeddings=False)
@@ -76,7 +84,7 @@ def hf_weights(config: dict, seed: int = 11) -> dict[str, np.ndarray]:
     family = config["model_type"]
     ours = TransformerConfig.from_dict(
         {
-            "family": family if family in ("mistral", "olmo2", "qwen2", "qwen3") else "llama",
+            "family": family if family in ("granite", "mistral", "olmo2", "qwen2", "qwen3") else "llama",
             "vocabulary_size": config["vocab_size"],
             "hidden_size": config["hidden_size"],
             "intermediate_size": config["intermediate_size"],

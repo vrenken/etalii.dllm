@@ -117,11 +117,11 @@ def _rope_from_hf(config: dict[str, Any]) -> tuple[float, dict[str, Any] | None]
 
 
 def hf_config(config: dict[str, Any], generation: dict[str, Any] | None = None) -> TransformerConfig:
-    """Maps a Hugging Face ``config.json`` (Llama, Mistral, OLMo 2, Qwen2 or Qwen3) to our description."""
+    """Maps a Hugging Face ``config.json`` (Granite, Llama, Mistral, OLMo 2, Qwen2 or Qwen3) to our description."""
     family = config.get("model_type")
-    if family not in ("llama", "mistral", "olmo2", "qwen2", "qwen3"):
+    if family not in ("granite", "llama", "mistral", "olmo2", "qwen2", "qwen3"):
         raise ModelImportError(
-            f"model_type {family!r} is not supported (supported: llama, mistral, olmo2, qwen2, qwen3)"
+            f"model_type {family!r} is not supported (supported: granite, llama, mistral, olmo2, qwen2, qwen3)"
         )
     if config.get("hidden_act", "silu") != "silu":
         raise ModelImportError(f"activation {config.get('hidden_act')!r} is not supported")
@@ -158,7 +158,19 @@ def hf_config(config: dict[str, Any], generation: dict[str, Any] | None = None) 
         eos_token_ids=tuple(eos),
         sliding_window=window,
         sliding_window_layers=window_layers,
+        **_granite_multipliers(config, family),
     )
+
+
+def _granite_multipliers(config: dict[str, Any], family: str) -> dict[str, Any]:
+    if family != "granite":
+        return {}
+    return {
+        "embedding_multiplier": float(config.get("embedding_multiplier", 1.0)),
+        "attention_multiplier": float(config["attention_multiplier"]) if "attention_multiplier" in config else None,
+        "residual_multiplier": float(config.get("residual_multiplier", 1.0)),
+        "logits_scaling": float(config.get("logits_scaling", 1.0)),
+    }
 
 
 def _sliding_window_from_hf(config: dict[str, Any], family: str) -> tuple[int | None, tuple[int, ...] | None]:
