@@ -11,8 +11,11 @@ from typing import Any
 
 # Families the decoder implements. "qwen2" is "llama" with biases on the q/k/v projections; "qwen3" is "llama" with
 # an RMSNorm over each query and key head before the rotary embedding (QK-norm); "mistral" is "llama", usually with
-# sliding-window attention.
-FAMILIES = ("llama", "mistral", "qwen2", "qwen3")
+# sliding-window attention; "olmo2" moves the norms after attention and the MLP and normalises the whole query and
+# key projections.
+FAMILIES = ("llama", "mistral", "olmo2", "qwen2", "qwen3")
+NORM_PLACEMENTS = ("pre", "post")
+QK_NORM_SCOPES = ("head", "all")
 
 
 @dataclass(frozen=True)
@@ -31,7 +34,12 @@ class TransformerConfig:
     rope_scaling: dict[str, Any] | None = None
     attention_bias: bool = False
     qk_norm: bool = False
-    """RMSNorm (weights ``[head_dim]``, shared by the heads) on every query and key head before RoPE (Qwen3)."""
+    """RMSNorm on the queries and keys before RoPE: per head with weights ``[head_dim]`` shared by the heads (Qwen3),
+    or over the whole projection with weights ``[heads * head_dim]`` (``qk_norm_scope == "all"``, OLMo 2)."""
+    qk_norm_scope: str = "head"
+    norm_placement: str = "pre"
+    """``"pre"``: RMSNorm on the input of attention and of the MLP (Llama). ``"post"``: on their output, before it is
+    added to the residual stream (OLMo 2)."""
     tie_word_embeddings: bool = False
     activation: str = "silu"
     # Rotary pairs (i, i + d/2) as in Hugging Face checkpoints. Imports convert other layouts to this one.
@@ -55,6 +63,10 @@ class TransformerConfig:
             raise ValueError("head_dim must be even for rotary embeddings")
         if self.activation != "silu":
             raise ValueError(f"unsupported activation {self.activation!r}")
+        if self.qk_norm_scope not in QK_NORM_SCOPES:
+            raise ValueError(f"unsupported qk_norm_scope {self.qk_norm_scope!r}")
+        if self.norm_placement not in NORM_PLACEMENTS:
+            raise ValueError(f"unsupported norm_placement {self.norm_placement!r}")
         if self.sliding_window is not None and self.sliding_window < 1:
             raise ValueError("sliding_window must be positive")
         if self.sliding_window_layers is not None and any(
@@ -78,6 +90,9 @@ class TransformerConfig:
         for name in ("sliding_window", "sliding_window_layers"):  # likewise
             if values[name] is None:
                 del values[name]
+        for name, default in (("qk_norm_scope", "head"), ("norm_placement", "pre")):
+            if values[name] == default:
+                del values[name]
         if values.get("sliding_window_layers") is not None:
             values["sliding_window_layers"] = list(values["sliding_window_layers"])
         return values
@@ -97,7 +112,8 @@ class TransformerConfig:
         shapes: dict[str, tuple[int, ...]] = {"token_embedding.weight": (self.vocabulary_size, self.hidden_size)}
         for i in range(self.layers):
             p = f"layers.{i}."
-            shapes[p + "attention_norm.weight"] = (self.hidden_size,)
+            if self.norm_placement == "pre":
+                shapes[p + "attention_norm.weight"] = (self.hidden_size,)
             shapes[p + "attention.q.weight"] = (q, self.hidden_size)
             shapes[p + "attention.k.weight"] = (kv, self.hidden_size)
             shapes[p + "attention.v.weight"] = (kv, self.hidden_size)
@@ -106,10 +122,15 @@ class TransformerConfig:
                 shapes[p + "attention.k.bias"] = (kv,)
                 shapes[p + "attention.v.bias"] = (kv,)
             if self.qk_norm:
-                shapes[p + "attention.q_norm.weight"] = (self.head_dim,)
-                shapes[p + "attention.k_norm.weight"] = (self.head_dim,)
+                whole = self.qk_norm_scope == "all"
+                shapes[p + "attention.q_norm.weight"] = (q if whole else self.head_dim,)
+                shapes[p + "attention.k_norm.weight"] = (kv if whole else self.head_dim,)
             shapes[p + "attention.o.weight"] = (self.hidden_size, q)
-            shapes[p + "mlp_norm.weight"] = (self.hidden_size,)
+            if self.norm_placement == "post":
+                shapes[p + "attention_post_norm.weight"] = (self.hidden_size,)
+                shapes[p + "mlp_post_norm.weight"] = (self.hidden_size,)
+            else:
+                shapes[p + "mlp_norm.weight"] = (self.hidden_size,)
             shapes[p + "mlp.gate.weight"] = (self.intermediate_size, self.hidden_size)
             shapes[p + "mlp.up.weight"] = (self.intermediate_size, self.hidden_size)
             shapes[p + "mlp.down.weight"] = (self.hidden_size, self.intermediate_size)

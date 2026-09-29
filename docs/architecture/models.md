@@ -56,8 +56,9 @@ flowchart LR
 
 `import_model` accepts three kinds of source and turns each into the same intermediate form: a
 `TransformerConfig`, a list of named float32 tensors, the tokenizer files, the chat template and the licence it
-found. Four decoder families are supported: Llama (SmolLM2, TinyLlama), Mistral (Llama with sliding-window
-attention: each query sees only the last `sliding_window` keys), Qwen2 (Qwen2.5, which adds biases on the q, k and v
+found. Five decoder families are supported: Llama (SmolLM2, TinyLlama), Mistral (Llama with sliding-window
+attention: each query sees only the last `sliding_window` keys), OLMo 2 (RMSNorm on the outputs of attention and the
+MLP instead of their inputs, and QK-norm over the whole projections), Qwen2 (Qwen2.5, which adds biases on the q, k and v
 projections) and Qwen3 (which adds QK-norm, an RMSNorm over each query and key head before RoPE, stored as
 `attention.{q,k}_norm.weight`). A fourth kind of source, a LoRA adapter, is described [below](#lora-adapters).
 
@@ -147,12 +148,12 @@ classDiagram
         verify()
     }
     class TransformerConfig {
-        family: llama, mistral, qwen2 or qwen3
+        family: llama, mistral, olmo2, qwen2 or qwen3
         vocabulary_size, hidden_size
         layers, heads, kv_heads, head_dim
         rope_theta, rope_scaling
-        attention_bias, qk_norm, tie_word_embeddings
-        sliding_window, sliding_window_layers
+        attention_bias, qk_norm, qk_norm_scope, norm_placement
+        tie_word_embeddings, sliding_window, sliding_window_layers
         eos_token_ids
     }
     class Transformer {

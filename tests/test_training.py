@@ -423,3 +423,11 @@ def test_cli_finetune_and_resume(tmp_path, capsys):
     assert "fine-tuned:         4 steps" in capsys.readouterr().out
     assert cli(["--model", str(tmp_path / "a.dllm"), "chat", "What is 3 plus 3?", "--max-tokens", "4"]) == 0
     assert cli([*common, "-o", str(tmp_path / "missing.dllm"), "--resume", str(tmp_path / "nope")]) == 1
+
+
+def test_architectures_without_a_backward_pass_are_refused():
+    """OLMo 2's post-norms have no gradient code yet; training must say so rather than compute something else."""
+    from etalii_dllm.importing.importer import hf_config
+
+    with pytest.raises(ValueError, match="olmo2"):
+        DecoderGradients(hf_config(tiny_config("olmo2")))

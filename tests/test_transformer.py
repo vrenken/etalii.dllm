@@ -44,10 +44,13 @@ def reference_logits(config: TransformerConfig, w: dict[str, np.ndarray], tokens
         window = config.window(i)
         layer_mask = mask if window is None else mask + np.tril(np.full((n, n), -np.inf), -window)
         p = f"layers.{i}."
-        h = norm(x, w[p + "attention_norm.weight"])
-        q = proj(h, p + "attention.q").reshape(n, config.heads, hd)
-        k = proj(h, p + "attention.k").reshape(n, config.kv_heads, hd)
-        if config.qk_norm:
+        post = config.norm_placement == "post"
+        h = x if post else norm(x, w[p + "attention_norm.weight"])
+        q, k = proj(h, p + "attention.q"), proj(h, p + "attention.k")
+        if config.qk_norm and config.qk_norm_scope == "all":
+            q, k = norm(q, w[p + "attention.q_norm.weight"]), norm(k, w[p + "attention.k_norm.weight"])
+        q, k = q.reshape(n, config.heads, hd), k.reshape(n, config.kv_heads, hd)
+        if config.qk_norm and config.qk_norm_scope == "head":
             q, k = norm(q, w[p + "attention.q_norm.weight"]), norm(k, w[p + "attention.k_norm.weight"])
         q, k = rotate(q), rotate(k)
         v = proj(h, p + "attention.v").reshape(n, config.kv_heads, hd)
@@ -56,15 +59,17 @@ def reference_logits(config: TransformerConfig, w: dict[str, np.ndarray], tokens
             scores = q[:, head] @ k[:, head // group].T / np.sqrt(hd) + layer_mask
             probs = np.exp(scores - scores.max(-1, keepdims=True))
             out[:, head] = (probs / probs.sum(-1, keepdims=True)) @ v[:, head // group]
-        x = x + out.reshape(n, -1) @ w[p + "attention.o.weight"].T
-        h = norm(x, w[p + "mlp_norm.weight"])
+        attended = out.reshape(n, -1) @ w[p + "attention.o.weight"].T
+        x = x + (norm(attended, w[p + "attention_post_norm.weight"]) if post else attended)
+        h = x if post else norm(x, w[p + "mlp_norm.weight"])
         gate = h @ w[p + "mlp.gate.weight"].T
-        x = x + (gate / (1 + np.exp(-gate)) * (h @ w[p + "mlp.up.weight"].T)) @ w[p + "mlp.down.weight"].T
+        mlp = (gate / (1 + np.exp(-gate)) * (h @ w[p + "mlp.up.weight"].T)) @ w[p + "mlp.down.weight"].T
+        x = x + (norm(mlp, w[p + "mlp_post_norm.weight"]) if post else mlp)
     head = w["token_embedding.weight"] if config.tie_word_embeddings else w["lm_head.weight"]
     return norm(x, w["final_norm.weight"])[-1] @ head.T
 
 
-@pytest.fixture(scope="module", params=["llama", "mistral", "qwen2", "qwen3"])
+@pytest.fixture(scope="module", params=["llama", "mistral", "olmo2", "qwen2", "qwen3"])
 def model(request, tmp_path_factory) -> Transformer:
     directory = tmp_path_factory.mktemp(request.param)
     config = tiny_config(request.param)

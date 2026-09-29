@@ -32,6 +32,7 @@ TINY_IMPORT_FINGERPRINT = "1585fbbfe689fd0d52dc36a4b3668f3af07babda2f72c8bfd33d9
 TINY_LOGITS_FINGERPRINT = {
     "llama": "12a0878056708099f139e39c6948153b7ba152960259846ab9caa940863e1e29",
     "mistral": "a03b36df3ec07340f1e54d9d2150a77afd8e08a261977d61d7d51c59248e075f",
+    "olmo2": "4ad8a7f8864541c90f8b7b358e0b7bfae11e966cdde3b3246f331a4f1916a49e",
     "qwen2": "9d284fb62e7360dc835fcd1dd9cac2b54c6bff5c66744d980c02025039330d0f",
     "qwen3": "be9c8d225e709f628a67fb3114a81fe94f4c61456e9228869171dbf0c6e3aefc",
 }
@@ -86,6 +87,10 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "chat": "109ee1a8513bf1dad8a34b0483a0f3045fe18cbf7c03820e4e359cc20912201c",
     },
     "tinyllama": {  # values from the Reference models workflow
+        "import": "",
+        "chat": "",
+    },
+    "olmo2": {  # values from the Reference models workflow
         "import": "",
         "chat": "",
     },

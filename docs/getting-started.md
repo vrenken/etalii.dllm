@@ -94,6 +94,13 @@ dllm import hf:TinyLlama/TinyLlama-1.1B-Chat-v1.0 -o tinyllama-1.1b.dllm
 dllm --model tinyllama-1.1b.dllm chat "What is the capital of France?"
 ```
 
+OLMo-2-1B-Instruct (Apache 2.0, fully open data and weights, about 3 GB download, 6 GB converted) is verified too:
+
+```bash
+dllm import hf:allenai/OLMo-2-0425-1B-Instruct -o olmo2-1b.dllm
+dllm --model olmo2-1b.dllm chat "What is the capital of France?"
+```
+
 Pin a revision with `hf:HuggingFaceTB/SmolLM2-135M-Instruct@<commit or tag>`; without one the importer resolves
 `main` to its current commit and records that. Downloads are cached in `~/.cache/etalii-dllm/hub` (`--cache` to
 change it); set `HF_TOKEN` for gated repositories.
@@ -108,7 +115,7 @@ dllm import ./SmolLM2-360M-Instruct -o smollm2-360m.dllm --repo HuggingFaceTB/Sm
 dllm import ./qwen2.5-0.5b-instruct-q8_0.gguf -o qwen2.5-0.5b.dllm
 ```
 
-Supported today: Llama-style models (SmolLM2, TinyLlama, Llama), Mistral, Qwen2/Qwen2.5 and Qwen3 (dense) with
+Supported today: Llama-style models (SmolLM2, TinyLlama, Llama), Mistral, OLMo 2, Qwen2/Qwen2.5 and Qwen3 (dense) with
 byte-level or SentencePiece-style BPE tokenizers ([full list](../README.md#which-models-can-it-run)). Anything else is refused with a message saying what is missing. Only Apache-2.0 and MIT models import
 without `--accept-licence`; see [model import](research/model-import.md) for the licence policy and candidate
 models.
@@ -325,11 +332,11 @@ gives byte-identical responses to a native install. Build it yourself with `dock
 
 ## What does not work yet
 
-- Five real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
-  Qwen2.5-0.5B-Instruct, Qwen2.5-1.5B-Instruct, Qwen3-0.6B and TinyLlama-1.1B-Chat (tokenizer, chat template, logits within 1e-3 and the
+- Six real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
+  Qwen2.5-0.5B-Instruct, Qwen2.5-1.5B-Instruct, Qwen3-0.6B, TinyLlama-1.1B-Chat and OLMo-2-1B-Instruct (tokenizer, chat template, logits within 1e-3 and the
   same greedy answer; see `tests/test_reference_models.py`). Other Llama/Qwen2/Qwen3 models should work but are not
   checked. Mistral is checked against `transformers` only on a tiny synthetic model (its real checkpoints are gated
-  and 7B or larger); if one misbehaves,
+  and 7B or larger). Fine-tuning works for Llama, Mistral, Qwen2 and Qwen3, not yet for OLMo 2; if one misbehaves,
   please open an issue with the `dllm inspect` output.
 - Speed: on a 4-core cloud VM, SmolLM2-135M reads a prompt at about 150 tokens per second and generates about 20
   tokens per second (about 35 with `--quantize q8_0`); Qwen2.5-0.5B is roughly four times slower. On an RTX 4080,

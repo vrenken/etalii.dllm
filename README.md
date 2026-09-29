@@ -44,13 +44,13 @@ What limits the choice is which architectures the engine implements.
 
 | | Supported | Refused at import (for now) |
 | --- | --- | --- |
-| Architecture | Llama-style decoders (`model_type` `llama`: SmolLM2, TinyLlama, Llama 2, Llama 3.x, ...), Mistral (sliding-window attention), Qwen2/Qwen2.5, dense Qwen3 | Gemma, Phi, mixture-of-experts models (Mixtral, Qwen3-MoE), GELU MLPs, MLP biases, YaRN RoPE scaling |
+| Architecture | Llama-style decoders (`model_type` `llama`: SmolLM2, TinyLlama, Llama 2, Llama 3.x, ...), Mistral (sliding-window attention), OLMo 2, Qwen2/Qwen2.5, dense Qwen3 | Gemma, Phi, mixture-of-experts models (Mixtral, Qwen3-MoE), GELU MLPs, MLP biases, YaRN RoPE scaling |
 | Tokenizer | BPE from `tokenizer.json` (the model's own, with its Jinja chat template): byte-level (GPT-2, Llama 3, Qwen) and SentencePiece-style with `▁` and byte fallback (Llama 2, TinyLlama, Mistral, Phi-3) | Unigram and WordPiece tokenizers (T5, BERT), SentencePiece `tokenizer.model` files without a `tokenizer.json`, GGUF files with a SentencePiece (`llama`) vocabulary |
 | Files | Hugging Face safetensors (F32/F16/BF16), GGUF (F32/F16/BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K, Q6_K), PEFT LoRA adapters | Other GGUF quantisations |
 | Size | Weights are held in memory as float32 (or Q8_0 with `--quantize q8_0`), so memory and CPU speed set the limit; about 1.5B parameters is practical today | |
 
 Verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct, Qwen2.5-0.5B-Instruct,
-Qwen2.5-1.5B-Instruct, Qwen3-0.6B and TinyLlama-1.1B-Chat. Other models in these families should work but are not checked. An unsupported
+Qwen2.5-1.5B-Instruct, Qwen3-0.6B, TinyLlama-1.1B-Chat and OLMo-2-1B-Instruct. Other models in these families should work but are not checked. An unsupported
 model fails at `dllm import` with an error that names the missing feature, never with silently wrong output. A server
 serves one model, chosen at start-up with `--model`/`DLLM_MODEL`.
 
@@ -157,7 +157,7 @@ module map), with Mermaid diagrams.
 | 6. Performance ✅ | ✅ SIMD and multi-threading with fixed, batch-invariant reduction order; ✅ integer quantisation (Q8_0, associative int32 accumulation); ✅ batch-invariance stress tests; ✅ CUDA kernels that give the CPU's bits (`--device cuda`). See [kernels](docs/kernels.md#threads-and-simd) and [GPU](docs/kernels.md#gpu) |
 | 7. Usability and releases | ✅ Pre-built wheels for Linux, Windows and macOS and tagged GitHub releases ([releasing](docs/releasing.md)); PyPI; ✅ the CUDA install route checked in CI; ✅ a Docker image (`ghcr.io/vrenken/etalii-dllm`); ✅ a web chat UI at `/` of `dllm-server`; ✅ a larger verified model (Qwen2.5-1.5B) |
 | 8. Serving and ecosystem ✅ | ✅ Prompt caching across requests with the same bits as a cold run ([prompt caching](docs/api.md#prompt-caching)); ✅ concurrent requests decoded as one batch, each keeping its solo bits ([batching](docs/api.md#concurrent-requests)); ✅ Ollama-compatible API ([Ollama API](docs/api.md#ollama-api)); ✅ OpenAI Responses API ([Responses API](docs/api.md#responses-api)); ✅ Qwen3 (verified Qwen3-0.6B); ✅ LoRA fine-tuning and PEFT adapter import ([LoRA](docs/training.md#lora-adapters)) |
-| 9. Mainstream model families | ✅ SentencePiece-style tokenizers (TinyLlama, Llama 2, Mistral, Phi-3; verified TinyLlama-1.1B-Chat); ✅ Mistral and sliding-window attention; Gemma 2/3; Phi-3/Phi-4-mini; OLMo 2; Granite 3.x; a verified Llama 3.2. Each family is checked against `transformers`, see [which models can it run](#which-models-can-it-run) |
+| 9. Mainstream model families | ✅ SentencePiece-style tokenizers (TinyLlama, Llama 2, Mistral, Phi-3; verified TinyLlama-1.1B-Chat); ✅ Mistral and sliding-window attention; Gemma 2/3; Phi-3/Phi-4-mini; ✅ OLMo 2; Granite 3.x; a verified Llama 3.2. Each family is checked against `transformers`, see [which models can it run](#which-models-can-it-run) |
 
 ## Working with Claude Code
 

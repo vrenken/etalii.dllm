@@ -229,7 +229,7 @@ def test_concurrent_gpu_calls_match_serial_ones():
 PROMPT = [1, 17, 42, 5, 63, 0, 9, 9, 30]
 
 
-@pytest.fixture(scope="module", params=["llama", "mistral", "qwen2", "qwen3"])
+@pytest.fixture(scope="module", params=["llama", "mistral", "olmo2", "qwen2", "qwen3"])
 def tiny_model_path(request, tmp_path_factory):
     directory = tmp_path_factory.mktemp(f"cuda-{request.param}")
     config = tiny_config(request.param)
