@@ -69,6 +69,15 @@ better at following instructions and calling tools:
 dllm import hf:Qwen/Qwen2.5-0.5B-Instruct -o qwen2.5-0.5b.dllm
 ```
 
+Qwen2.5-1.5B-Instruct (Apache 2.0, about 3 GB download, 6 GB converted) is the third verified model and the best
+choice for tool calling and longer answers, if you have the memory: it peaks at about 12 GB in float32 and about
+7.5 GB with `--quantize q8_0`, and with three times the parameters it is correspondingly slower than Qwen2.5-0.5B:
+
+```bash
+dllm import hf:Qwen/Qwen2.5-1.5B-Instruct -o qwen2.5-1.5b.dllm
+dllm --model qwen2.5-1.5b.dllm --quantize q8_0 chat "What is the capital of France?"
+```
+
 Pin a revision with `hf:HuggingFaceTB/SmolLM2-135M-Instruct@<commit or tag>`; without one the importer resolves
 `main` to its current commit and records that. Downloads are cached in `~/.cache/etalii-dllm/hub` (`--cache` to
 change it); set `HF_TOKEN` for gated repositories.
@@ -279,8 +288,8 @@ gives byte-identical responses to a native install. Build it yourself with `dock
 
 ## What does not work yet
 
-- Two real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct and
-  Qwen2.5-0.5B-Instruct (tokenizer, chat template, logits within 1e-3 and the same greedy answer; see
+- Three real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
+  Qwen2.5-0.5B-Instruct and Qwen2.5-1.5B-Instruct (tokenizer, chat template, logits within 1e-3 and the same greedy answer; see
   `tests/test_reference_models.py`). Other Llama/Qwen2 models should work but are not checked; if one misbehaves,
   please open an issue with the `dllm inspect` output.
 - Speed: on a 4-core cloud VM, SmolLM2-135M reads a prompt at about 150 tokens per second and generates about 20

@@ -64,7 +64,8 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "chat": "7a75f8d55b99478a282d601c155df0fd6c5066b613db230b610612abbdc05c37",
     },
     "qwen2.5-1.5b": {
-        "import": "0" * 64,
-        "chat": "0" * 64,
+        "import": "626d11f6abd38e28450448eae2574b29de3212825a143f37bdbf145673e8556d",
+        # The same answer tokens as Qwen2.5-0.5B ("The capital of France is Paris."), so the same fingerprint.
+        "chat": "7a75f8d55b99478a282d601c155df0fd6c5066b613db230b610612abbdc05c37",
     },
 }

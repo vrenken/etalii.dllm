@@ -24,7 +24,7 @@ today even agree with each other). The transformer building blocks (aligned `Ten
 RMSNorm, SiLU/GELU, RoPE and grouped-query attention, see [docs/kernels.md](docs/kernels.md)) are in place, and so are
 `dllm import` (safetensors/GGUF to our [model.dllm](docs/model-format.md) format, with source and licence recorded)
 a Llama/Qwen2 decoder whose KV cache cannot change its output, the models' own BPE tokenizers and chat templates, and
-`--model` on every front end. The real SmolLM2-135M-Instruct and Qwen2.5-0.5B-Instruct imports match Hugging Face
+`--model` on every front end. The real SmolLM2-135M-Instruct, Qwen2.5-0.5B-Instruct and Qwen2.5-1.5B-Instruct imports match Hugging Face
 `transformers` (logits within about 2e-5, identical greedy answers), checked in CI. `dllm finetune` trains an imported model further with AdamW, reproducibly: equal
 runs, and runs resumed from a checkpoint, write byte-identical models (see [docs/training.md](docs/training.md)).
 The HTTP API speaks both OpenAI and Anthropic, with streaming, tool calling, JSON-schema structured output
@@ -131,7 +131,7 @@ Summarised from the [research notes](docs/research/deterministic-inference.md):
 | 4. API parity ✅ | Streaming (SSE), tool/function calling, JSON-schema structured output, logprobs, Anthropic Messages endpoint, embeddings. See [HTTP API](docs/api.md) |
 | 5. MCP, both directions ✅ | Richer MCP server (prompts, resources); MCP client host so the model can call external tools during a chat. See [MCP](docs/mcp.md) |
 | 6. Performance ✅ | ✅ SIMD and multi-threading with fixed, batch-invariant reduction order; ✅ integer quantisation (Q8_0, associative int32 accumulation); ✅ batch-invariance stress tests; ✅ CUDA kernels that give the CPU's bits (`--device cuda`). See [kernels](docs/kernels.md#threads-and-simd) and [GPU](docs/kernels.md#gpu) |
-| 7. Usability and releases | ✅ Pre-built wheels for Linux, Windows and macOS and tagged GitHub releases ([releasing](docs/releasing.md)); PyPI; ✅ the CUDA install route checked in CI; ✅ a Docker image (`ghcr.io/vrenken/etalii-dllm`); ✅ a web chat UI at `/` of `dllm-server`; a larger verified model (Qwen2.5-1.5B) |
+| 7. Usability and releases | ✅ Pre-built wheels for Linux, Windows and macOS and tagged GitHub releases ([releasing](docs/releasing.md)); PyPI; ✅ the CUDA install route checked in CI; ✅ a Docker image (`ghcr.io/vrenken/etalii-dllm`); ✅ a web chat UI at `/` of `dllm-server`; ✅ a larger verified model (Qwen2.5-1.5B) |
 
 ## Working with Claude Code
 

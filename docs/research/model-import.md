@@ -30,7 +30,7 @@ the licence. Models with custom licences are opt-in and never redistributed by t
 
 All five steps are implemented (`dllm import`, `src/etalii_dllm/importing/`); the file format is specified in
 [model-format.md](../model-format.md). Step 5 runs in CI (`.github/workflows/reference.yml`) for the pinned
-SmolLM2-135M-Instruct and Qwen2.5-0.5B-Instruct.
+SmolLM2-135M-Instruct, Qwen2.5-0.5B-Instruct and Qwen2.5-1.5B-Instruct.
 
 ```
 Hugging Face repo (config.json, tokenizer.json, *.safetensors)  ─┐
