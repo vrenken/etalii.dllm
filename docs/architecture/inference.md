@@ -47,8 +47,9 @@ sequenceDiagram
    go through the template when it supports them, otherwise into the system message as Hermes instructions. A final
    assistant message is a prefill: the answer continues its text. Models without a template (the placeholder) use
    the fixed format in `chat.py`.
-3. **Tokenize.** Byte-level BPE from the model's `tokenizer.json` (`bpe.py`); added tokens such as
-   `<|im_start|>` are split out before the byte-pair merges.
+3. **Tokenize.** BPE from the model's `tokenizer.json` (`bpe.py`), byte-level or SentencePiece-style (`▁` for spaces,
+   `<0xAB>` byte fallback); added tokens such as `<|im_start|>` are split out before the byte-pair merges. A chat
+   answer drops the leading space SentencePiece-style tokens start words with, as the tokenizer's decoder does.
 4. **Decode loop** (`generation.py`): forward pass, choose a token, append, repeat. Text is released only as whole
    UTF-8 characters, and text that could still become a stop string is held back until it is certain.
 5. **Events.** `chat_stream` turns steps into `TextDelta`, `ToolCallEvent` and `Finished` events. When tools are

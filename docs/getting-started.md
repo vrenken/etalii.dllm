@@ -86,6 +86,14 @@ dllm import hf:Qwen/Qwen3-0.6B -o qwen3-0.6b.dllm
 dllm --model qwen3-0.6b.dllm chat "What is the capital of France? /no_think"
 ```
 
+TinyLlama-1.1B-Chat (Apache 2.0, about 2.2 GB download, 4.4 GB converted) is verified too; it is a Llama 2 model
+with a SentencePiece-style tokenizer:
+
+```bash
+dllm import hf:TinyLlama/TinyLlama-1.1B-Chat-v1.0 -o tinyllama-1.1b.dllm
+dllm --model tinyllama-1.1b.dllm chat "What is the capital of France?"
+```
+
 Pin a revision with `hf:HuggingFaceTB/SmolLM2-135M-Instruct@<commit or tag>`; without one the importer resolves
 `main` to its current commit and records that. Downloads are cached in `~/.cache/etalii-dllm/hub` (`--cache` to
 change it); set `HF_TOKEN` for gated repositories.
@@ -100,8 +108,8 @@ dllm import ./SmolLM2-360M-Instruct -o smollm2-360m.dllm --repo HuggingFaceTB/Sm
 dllm import ./qwen2.5-0.5b-instruct-q8_0.gguf -o qwen2.5-0.5b.dllm
 ```
 
-Supported today: Llama-style models (SmolLM2, TinyLlama's architecture, Llama), Qwen2/Qwen2.5 and Qwen3 (dense) with
-byte-level BPE tokenizers ([full list](../README.md#which-models-can-it-run)). Anything else is refused with a message saying what is missing. Only Apache-2.0 and MIT models import
+Supported today: Llama-style models (SmolLM2, TinyLlama, Llama), Qwen2/Qwen2.5 and Qwen3 (dense) with
+byte-level or SentencePiece-style BPE tokenizers ([full list](../README.md#which-models-can-it-run)). Anything else is refused with a message saying what is missing. Only Apache-2.0 and MIT models import
 without `--accept-licence`; see [model import](research/model-import.md) for the licence policy and candidate
 models.
 
@@ -317,8 +325,8 @@ gives byte-identical responses to a native install. Build it yourself with `dock
 
 ## What does not work yet
 
-- Four real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
-  Qwen2.5-0.5B-Instruct, Qwen2.5-1.5B-Instruct and Qwen3-0.6B (tokenizer, chat template, logits within 1e-3 and the
+- Five real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
+  Qwen2.5-0.5B-Instruct, Qwen2.5-1.5B-Instruct, Qwen3-0.6B and TinyLlama-1.1B-Chat (tokenizer, chat template, logits within 1e-3 and the
   same greedy answer; see `tests/test_reference_models.py`). Other Llama/Qwen2/Qwen3 models should work but are not
   checked; if one misbehaves,
   please open an issue with the `dllm inspect` output.
@@ -334,6 +342,7 @@ gives byte-identical responses to a native install. Build it yourself with `dock
   refused with an error (see [HTTP API](api.md)). No images, audio or `n` > 1.
 - MCP servers' own resources and prompts are not offered to the model (only their tools), and servers that ask
   the client for sampling or elicitation are not supported.
-- Models with SentencePiece tokenizers (TinyLlama, Llama 2), sliding-window attention, YaRN RoPE scaling or
-  other architectures (including Qwen3's mixture-of-experts models) are refused at import. Qwen3's thinking
+- Models with Unigram or WordPiece tokenizers, GGUF files with a SentencePiece vocabulary (convert from the
+  Hugging Face checkpoint instead), sliding-window attention, YaRN RoPE scaling or other architectures (including
+  Qwen3's mixture-of-experts models) are refused at import; Phase 9 of the roadmap adds the mainstream ones. Qwen3's thinking
   is returned as part of the answer text, not split into a separate reasoning field.

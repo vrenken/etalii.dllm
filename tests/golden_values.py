@@ -82,4 +82,8 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "import": "c34b4666335e7e0dbe110ee9b9fc78936b84391a57a420688fd78036ad6df5b7",
         "chat": "109ee1a8513bf1dad8a34b0483a0f3045fe18cbf7c03820e4e359cc20912201c",
     },
+    "tinyllama": {  # values from the Reference models workflow
+        "import": "",
+        "chat": "",
+    },
 }

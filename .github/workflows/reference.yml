@@ -1,7 +1,8 @@
 name: Reference models
 
-# Imports the real pinned models (SmolLM2-135M-Instruct, Qwen2.5-0.5B/1.5B-Instruct, Qwen3-0.6B) and compares tokenizer, chat
-# template, logits and greedy generation with Hugging Face transformers; pins our outputs as golden hashes.
+# Imports the real pinned models (SmolLM2-135M-Instruct, Qwen2.5-0.5B/1.5B-Instruct, Qwen3-0.6B, TinyLlama-1.1B-Chat)
+# and compares tokenizer, chat template, logits and greedy generation with Hugging Face transformers; pins our
+# outputs as golden hashes.
 on:
   push:
     branches: [develop, main]
