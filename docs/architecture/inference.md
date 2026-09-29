@@ -58,9 +58,10 @@ sequenceDiagram
 
 ## The decoder
 
-`transformer.py` implements the Llama/Qwen2 decoder family (SmolLM2, TinyLlama, Qwen2.5). Its shape comes from
-`TransformerConfig`: layers, heads, key-value heads, head size, RoPE base, norm epsilon, whether q/k/v have biases
-(Qwen2) and whether the output head is tied to the embeddings.
+`transformer.py` implements the Llama/Qwen2/Qwen3 decoder family (SmolLM2, TinyLlama, Qwen2.5, Qwen3). Its shape
+comes from `TransformerConfig`: layers, heads, key-value heads, head size, RoPE base, norm epsilon, whether q/k/v
+have biases (Qwen2), whether each query and key head is RMS-normalised before RoPE (QK-norm, Qwen3) and whether the
+output head is tied to the embeddings.
 
 ```mermaid
 flowchart TB
@@ -70,7 +71,8 @@ flowchart TB
     subgraph layer["decoder layer (repeated N times)"]
         direction TB
         n1["RMSNorm"] --> qkv["linear q, k, v<br/>(+ bias for Qwen2)"]
-        qkv --> rope["RoPE on q and k"]
+        qkv --> qkn["RMSNorm per q and k head<br/>(QK-norm, Qwen3 only)"]
+        qkn --> rope["RoPE on q and k"]
         rope --> kv[("KV cache<br/>append k, v")]
         kv --> att["causal grouped-query attention<br/>q against all cached keys"]
         att --> o["linear o"]

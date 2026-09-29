@@ -144,13 +144,14 @@ AdamW from `grad.hpp`.
 | `sampling.py` | Temperature, top-k and top-p sampling with a seeded generator and ties broken on token id. |
 | `tokenization.py`, `bpe.py` | The byte tokenizer of the placeholder model, and byte-level BPE driven by a `tokenizer.json`. |
 | `models.py` | The `LanguageModel` protocol and the seeded placeholder `BigramModel`. |
-| `transformer.py` | The Llama/Qwen2 decoder (RMSNorm, RoPE, grouped-query attention, SwiGLU) and its KV cache, on CPU or GPU, float32 or Q8_0. |
+| `transformer.py` | The Llama/Qwen2/Qwen3 decoder (RMSNorm, QK-norm, RoPE, grouped-query attention, SwiGLU) and its KV cache, on CPU or GPU, float32 or Q8_0. |
+| `lora.py` | LoRA adapters: merging `W + scale · B·A` with the `linear` kernel, adapter gradients, and the PEFT directory format. |
 | `architecture.py` | `TransformerConfig`: the shape of a decoder, independent of where its weights came from. |
 | `modelfile.py` | Reading and writing the `model.dllm` container ([format](../model-format.md)). |
 | `numerics.py`, `tensor.py` | Thin wrappers over the C++ kernels, fingerprints, `DeterministicRandom`, and the 64-byte aligned float32 `Tensor`. |
 | `cuda.py` | The GPU backend: finding NVRTC, `CudaTensor`, device-side operations. |
 | `importing/` | Readers for safetensors and GGUF (with GGML dequantisation), the Hugging Face download pinned to a commit, the licence policy, and `dllm import`. |
-| `training/` | Gradients of the decoder, AdamW, fixed data order and checkpoints that resume bit for bit (`dllm finetune`). |
+| `training/` | Gradients of the decoder, AdamW, fixed data order and checkpoints that resume bit for bit (`dllm finetune`), for all parameters or LoRA adapters. |
 | `server/` | The OpenAI Chat Completions (`app.py`, `contracts.py`), OpenAI Responses (`responses_api.py`), Anthropic (`anthropic_api.py`, `anthropic_contracts.py`) and Ollama (`ollama_api.py`) wire formats, and the chat page `static/chat.html`. |
 | `mcp_server.py` | The model as an MCP server over stdio (tools, prompts, resources). |
 | `mcp_host.py` | The MCP client host: the model calls external MCP tools in a loop over `chat_stream`. |

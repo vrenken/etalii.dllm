@@ -1,6 +1,7 @@
 # Deterministic fine-tuning
 
-`dllm finetune` continues training an imported model on your own text, and a run is reproducible in the strongest
+`dllm finetune` continues training an imported model on your own text. It trains either every parameter or
+low-rank [LoRA adapters](#lora-adapters) on the linear layers. Either way a run is reproducible in the strongest
 sense: the same base model, data and settings write a byte-identical fine-tuned `model.dllm`, and a run stopped at
 a checkpoint and resumed ends in the same bytes as one that ran straight through. This page shows how the
 `training/` package is put together. Options, data formats and file layouts are in [training](../training.md);
@@ -14,7 +15,7 @@ flowchart LR
         direction TB
         base[("base model.dllm")]
         data["data file<br/>.txt or .jsonl"]
-        run["RunConfig<br/>steps, batch, sequence length,<br/>seed, AdamW settings"]
+        run["RunConfig<br/>steps, batch, sequence length,<br/>seed, AdamW settings, LoRA settings"]
     end
 
     subgraph training["training/"]
@@ -24,6 +25,8 @@ flowchart LR
         opt["optimizer.py: AdamW<br/>learning-rate schedule"]
         ft["trainer.py: FineTuner<br/>steps, checkpoints, export"]
     end
+
+    lora["lora.py<br/>adapters, merge,<br/>adapter gradients, PEFT"]
 
     subgraph kernels["C++ kernels"]
         direction TB
@@ -35,6 +38,7 @@ flowchart LR
         direction TB
         ckpt[("run.dllmckpt<br/>params + Adam moments + step")]
         tuned[("tuned model.dllm<br/>+ fine_tuning section")]
+        peftdir[("PEFT adapter directory<br/>(LoRA runs, --adapter-output)")]
     end
 
     base & data & run --> ft
@@ -43,12 +47,15 @@ flowchart LR
     opt --> grad
     ft --> ckpt
     ft --> tuned
+    ft -.->|LoRA runs| lora
+    lora -.-> peftdir
     ckpt -->|--resume| ft
 ```
 
 The trainer reuses the inference decoder's forward pass (its last-position logits equal `Transformer.forward` bit
-for bit) and adds reverse-mode gradients built from `grad.hpp`. There is no other randomness than the data order:
-no dropout, no random initialisation, since weights always come from an imported model.
+for bit) and adds reverse-mode gradients built from `grad.hpp`. The only randomness is the data order and, in a
+LoRA run, the adapters' starting values, both drawn from `DeterministicRandom` with the run seed. There is no dropout,
+and the weights themselves always come from an imported model.
 
 ## One training step
 
@@ -77,6 +84,32 @@ flowchart TB
   visit tensors in natural name order; bias corrections use repeated multiplication instead of `pow`, and the
   schedule uses the portable `dllm` cosine.
 
+## LoRA adapters
+
+With `--lora-rank r`, the base weights stay frozen and each adapted linear layer `W` (`[out, in]`) gets two trained
+matrices, `A` (`[r, in]`) and `B` (`[out, r]`). The trained parameters and the AdamW moments are those adapters
+alone. That makes checkpoints and adapter files small, but it does not make a step cheaper.
+
+```mermaid
+flowchart TB
+    init["new run: A Gaussian (std 1/r) from the seed,<br/>B = 0, so step 0 is the base model exactly"] --> merge
+    merge["merge: W' = W + scale · (B · A)<br/>linear kernel, then elementwise float32"] --> fwd
+    fwd["the usual forward and backward pass<br/>on the merged weights"] --> dw["gradient of each merged weight dW'"]
+    dw --> dab["dA = scale · Bᵀ · dW'<br/>dB = scale · dW' · Aᵀ<br/>(linear kernel)"]
+    dab --> adam["AdamW on A and B only"]
+    adam -->|next step| merge
+```
+
+- **One way to apply an adapter.** Training, `-o` (the merged model file), `--adapter` at load time and
+  `dllm import ADAPTER --base` all compute the same merge in `lora.py`. The model that was trained is therefore
+  bit for bit the model that is served, and every route gives the same `system_fingerprint`. An adapter is never
+  evaluated as a separate low-rank pass that would round differently.
+- **The price.** Because the decoder runs on the merged weights, a LoRA step costs about as much compute as a full
+  fine-tuning step: the full backward pass still runs. What it saves is optimizer memory.
+- **Interoperable.** `--adapter-output` writes a Hugging Face PEFT directory (`adapter_config.json`,
+  `adapter_model.safetensors`) that PEFT loads as it is. PEFT adapters import the same way, as described in
+  [model import](models.md#lora-adapters).
+
 ## Checkpoints and resume
 
 ```mermaid
@@ -93,7 +126,8 @@ stateDiagram-v2
 ```
 
 A checkpoint stores the parameters, both Adam moments and the step, plus the run settings, loss history, base model
-metadata and the data fingerprint. Because the moments are rounded to float32 *before* the next step uses them, the
+metadata and the data fingerprint. In a LoRA run the parameters are only the adapters, so resuming also needs the
+base model again, and the checkpoint refuses a base whose fingerprint differs from the one the run started from. Because the moments are rounded to float32 *before* the next step uses them, the
 state written to disk is exactly the state the next step reads, so resuming continues on the same bits. Loading
 re-hashes the tensor data and refuses data whose fingerprint differs from the run's.
 
@@ -102,8 +136,11 @@ re-hashes the tensor data and refuses data whose fingerprint differs from the ru
 The exported model is an ordinary `model.dllm` with the base model's tokenizer, chat template, source and licence
 (its attribution now says the weights were modified), plus a `fine_tuning` section recording the base model
 fingerprint, the data fingerprint, all run settings, the steps completed and the final loss. New weights mean a new
-`system_fingerprint`; everything described in [inference pipeline](inference.md) then applies unchanged.
+`system_fingerprint`; everything described in [inference pipeline](inference.md) then applies unchanged. A LoRA
+run exports the base weights with its adapters merged in, and can also write the adapters alone as a PEFT directory.
 
 `tests/test_training.py` checks the gradient kernels against float64 references, the decoder's gradients against
 finite differences, byte-identical runs, bit-exact resumption, and golden hashes of the gradients and of a short
-fine-tuning run.
+fine-tuning run. `tests/test_lora.py` does the same for adapters. It checks their gradients against finite
+differences, checks that LoRA runs and resumed runs are byte-identical, and checks that merged files and load-time
+adapters give the same bits.
