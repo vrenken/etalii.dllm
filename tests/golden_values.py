@@ -63,4 +63,8 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "import": "9bf78203fabbc1d93a5f387456ff1d755d7fef36396351c911f51656c898eb99",
         "chat": "7a75f8d55b99478a282d601c155df0fd6c5066b613db230b610612abbdc05c37",
     },
+    "qwen2.5-1.5b": {
+        "import": "0" * 64,
+        "chat": "0" * 64,
+    },
 }

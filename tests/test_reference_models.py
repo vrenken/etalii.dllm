@@ -55,6 +55,9 @@ REFERENCE_MODELS = {
         "HuggingFaceTB/SmolLM2-135M-Instruct", "12fd25f77366fa6b3b4b768ec3050bf629380bac", "Apache-2.0"
     ),
     "qwen2.5": ReferenceModel("Qwen/Qwen2.5-0.5B-Instruct", "7ae557604adf67be50417f59c2c2f167def9a775", "Apache-2.0"),
+    "qwen2.5-1.5b": ReferenceModel(
+        "Qwen/Qwen2.5-1.5B-Instruct", "989aa7980e4cf806f80c7fef2b1adb7bc71aa306", "Apache-2.0"
+    ),
 }
 
 TEXTS = [
