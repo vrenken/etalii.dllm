@@ -4,7 +4,8 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "etalii-dllm"
-version = "0.1.0"
+# The version lives in src/etalii_dllm/__init__.py (see [tool.scikit-build.metadata.version]).
+dynamic = ["version"]
 description = "A deterministic large language model: same hardware and same prompt give the same output."
 readme = "README.md"
 license = "Apache-2.0"
@@ -43,6 +44,23 @@ Repository = "https://github.com/vrenken/etalii.dllm"
 minimum-version = "build-system.requires"
 build-dir = "build/{wheel_tag}"
 wheel.packages = ["src/etalii_dllm"]
+sdist.exclude = [".claude", ".github", ".venv", "build"]
+
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "src/etalii_dllm/__init__.py"
+
+# Release wheels (.github/workflows/release.yml, docs/releasing.md). Every wheel is installed in a fresh environment
+# and the whole test suite, golden hashes included, runs against it.
+[tool.cibuildwheel]
+build = ["cp311-*", "cp312-*", "cp313-*"]
+skip = ["*-musllinux_*"]
+test-extras = ["dev"]
+test-sources = ["tests"]
+test-command = "pytest tests -q -p no:cacheprovider"
+
+[tool.cibuildwheel.macos.environment]
+MACOSX_DEPLOYMENT_TARGET = "11.0"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

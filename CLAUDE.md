@@ -84,6 +84,8 @@ If a hash changes:
 - Python 3.11+, type hints everywhere, `from __future__ import annotations`; ruff config in `pyproject.toml`.
 - C++17, header-only kernels in the `dllm` namespace; bindings stay thin.
 - Work on a feature branch and open a draft PR against `develop` (the default branch).
+- The version lives only in `src/etalii_dllm/__init__.py`. Releases (wheels for Linux/Windows/macOS tested against
+  the golden hashes, GitHub Release, optional PyPI) come from `.github/workflows/release.yml`; see `docs/releasing.md`.
 - Progress is tracked in the GitHub Project EtAlii.Dllm (see `docs/project-board.md`). Roadmap items are issues
   labelled `roadmap`/`phase-N` under "Phase N" milestones; a PR that finishes one says `Closes #n`, and a README
   roadmap change updates the matching issues/milestones.

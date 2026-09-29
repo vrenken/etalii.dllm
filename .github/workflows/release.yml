@@ -1,0 +1,112 @@
+name: Release
+
+# Builds the sdist and pre-built wheels (Linux x86_64/aarch64, Windows x86_64, macOS arm64/x86_64; CPython
+# 3.11-3.13), runs the whole test suite against every installed wheel, and publishes a GitHub Release.
+# See docs/releasing.md.
+#
+# - Pull requests that touch the build: build and test only.
+# - A pushed tag v<version>: build, test, and release that tag. The tag must match src/etalii_dllm/__init__.py.
+# - Run workflow with "release" ticked: build, test, then tag the commit v<version> and release it.
+# - PyPI upload only when the repository variable PYPI_PUBLISH is "true" (trusted publishing, environment "pypi").
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - pyproject.toml
+      - CMakeLists.txt
+      - cpp/**
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Tag the commit v<version> and publish a GitHub Release
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  sdist:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Read the version
+        id: version
+        run: |
+          version=$(python -c "import re; print(re.search(r'__version__ = \"(.+)\"', open('src/etalii_dllm/__init__.py').read())[1])")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match version $version in src/etalii_dllm/__init__.py"
+            exit 1
+          fi
+      - name: Build the sdist
+        run: pipx run build --sdist
+      - name: Check that the sdist builds and runs
+        run: |
+          pip install dist/*.tar.gz
+          dllm info
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  wheels:
+    name: wheels (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build and test the wheels (settings in pyproject.toml, [tool.cibuildwheel])
+        run: |
+          pip install cibuildwheel==4.2.1
+          cibuildwheel --output-dir wheelhouse
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
+  github-release:
+    needs: [sdist, wheels]
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create the release (and the tag, when started by hand)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ needs.sdist.outputs.version }}
+        run: |
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "EtAlii.Dllm $TAG" --generate-notes
+
+  pypi:
+    needs: [sdist, wheels, github-release]
+    if: vars.PYPI_PUBLISH == 'true'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
