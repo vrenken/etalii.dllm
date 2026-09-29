@@ -28,7 +28,8 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
 ## Layout
 
 - `cpp/include/dllm/`: header-only C++ kernels (`random.hpp`, `math.hpp` transcendentals, `nn.hpp` matmul/norm/RoPE/
-  attention, `grad.hpp` their gradients plus cross-entropy and AdamW; evaluation orders in `docs/kernels.md`); `cpp/kernels.cpp` binds them as
+  attention, `grad.hpp` their gradients plus cross-entropy and AdamW, `quant.hpp` Q8_0, `parallel.hpp` the thread pool,
+  `simd.hpp` the per-machine AVX2/SSE2/NEON dispatch; evaluation orders in `docs/kernels.md`); `cpp/kernels.cpp` binds them as
   `etalii_dllm._kernels`. `CMakeLists.txt` sets the floating point flags; never add `-ffast-math`, `-O3 -march=native`
   style reassociation flags or `-ffp-contract=fast`.
 - `src/etalii_dllm/`: `tensor` (aligned float32 `Tensor`), `numerics` (thin wrappers over `_kernels`, fingerprints),
@@ -54,7 +55,10 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
 2. Any reduction (sum, dot, matmul, softmax, norm, attention) is a C++ kernel with a fixed, documented order and a
    `double` accumulator for `float` data. No NumPy/BLAS reductions (`np.sum`, `@`, `np.dot`, `np.einsum`) in
    inference paths; elementwise NumPy operations are fine. Parallelism only with fixed partitioning (chunks from
-   data size, combined in chunk order). SIMD is fine if the code path is fixed per machine.
+   data size, combined in chunk order). SIMD is fine if the code path is fixed per machine. Threads split outputs, never a
+   reduction (`parallel.hpp`); SIMD lanes hold different outputs, and every variant must equal the scalar reference
+   (`linear_reference`) bit for bit on every thread count (`tests/test_batch_invariance.py`). Integer sums (Q8_0)
+   are exact, so their order is free.
 3. Prefer the portable kernels in `math.hpp` over `std::exp`, `math.exp` and `numpy.exp`; add new ones built from
    `+ - * /` and `sqrt`, with an accuracy test.
 4. Kernels must not change strategy based on batch size or sequence length.

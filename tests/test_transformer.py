@@ -71,7 +71,7 @@ def model(request, tmp_path_factory) -> Transformer:
 
 
 def test_matches_float64_reference(model):
-    tensors = {name: tensor.numpy() for name, tensor in model._w.items()}
+    tensors = {name: tensor.numpy() for name, tensor in model.tensors.items()}
     for length in (1, 2, len(PROMPT)):
         ours = model.forward(PROMPT[:length])
         reference = reference_logits(model.config, tensors, PROMPT[:length])

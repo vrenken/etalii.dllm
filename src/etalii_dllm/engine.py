@@ -8,6 +8,7 @@ decoding (structured output, tool calls), runs the generator and turns its steps
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
@@ -25,7 +26,7 @@ from etalii_dllm.chat_template import ChatTemplate
 from etalii_dllm.generation import Generation, GenerationResult, Generator, TokenLogprobs
 from etalii_dllm.grammar import Grammar, TokenConstraint, TokenTrie
 from etalii_dllm.models import BigramModel, LanguageModel
-from etalii_dllm.numerics import linear, sum_squares
+from etalii_dllm.numerics import QUANTIZATIONS, linear, set_threads, sum_squares
 from etalii_dllm.sampling import GREEDY, SamplingOptions
 from etalii_dllm.tokenization import ByteTokenizer, Tokenizer
 from etalii_dllm.tools import AUTO, Tool, ToolChoice
@@ -33,6 +34,8 @@ from etalii_dllm.tools import AUTO, Tool, ToolChoice
 DEFAULT_MODEL_SEED = 42
 MODEL_ENVIRONMENT_VARIABLE = "DLLM_MODEL"
 """Path of a ``model.dllm`` file for the front ends to serve; the placeholder bigram model when unset."""
+QUANTIZE_ENVIRONMENT_VARIABLE = "DLLM_QUANTIZE"
+"""Weight quantisation for the served model (``q8_0``); float32 weights when unset or ``none``."""
 
 
 @dataclass(frozen=True)
@@ -149,8 +152,10 @@ class DllmEngine:
         self._trie: TokenTrie | None = None
 
     @staticmethod
-    def from_model_file(path: str | Path, verify: bool = True) -> DllmEngine:
-        """An engine for an imported ``model.dllm``: its decoder, BPE tokenizer and chat template."""
+    def from_model_file(path: str | Path, verify: bool = True, quantize: str | None = None) -> DllmEngine:
+        """An engine for an imported ``model.dllm``: its decoder, BPE tokenizer and chat template. ``quantize``
+        (``"q8_0"``) runs the linear layers on quantised weights; that changes the output, and so the
+        ``system_fingerprint``."""
         from etalii_dllm.bpe import from_model_header, special_token_text
         from etalii_dllm.modelfile import ModelFile
         from etalii_dllm.transformer import Transformer
@@ -159,7 +164,9 @@ class DllmEngine:
         if file.tokenizer is None:
             raise ValueError(f"{path}: the model file has no tokenizer")
         model_id = str(file.source.get("repository") or Path(path).stem)
-        model = Transformer(file.config, file.tensors, model_id=model_id, weights_fingerprint=file.fingerprint)
+        model = Transformer(
+            file.config, file.tensors, model_id=model_id, weights_fingerprint=file.fingerprint, quantize=quantize
+        )
         tokenizer = from_model_header(file.tokenizer)
         template = None
         if file.chat_template:
@@ -170,7 +177,8 @@ class DllmEngine:
                 special_tokens={name: special_token_text(config.get(name)) for name in names},
             )
         stops = [*file.config.eos_token_ids, tokenizer.end_of_sequence]
-        return DllmEngine(model, tokenizer, "fp_" + file.fingerprint[:12], chat_template=template, stop_tokens=stops)
+        fingerprint = "fp_" + model.weights_fingerprint[:12]
+        return DllmEngine(model, tokenizer, fingerprint, chat_template=template, stop_tokens=stops)
 
     @staticmethod
     def create_default() -> DllmEngine:
@@ -366,11 +374,39 @@ def _answer_prefix(text: str) -> str:
     return stripped.rstrip()
 
 
-def use_model_file(path: str | Path | None) -> None:
-    """Makes the front ends serve ``path`` (sets ``DLLM_MODEL`` and resets the default engine)."""
+def use_model_file(path: str | Path | None, quantize: str | None = None, threads: int | None = None) -> None:
+    """Makes the front ends serve ``path`` (sets ``DLLM_MODEL``, and ``DLLM_QUANTIZE`` when ``quantize`` is given)
+    and resets the default engine. ``threads`` sets the kernel thread count, which never changes the output."""
     if path:
         os.environ[MODEL_ENVIRONMENT_VARIABLE] = str(path)
+    if quantize:
+        os.environ[QUANTIZE_ENVIRONMENT_VARIABLE] = quantize
+    if threads is not None:
+        set_threads(threads)
     default_engine.cache_clear()
+
+
+def add_runtime_arguments(parser: argparse.ArgumentParser) -> None:
+    """The ``--model``, ``--quantize`` and ``--threads`` options every front end shares."""
+    parser.add_argument("--model", help="model.dllm file to use (default: $DLLM_MODEL, else the placeholder model)")
+    parser.add_argument(
+        "--quantize",
+        choices=("none", *QUANTIZATIONS),
+        help="run the linear layers on quantised weights (default: $DLLM_QUANTIZE, else none); changes the output",
+    )
+    parser.add_argument(
+        "--threads", type=int, help="kernel threads (default: $DLLM_THREADS, else all cores); never changes output"
+    )
+
+
+def configured_quantization() -> str | None:
+    """``$DLLM_QUANTIZE``, or ``None`` when it is unset, empty or ``none``."""
+    value = os.environ.get(QUANTIZE_ENVIRONMENT_VARIABLE, "").strip().lower()
+    if value in ("", "none"):
+        return None
+    if value not in QUANTIZATIONS:
+        raise ValueError(f"{QUANTIZE_ENVIRONMENT_VARIABLE}={value!r}; supported: none, {', '.join(QUANTIZATIONS)}")
+    return value
 
 
 @cache
@@ -378,4 +414,4 @@ def default_engine() -> DllmEngine:
     """Process-wide default engine: the model named by ``DLLM_MODEL``, else the placeholder. Models are immutable
     and ``forward`` keeps no shared state, so sharing the engine between requests is safe."""
     path = os.environ.get(MODEL_ENVIRONMENT_VARIABLE)
-    return DllmEngine.from_model_file(path) if path else DllmEngine.create_default()
+    return DllmEngine.from_model_file(path, quantize=configured_quantization()) if path else DllmEngine.create_default()

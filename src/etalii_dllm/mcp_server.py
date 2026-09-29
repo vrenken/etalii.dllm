@@ -23,6 +23,7 @@ from etalii_dllm.engine import (
     MODEL_ENVIRONMENT_VARIABLE,
     ChatRequest,
     ResponseFormat,
+    add_runtime_arguments,
     default_engine,
     use_model_file,
 )
@@ -168,6 +169,7 @@ def main(argv: list[str] | None = None) -> None:
     import argparse
 
     parser = argparse.ArgumentParser(prog="dllm-mcp", description="EtAlii.Dllm MCP server (stdio)")
-    parser.add_argument("--model", help="model.dllm file to serve (default: $DLLM_MODEL, else the placeholder model)")
-    use_model_file(parser.parse_args(argv).model)
+    add_runtime_arguments(parser)
+    args = parser.parse_args(argv)
+    use_model_file(args.model, args.quantize, args.threads)
     server.run("stdio")

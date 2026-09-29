@@ -99,6 +99,18 @@ dllm --model smollm2-135m.dllm chat "Invent a cat" --json-schema '{"type": "obje
 Determinism: the same model file, prompt, options and seed give the same tokens every time on the same machine,
 also under concurrent load. Temperature 0 (the default) is greedy decoding.
 
+Speed options (they work the same for `dllm`, `dllm-server` and `dllm-mcp`):
+
+```bash
+dllm --model smollm2-135m.dllm --threads 2 chat "Hi"            # default: all cores ($DLLM_THREADS)
+dllm --model smollm2-135m.dllm --quantize q8_0 chat "Hi"         # 8-bit weights ($DLLM_QUANTIZE)
+dllm --model smollm2-135m.dllm --quantize q8_0 info              # shows the quantised system_fingerprint
+```
+
+`--threads` never changes the output, only the speed. `--quantize q8_0` runs the linear layers on 8-bit weights:
+faster and a quarter of the memory traffic, still deterministic, but the numbers differ slightly from the float
+model, so it reports its own `system_fingerprint`. Details: [kernels](kernels.md#threads-and-simd).
+
 ## 4. OpenAI- and Anthropic-compatible server
 
 ```bash
@@ -207,11 +219,9 @@ the reproducibility is achieved: [training](training.md).
   Qwen2.5-0.5B-Instruct (tokenizer, chat template, logits within 1e-3 and the same greedy answer; see
   `tests/test_reference_models.py`). Other Llama/Qwen2 models should work but are not checked; if one misbehaves,
   please open an issue with the `dllm inspect` output.
-- Speed: the kernels are single-threaded and unoptimised (Phase 6). For SmolLM2-135M expect roughly 2 to 3 tokens
-  per second, both for reading the prompt and for generating (measured on one cloud CPU core), and proportionally
-  slower for bigger models. The KV cache is in place, so long answers do not slow down per token. Fine-tuning
-  costs roughly three times as much per token as reading a prompt, so on SmolLM2-135M keep runs to a few thousand
-  tokens for now.
+- Speed: CPU only (no GPU yet). On a 4-core cloud VM, SmolLM2-135M reads a prompt at about 150 tokens per second
+  and generates about 20 tokens per second (about 35 with `--quantize q8_0`); Qwen2.5-0.5B is roughly four times
+  slower. Fine-tuning costs roughly three times as much per token as reading a prompt.
 - Tool calling works best with models trained for it (Qwen2.5-Instruct uses the same `<tool_call>` format the
   engine asks for). SmolLM2-135M does not know tools, so expect clumsy calls from it; constrained decoding still
   guarantees that every call names a real tool with arguments that fit its schema.

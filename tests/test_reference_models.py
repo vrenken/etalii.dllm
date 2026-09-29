@@ -265,6 +265,26 @@ def test_greedy_chat_matches_reference(model_key, imported, reference):
     assert generated.fingerprint == REFERENCE_MODEL_FINGERPRINTS[model_key]["chat"]
 
 
+def test_quantized_model_stays_close_to_reference(imported, reference):
+    """Phase 6: Q8_0 weights are approximate, so only the top token and the greedy answer are compared."""
+    import torch
+
+    directory, result = imported
+    ours = Transformer.from_file(result.path, quantize="q8_0")
+    tokenizer = reference_tokenizer(directory)
+    for prompt in PROMPTS:
+        tokens = tokenizer.encode(prompt)
+        with torch.no_grad():
+            expected = reference(torch.tensor([tokens])).logits[0, -1].numpy()
+        assert int(np.argmax(ours.forward(tokens))) == int(np.argmax(expected)), prompt
+
+
+def test_quantized_greedy_chat(imported):
+    _, result = imported
+    engine = DllmEngine.from_model_file(result.path, quantize="q8_0")
+    assert "Paris" in engine.complete(engine.chat_template.render(CHAT), GENERATED_TOKENS, GREEDY).text
+
+
 def main() -> None:
     """``python tests/test_reference_models.py DIR`` downloads the pinned models into DIR (hub cache layout)."""
     import sys

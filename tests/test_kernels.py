@@ -284,6 +284,7 @@ def kernel_outputs() -> dict[str, Tensor]:
         "gelu_tanh": numerics.gelu(x, approximate="tanh"),
         "rope": numerics.rope(q, np.arange(8) * 97, numerics.rope_inv_freq(16, 10000.0)),
         "attention": numerics.attention(q, k, v),
+        "linear_q8": numerics.linear(x, numerics.QuantizedWeight(w), gaussian(25, 48)),
     }
 
 

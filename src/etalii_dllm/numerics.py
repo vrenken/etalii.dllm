@@ -71,11 +71,87 @@ def _float32(values: npt.ArrayLike | Tensor) -> FloatArray:
     return np.ascontiguousarray(values.numpy() if isinstance(values, Tensor) else values, dtype=np.float32)
 
 
+class PackedWeight:
+    """A linear weight ``[out, in]`` repacked into 16-output panels for the SIMD kernel. :func:`linear` gives the same
+    bits with the packed or the plain weight; packing once at load time just saves repacking on every call."""
+
+    def __init__(self, weight: npt.ArrayLike | Tensor) -> None:
+        w = _float32(weight)
+        if w.ndim != 2:
+            raise ValueError("weight must be [out_features, in_features]")
+        self.out_features, self.in_features = int(w.shape[0]), int(w.shape[1])
+        self.data = _kernels.pack_linear(w)
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        return self.out_features, self.in_features
+
+
+QUANTIZATIONS = ("q8_0",)
+"""Weight quantisations :class:`QuantizedWeight` supports."""
+
+
+class QuantizedWeight:
+    """A linear weight ``[out, in]`` quantised to Q8_0: int8 values in blocks of 32 along ``in`` with one float32
+    scale per block (round half to even, docs/kernels.md). :func:`linear` with it quantises the activations the same
+    way and sums each block exactly in int32, so the result is deterministic but only approximates the float layer.
+    """
+
+    def __init__(self, weight: npt.ArrayLike | Tensor, kind: str = "q8_0") -> None:
+        if kind not in QUANTIZATIONS:
+            raise ValueError(f"unknown quantisation {kind!r}; supported: {', '.join(QUANTIZATIONS)}")
+        w = _float32(weight)
+        if w.ndim != 2 or w.shape[1] % 32:
+            raise ValueError("Q8_0 needs a [out_features, in_features] weight with in_features a multiple of 32")
+        self.kind = kind
+        self.out_features, self.in_features = int(w.shape[0]), int(w.shape[1])
+        self.values, self.scales = _kernels.quantize_q8_0(w)
+
+    @staticmethod
+    def supports(weight: npt.ArrayLike | Tensor) -> bool:
+        shape = np.shape(weight.numpy() if isinstance(weight, Tensor) else weight)
+        return len(shape) == 2 and shape[1] % 32 == 0
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        return self.out_features, self.in_features
+
+    def dequantize(self) -> FloatArray:
+        """The float32 weight this quantisation represents (elementwise ``value * scale``)."""
+        return self.values.astype(np.float32) * np.repeat(self.scales, 32, axis=1)
+
+
 def linear(
-    x: npt.ArrayLike | Tensor, weight: npt.ArrayLike | Tensor, bias: npt.ArrayLike | Tensor | None = None
+    x: npt.ArrayLike | Tensor,
+    weight: npt.ArrayLike | Tensor | PackedWeight | QuantizedWeight,
+    bias: npt.ArrayLike | Tensor | None = None,
 ) -> Tensor:
-    """``x[..., in] @ weight[out, in]^T + bias``. Each output is summed over ``in`` ascending in double."""
-    return Tensor(_kernels.linear(_float32(x), _float32(weight), None if bias is None else _float32(bias)))
+    """``x[..., in] @ weight[out, in]^T + bias``. Each output is summed over ``in`` ascending in double; plain and
+    packed weights give identical bits, on any number of threads. A :class:`QuantizedWeight` runs the Q8_0 kernel."""
+    b = None if bias is None else _float32(bias)
+    if isinstance(weight, PackedWeight):
+        return Tensor(_kernels.linear_packed(_float32(x), weight.data, weight.out_features, b))
+    if isinstance(weight, QuantizedWeight):
+        return Tensor(_kernels.linear_q8(_float32(x), weight.values, weight.scales, b))
+    return Tensor(_kernels.linear(_float32(x), _float32(weight), b))
+
+
+def set_threads(count: int = 0) -> None:
+    """Number of threads the kernels use (``0``: ``$DLLM_THREADS``, else all cores). Outputs never depend on it:
+    work is split by output element and every element keeps its one accumulation order."""
+    if count < 0:
+        raise ValueError("thread count must not be negative")
+    _kernels.set_threads(count)
+
+
+def threads() -> int:
+    """Number of threads the kernels currently use."""
+    return int(_kernels.threads())
+
+
+def instruction_set() -> str:
+    """The SIMD code path in use (``avx2`` or ``portable``), fixed per machine; it never changes results."""
+    return str(_kernels.isa())
 
 
 def matmul(a: npt.ArrayLike | Tensor, b: npt.ArrayLike | Tensor) -> Tensor:
