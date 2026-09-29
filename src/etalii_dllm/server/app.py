@@ -35,7 +35,7 @@ from etalii_dllm.engine import (
 )
 from etalii_dllm.generation import TokenLogprobs
 from etalii_dllm.sampling import SamplingOptions
-from etalii_dllm.server import anthropic_api, ollama_api
+from etalii_dllm.server import anthropic_api, ollama_api, responses_api
 from etalii_dllm.server.contracts import (
     AssistantMessage,
     ChatCompletionChoice,
@@ -70,6 +70,7 @@ DEFAULT_MAX_TOKENS = 64
 app = FastAPI(title="EtAlii.Dllm", version=__version__)
 app.include_router(anthropic_api.router)
 app.include_router(ollama_api.router)
+app.include_router(responses_api.router)
 
 
 def _error(message: str) -> JSONResponse:

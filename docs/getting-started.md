@@ -214,7 +214,8 @@ message = client.messages.create(
 print(message.content[0].text)
 ```
 
-Ollama clients work too: point them at `http://127.0.0.1:5080` (for example `ollama.Client(host=...)` in Python or
+The OpenAI SDK's newer `client.responses.create(...)` works as well, including `previous_response_id` follow-ups
+([Responses API](api.md#responses-api)). Ollama clients work too: point them at `http://127.0.0.1:5080` (for example `ollama.Client(host=...)` in Python or
 Open WebUI's Ollama URL); see [Ollama API](api.md#ollama-api).
 
 The response ids and `system_fingerprint` are derived from the request and the weights, so identical requests get

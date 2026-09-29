@@ -8,6 +8,7 @@ what the CLI and the MCP server use, so all front ends give the same answer for 
 | --- | --- | --- |
 | `GET /v1/models` | OpenAI | The one model being served |
 | `POST /v1/chat/completions` | OpenAI Chat Completions | Streaming, tools, structured output, logprobs, stop sequences |
+| `POST /v1/responses`, `GET`/`DELETE /v1/responses/{id}` | OpenAI Responses | Streaming (typed `response.*` events), function tools, `text.format` JSON schema, logprobs, `previous_response_id`. See [Responses API](#responses-api) |
 | `POST /v1/embeddings` | OpenAI Embeddings | Mean-pooled final hidden states, L2-normalised |
 | `POST /v1/messages` | Anthropic Messages | Streaming, tools, structured output (`output_config.format`), stop sequences |
 | `POST /v1/messages/count_tokens` | Anthropic | Input tokens of a request, tools included |
@@ -74,6 +75,35 @@ Unlike other batching servers, this cannot change anyone's answer. Every kernel 
 fixed order and attention runs per request, so a request gets exactly the bits it gets alone, whichever requests
 share its steps and whenever they arrived (`tests/test_batching.py`, and `tests/test_batch_invariance.py` fires 36
 overlapping requests at the server and compares every response with a lone run). Nothing needs configuring.
+
+## Responses API
+
+OpenAI's newer Responses API works with the official SDK's `client.responses`:
+
+```python
+first = client.responses.create(model="dllm", instructions="Be brief.", input="My name is Ada.")
+follow_up = client.responses.create(model="dllm", input="What is my name?", previous_response_id=first.id)
+print(follow_up.output_text)
+```
+
+It gives the same answer as `/v1/chat/completions` for the same conversation and options.
+
+- `input` is a string or a list of items: messages (`user`, `assistant`, `system`, `developer`, with `input_text`/
+  `output_text` parts), `function_call` and `function_call_output`. `instructions` becomes the system message and,
+  as in OpenAI's API, does not carry over to a follow-up.
+- `previous_response_id` continues a stored response. Responses are kept in memory (`store`, default true; the most
+  recent 256), can be fetched with `GET /v1/responses/{id}` and removed with `DELETE`. Their ids (`resp_...`, item ids
+  `msg_...`/`fc_...`) are hashes of the request and the weights, so a conversation replayed from its start gets the
+  same ids; they do not survive a server restart.
+- Function tools with `tool_choice` `auto`, `none`, `required` or `{"type": "function", "name": ...}`;
+  `text.format` of type `json_object` or `json_schema`; `include=["message.output_text.logprobs"]` with
+  `top_logprobs`. `max_output_tokens` defaults to 1024; a response cut off by it has `status: "incomplete"`.
+- Streaming sends `response.created`, `response.in_progress`, then per output item `response.output_item.added`,
+  the text (`response.content_part.added`, `response.output_text.delta`, `.done`, `response.content_part.done`) or
+  the call (`response.function_call_arguments.delta`, `.done`), `response.output_item.done`, and finally
+  `response.completed` or `response.incomplete` carrying the whole response, which is exactly the non-streamed body.
+- `usage.input_tokens_details.cached_tokens` reports the [prompt cache](#prompt-caching). Built-in tools (web
+  search, file search, ...), images, files, reasoning items and background mode are not supported.
 
 ## Ollama API
 
