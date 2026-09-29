@@ -124,7 +124,7 @@ to Python through [nanobind](https://github.com/wjakob/nanobind). Python orchest
 | `src/etalii_dllm/transformer.py` | Llama/Qwen2/Qwen3 decoder with a KV cache that cannot change the logits |
 | `src/etalii_dllm/modelfile.py` | The [`model.dllm`](docs/model-format.md) container that imported models are stored in |
 | `tests/` | pytest suite, including golden-hash reproducibility tests |
-| `docs/research/` | Research notes: [deterministic inference](docs/research/deterministic-inference.md), [compatibility targets](docs/research/compatibility.md), [model import](docs/research/model-import.md) |
+| `docs/research/` | Research notes: [deterministic inference](docs/research/deterministic-inference.md), [compatibility targets](docs/research/compatibility.md), [model import](docs/research/model-import.md), [constructive technology assessment](docs/research/constructive-technology-assessment.md) |
 
 ## How determinism is achieved
 
