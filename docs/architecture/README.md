@@ -1,0 +1,178 @@
+# Architecture
+
+This is the entry point to the architecture documentation of EtAlii.Dllm: how the pieces fit together, drawn as
+[Mermaid](https://mermaid.js.org/) diagrams that GitHub renders inline. The reference documents
+([kernels](../kernels.md), [model format](../model-format.md), [HTTP API](../api.md), [MCP](../mcp.md),
+[training](../training.md), [releasing](../releasing.md)) hold the exact formulas, byte layouts and wire formats;
+these pages explain the structure around them and link there for detail.
+
+| Document | What it covers | Status |
+| --- | --- | --- |
+| Overview (this page) | System context, layers, module map, the one rule every layer follows | ✅ |
+| Determinism by design | Every source of nondeterminism and the layer that removes it | planned ([#64](https://github.com/vrenken/etalii.dllm/issues/64)) |
+| Inference pipeline | One chat request from messages to token stream | planned ([#65](https://github.com/vrenken/etalii.dllm/issues/65)) |
+| Kernels and compute backends | The C++ layer, SIMD and thread dispatch, CUDA | planned ([#66](https://github.com/vrenken/etalii.dllm/issues/66)) |
+| Model import and format | From safetensors/GGUF to `model.dllm` to a running decoder | planned ([#67](https://github.com/vrenken/etalii.dllm/issues/67)) |
+| Front ends, APIs and MCP | How the CLI, servers and MCP share one engine | planned ([#68](https://github.com/vrenken/etalii.dllm/issues/68)) |
+| Fine-tuning | One reproducible training step, checkpoints and resume | planned ([#69](https://github.com/vrenken/etalii.dllm/issues/69)) |
+| Build, CI and releases | Workflows, wheels, the Docker image | planned ([#70](https://github.com/vrenken/etalii.dllm/issues/70)) |
+
+## The one rule
+
+Everything below serves a single requirement: on the same hardware, the same weights, prompt, context window and
+sampling options give the same output bits on every run, whatever the load, batching or thread scheduling. Output
+across *different* hardware may differ. That rule decides where code lives:
+
+- Anything that reduces floating point numbers (sums, dot products, matmul, softmax, norms, attention) is a C++
+  kernel with one documented order, never NumPy, BLAS or a GPU library.
+- Randomness comes from one seeded generator (`DeterministicRandom`), never from the clock or the operating system.
+- The front ends contain no logic of their own, so a question asked through the CLI, the OpenAI API, the Anthropic
+  API or MCP gets the same answer.
+
+## System context
+
+Who and what talks to the engine. Everything inside the box is this repository.
+
+```mermaid
+flowchart LR
+    user(["Person"])
+    sdk(["OpenAI / Anthropic SDK clients,<br/>agents, IDEs"])
+    mcpclient(["MCP clients<br/>(Claude Desktop, Claude Code, ...)"])
+    hub[("Hugging Face Hub<br/>safetensors, GGUF, tokenizer.json")]
+    mcpservers(["External MCP servers<br/>(tools)"])
+    gpu[["NVIDIA GPU + driver<br/>(optional)"]]
+
+    subgraph dllm["EtAlii.Dllm"]
+        direction TB
+        cli["dllm CLI"]
+        server["dllm-server<br/>HTTP API + web chat"]
+        mcp["dllm-mcp<br/>MCP server"]
+        host["MCP host"]
+        engine["DllmEngine"]
+        file[("model.dllm")]
+    end
+
+    user --> cli
+    user -->|browser| server
+    sdk -->|HTTP, SSE| server
+    mcpclient -->|stdio| mcp
+    cli & server & mcp --> engine
+    host --> engine
+    host -->|stdio| mcpservers
+    hub -->|dllm import| file
+    file --> engine
+    engine -.->|--device cuda| gpu
+```
+
+- **Front ends:** `dllm` (generate, chat, import, finetune), `dllm-server` (OpenAI and Anthropic compatible HTTP
+  API plus a chat page at `/`) and `dllm-mcp` (the model as an MCP server). The MCP host goes the other way: it lets
+  the model call tools of external MCP servers during a chat.
+- **Models** are not trained here from scratch. Small open-weight models are converted once by `dllm import` into
+  a single `model.dllm` file that records weights, tokenizer, chat template, source and licence. Without a model file
+  the engine runs a seeded placeholder (a bigram table) so every path can be tested without downloads.
+- **The GPU** is optional and never changes the output: the CUDA kernels run the CPU kernels' exact order.
+
+## Layers
+
+Each layer only calls the one below it. The Python layers decide *what* to compute; every floating point reduction
+happens in the C++ layer.
+
+```mermaid
+flowchart TB
+    subgraph fe["Front ends (thin, no logic)"]
+        direction LR
+        cli["cli.py"]
+        app["server/app.py<br/>server/anthropic_api.py"]
+        mcps["mcp_server.py"]
+        mcph["mcp_host.py"]
+    end
+
+    subgraph eng["Engine facade"]
+        engine["engine.py: DllmEngine.chat_stream"]
+    end
+
+    subgraph chat["Chat and decoding"]
+        direction LR
+        tmpl["chat.py, chat_template.py<br/>prompt rendering"]
+        tools["tools.py, grammar.py<br/>tool calls, JSON-schema masks"]
+        gen["generation.py<br/>autoregressive loop"]
+        samp["sampling.py<br/>seeded sampler"]
+        tok["bpe.py, tokenization.py<br/>tokenizers"]
+    end
+
+    subgraph model["Model"]
+        direction LR
+        tr["transformer.py<br/>decoder + KV cache"]
+        arch["architecture.py<br/>TransformerConfig"]
+        mf["modelfile.py<br/>model.dllm"]
+    end
+
+    subgraph num["Numerics (Python)"]
+        direction LR
+        numerics["numerics.py, tensor.py"]
+        cuda["cuda.py<br/>CudaTensor"]
+    end
+
+    subgraph cpp["C++ extension etalii_dllm._kernels"]
+        direction LR
+        kern["math, nn, grad, quant, random"]
+        disp["simd.hpp, parallel.hpp"]
+        cu["cuda.hpp + cuda/kernels.cu<br/>(NVRTC at run time)"]
+    end
+
+    fe --> eng --> chat --> model --> num --> cpp
+```
+
+Two subsystems sit beside this stack rather than in it: `importing/` writes `model.dllm` files (it uses the file
+format and the configuration, not the decoder), and `training/` reuses the decoder and adds gradient kernels and
+AdamW from `grad.hpp`.
+
+## Module map
+
+### Python package `src/etalii_dllm/`
+
+| Module | Responsibility |
+| --- | --- |
+| `engine.py` | `DllmEngine`, the facade every front end uses. `chat_stream` renders the prompt, sets up constrained decoding, runs the generator and turns its steps into events (`TextDelta`, `ToolCallEvent`, `Finished`); `chat_completion` collects the same events, so streamed and non-streamed answers are identical. Also embeddings and content-derived ids. |
+| `chat.py` | Chat messages and the fixed prompt format for models without a chat template. |
+| `chat_template.py` | Renders a model's own Jinja chat template the way `transformers` does. |
+| `tools.py` | Tool calling in the Hermes `<tool_call>` format: presenting tools, constraining and parsing calls. |
+| `grammar.py` | Constrained decoding: byte-level JSON grammars and the token masks they induce over a token trie. |
+| `generation.py` | The autoregressive loop: forward pass, sample, append, repeat; stop sequences, logprobs, result fingerprint. |
+| `sampling.py` | Temperature, top-k and top-p sampling with a seeded generator and ties broken on token id. |
+| `tokenization.py`, `bpe.py` | The byte tokenizer of the placeholder model, and byte-level BPE driven by a `tokenizer.json`. |
+| `models.py` | The `LanguageModel` protocol and the seeded placeholder `BigramModel`. |
+| `transformer.py` | The Llama/Qwen2 decoder (RMSNorm, RoPE, grouped-query attention, SwiGLU) and its KV cache, on CPU or GPU, float32 or Q8_0. |
+| `architecture.py` | `TransformerConfig`: the shape of a decoder, independent of where its weights came from. |
+| `modelfile.py` | Reading and writing the `model.dllm` container ([format](../model-format.md)). |
+| `numerics.py`, `tensor.py` | Thin wrappers over the C++ kernels, fingerprints, `DeterministicRandom`, and the 64-byte aligned float32 `Tensor`. |
+| `cuda.py` | The GPU backend: finding NVRTC, `CudaTensor`, device-side operations. |
+| `importing/` | Readers for safetensors and GGUF (with GGML dequantisation), the Hugging Face download pinned to a commit, the licence policy, and `dllm import`. |
+| `training/` | Gradients of the decoder, AdamW, fixed data order and checkpoints that resume bit for bit (`dllm finetune`). |
+| `server/` | The OpenAI (`app.py`, `contracts.py`) and Anthropic (`anthropic_api.py`, `anthropic_contracts.py`) wire formats and the chat page `static/chat.html`. |
+| `mcp_server.py` | The model as an MCP server over stdio (tools, prompts, resources). |
+| `mcp_host.py` | The MCP client host: the model calls external MCP tools in a loop over `chat_stream`. |
+| `cli.py` | The `dllm` command. |
+
+### C++ kernels `cpp/`
+
+| File | Responsibility |
+| --- | --- |
+| `include/dllm/random.hpp` | xoshiro256\*\* seeded by SplitMix64, the one source of random numbers. |
+| `include/dllm/math.hpp` | Fixed-order reductions and `exp`, `log`, `sin`, `cos`, `tanh`, `erf` built from `+ - * /` and `sqrt`. |
+| `include/dllm/nn.hpp` | Matmul, RMSNorm, activations, RoPE and attention; every output element has its own accumulation in one order. |
+| `include/dllm/grad.hpp` | Backward kernels, cross-entropy and the AdamW update, with the same ordering rules. |
+| `include/dllm/quant.hpp` | Q8_0 quantisation with exact integer block sums. |
+| `include/dllm/parallel.hpp` | A thread pool whose tasks own disjoint outputs, so the thread count never changes a bit. |
+| `include/dllm/simd.hpp` | AVX2, SSE2 or NEON variants picked once per machine; lanes hold different outputs, never parts of one sum. |
+| `include/dllm/cuda.hpp`, `cuda/kernels.cu` | The CUDA backend, compiled at run time by NVRTC with `--fmad=false`; one thread per output element. |
+| `kernels.cpp` | The nanobind bindings (`etalii_dllm._kernels`); kept thin. |
+
+## Where new code goes
+
+- A new reduction or transcendental: a C++ kernel in `cpp/include/dllm/`, bound in `kernels.cpp`, wrapped in
+  `numerics.py`, with its order written in [kernels](../kernels.md) and a test against the scalar reference.
+- A new model architecture: `architecture.py` for the shape, `transformer.py` for the forward pass, `importing/`
+  for the tensor names, and a comparison with `transformers` in `tests/test_reference_models.py`.
+- A new API or protocol: a thin adapter over `DllmEngine.chat_stream` in `server/` or beside `mcp_server.py`; any
+  behaviour two front ends would share belongs in the engine.
