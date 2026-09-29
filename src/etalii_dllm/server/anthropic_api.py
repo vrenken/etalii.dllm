@@ -166,7 +166,11 @@ def messages(request: MessagesRequest, engine: Engine) -> MessageResponse | JSON
         model=engine.model.id,
         stop_reason=_stop_reason(result.finish_reason, result.stop_sequence),
         stop_sequence=result.stop_sequence,
-        usage=Usage(input_tokens=result.prompt_tokens, output_tokens=result.completion_tokens),
+        usage=Usage(
+            input_tokens=result.prompt_tokens - result.cached_tokens,
+            output_tokens=result.completion_tokens,
+            cache_read_input_tokens=result.cached_tokens,
+        ),
     )
 
 
@@ -188,7 +192,12 @@ def _events(engine: DllmEngine, chat: ChatRequest, stream: ChatStream) -> Iterat
         "model": engine.model.id,
         "stop_reason": None,
         "stop_sequence": None,
-        "usage": {"input_tokens": stream.prompt_tokens, "output_tokens": 0},
+        "usage": {
+            "input_tokens": stream.prompt_tokens - stream.cached_tokens,
+            "output_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": stream.cached_tokens,
+        },
     }
     yield _event("message_start", {"message": start})
     index = -1

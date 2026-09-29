@@ -94,7 +94,11 @@ class ToolUseBlock(BaseModel):
 
 class Usage(BaseModel):
     input_tokens: int
+    """Prompt tokens not read from the prompt cache (as Anthropic counts them)."""
     output_tokens: int
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    """Prompt tokens read from the prompt cache (depends on earlier requests; the output does not)."""
 
 
 class MessageResponse(BaseModel):

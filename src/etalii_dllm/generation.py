@@ -9,12 +9,14 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
 from etalii_dllm.grammar import TokenConstraint
 from etalii_dllm.models import LanguageModel
 from etalii_dllm.numerics import fingerprint, log_softmax
+from etalii_dllm.prompt_cache import PromptCache
 from etalii_dllm.sampling import Sampler, SamplingOptions
 from etalii_dllm.tokenization import Tokenizer
 
@@ -102,13 +104,23 @@ class Generation:
         top_logprobs: int | None,
     ) -> None:
         self.prompt_tokens = len(context)
+        # Models with a KV cache reuse it across steps; by construction that gives the same logits as forward().
+        # With a prompt cache the KV cache may come from an earlier request that shares a prefix with this one.
+        new_cache = getattr(generator.model, "new_cache", None)
+        cache = None
+        self.cached_tokens = 0
+        """Prompt tokens whose keys and values came from the prompt cache instead of being computed."""
+        if generator.prompt_cache is not None:
+            cache, self.cached_tokens = generator.prompt_cache.acquire(context)
+        elif new_cache is not None:
+            cache = new_cache()
         self._tokens: list[int] = []
         self._logprobs: list[TokenLogprobs] = []
         self._text = ""
         self._finish_reason: str | None = None
         self.stop_sequence: str | None = None
         """The stop sequence that ended the generation, if any."""
-        self._steps = self._run(generator, context, max_tokens, options, stop, constraint, top_logprobs)
+        self._steps = self._run(generator, context, cache, max_tokens, options, stop, constraint, top_logprobs)
 
     def __iter__(self) -> Iterator[Step]:
         return self._steps
@@ -125,6 +137,24 @@ class Generation:
         self,
         generator: Generator,
         context: list[int],
+        cache: Any,
+        max_tokens: int,
+        options: SamplingOptions,
+        stop: Sequence[str],
+        constraint: TokenConstraint | None,
+        top_logprobs: int | None,
+    ) -> Iterator[Step]:
+        try:
+            yield from self._loop(generator, context, cache, max_tokens, options, stop, constraint, top_logprobs)
+        finally:
+            if generator.prompt_cache is not None and cache is not None:
+                generator.prompt_cache.release(cache)
+
+    def _loop(
+        self,
+        generator: Generator,
+        context: list[int],
+        cache: Any,
         max_tokens: int,
         options: SamplingOptions,
         stop: Sequence[str],
@@ -137,9 +167,6 @@ class Generation:
         data = bytearray()
         emitted = ""
         finish_reason = "length"
-        # Models with a KV cache reuse it across steps; by construction that gives the same logits as forward().
-        new_cache = getattr(model, "new_cache", None)
-        cache = new_cache() if new_cache is not None else None
 
         while len(self._tokens) < max_tokens:
             if constraint is not None and constraint.finished:
@@ -208,10 +235,19 @@ class Generation:
 
 
 class Generator:
-    def __init__(self, model: LanguageModel, tokenizer: Tokenizer, stop_tokens: Iterable[int] = ()) -> None:
+    def __init__(
+        self, model: LanguageModel, tokenizer: Tokenizer, stop_tokens: Iterable[int] = (), prompt_cache: int = 0
+    ) -> None:
+        """``prompt_cache`` is how many KV caches of finished generations to keep for reuse by later prompts that
+        share a prefix (:mod:`etalii_dllm.prompt_cache`); 0, or a model without a KV cache, disables it. It never
+        changes the output."""
         self.model = model
         self.tokenizer = tokenizer
         self.stop_tokens = frozenset(t for t in [tokenizer.end_of_sequence, *stop_tokens] if t >= 0)
+        new_cache = getattr(model, "new_cache", None)
+        self.prompt_cache: PromptCache | None = (
+            PromptCache(new_cache, prompt_cache) if new_cache is not None and prompt_cache > 0 else None
+        )
 
     def stream(
         self,

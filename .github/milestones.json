@@ -6,5 +6,6 @@
   {"title": "Phase 4: API parity", "due_on": "2027-03-31", "description": "Streaming (SSE), tool calling, JSON-schema output, Anthropic Messages endpoint, embeddings"},
   {"title": "Phase 5: MCP, both directions", "due_on": "2027-04-30", "description": "Richer MCP server (prompts, resources); MCP client host so the model can call external tools"},
   {"title": "Phase 6: Performance", "due_on": "2027-06-30", "description": "SIMD and multi-threading with batch-invariant reduction order, integer quantisation, GPU kernels"},
-  {"title": "Phase 7: Usability and releases", "due_on": "2027-08-31", "description": "Pre-built wheels and tagged releases, PyPI, CUDA install route checked in CI, Docker image, web chat UI, a larger verified model"}
+  {"title": "Phase 7: Usability and releases", "due_on": "2027-08-31", "description": "Pre-built wheels and tagged releases, PyPI, CUDA install route checked in CI, Docker image, web chat UI, a larger verified model"},
+  {"title": "Phase 8: Serving and ecosystem", "due_on": "2027-10-31", "description": "Prompt caching and batched concurrent decoding with each request's solo bits, Ollama-compatible API, OpenAI Responses API, Qwen3, LoRA adapters"}
 ]

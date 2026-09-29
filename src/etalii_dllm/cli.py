@@ -202,7 +202,7 @@ def main(argv: list[str] | None = None) -> int:
         return _import(args)
     if args.command == "inspect":
         return _inspect(args)
-    use_model_file(args.model, args.quantize, args.threads, args.device)
+    use_model_file(args.model, args.quantize, args.threads, args.device, args.prompt_cache)
     try:
         engine = default_engine()
     except cuda.CudaUnavailableError as error:

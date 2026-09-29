@@ -123,10 +123,16 @@ class ChatCompletionChoice(BaseModel):
     finish_reason: str
 
 
+class PromptTokensDetails(BaseModel):
+    cached_tokens: int = 0
+    """Prompt tokens served from the prompt cache (depends on earlier requests; the output does not)."""
+
+
 class ChatCompletionUsage(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+    prompt_tokens_details: PromptTokensDetails = PromptTokensDetails()
 
 
 class ChatCompletionResponse(BaseModel):
