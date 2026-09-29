@@ -63,11 +63,16 @@ CONSTRAINED_FINGERPRINT = "979b6d7e752cd5b30ba187fd03c7919367f6494b05b0cdb537f0e
 EMBEDDING_FINGERPRINT = "6cea233a8a650a422c82e849cd5d0c77d223c38d1e9b92f3d84603a3ba4db177"
 
 # Phase 2 real models (tests/test_reference_models.py): the import fingerprint of the pinned checkpoint, and
-# GenerationResult.fingerprint of the greedy chat answer to test_reference_models.CHAT.
+# GenerationResult.fingerprint of the greedy chat answer to test_reference_models.CHAT. Phase 10 (#99) adds the
+# sampled answer (SAMPLED) and the float32 bits of the last-position logits of PROMPTS (float32 and Q8_0 weights);
+# they must be the same on every release platform, SIMD path and device.
 REFERENCE_MODEL_FINGERPRINTS = {
     "smollm2": {
         "import": "2e4d93db18c1ce202f44a8fd4da1333532827e2b84b7979ddcba6c918bfc132f",
         "chat": "cb555f4a6519d8b67bc7e1c304b08c0c13852cea297e0fdc644b0b77f70a8f1d",
+        "sampled": "5f3620a368decf6e7ad82105879f8ee37cc346961a2332298f700144a3eec488",
+        "logits": "939f4dab80703cf2dcfff45656a84cc8fbd6602a8a9c3e6d75ada13ce0c5a5fb",
+        "logits_q8_0": "000765286f26f9e922fc23f5dfcbae1b7b53b5574525015b2a956b272252b3f9",
     },
     "qwen2.5": {
         "import": "9bf78203fabbc1d93a5f387456ff1d755d7fef36396351c911f51656c898eb99",
