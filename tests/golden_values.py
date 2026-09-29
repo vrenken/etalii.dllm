@@ -88,9 +88,15 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "import": "626d11f6abd38e28450448eae2574b29de3212825a143f37bdbf145673e8556d",
         # The same answer tokens as Qwen2.5-0.5B ("The capital of France is Paris."), so the same fingerprint.
         "chat": "7a75f8d55b99478a282d601c155df0fd6c5066b613db230b610612abbdc05c37",
+        "sampled": "7a75f8d55b99478a282d601c155df0fd6c5066b613db230b610612abbdc05c37",
+        "logits": "a4eff454791a62e4cfe01c24bd57f9af78809387ae9d699ecf162eeb1007a0a4",
+        "logits_q8_0": "fc6ded7859eb616f4baa45870d5e3ad3af9f45757378f288db62d368986b3a73",
     },
     "qwen3": {  # greedy chat rendered with enable_thinking=False
         "import": "c34b4666335e7e0dbe110ee9b9fc78936b84391a57a420688fd78036ad6df5b7",
         "chat": "109ee1a8513bf1dad8a34b0483a0f3045fe18cbf7c03820e4e359cc20912201c",
+        "sampled": "109ee1a8513bf1dad8a34b0483a0f3045fe18cbf7c03820e4e359cc20912201c",  # the same answer
+        "logits": "54400823b346fbacdb126d5ccca19e12f7e8d3c0d04a94ee546abfa840d1523a",
+        "logits_q8_0": "21cd894f2d19253192801ec012209624721e1e401bf530b63d39c7e79900eb5a",
     },
 }
