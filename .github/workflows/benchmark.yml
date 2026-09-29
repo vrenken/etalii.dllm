@@ -1,0 +1,63 @@
+name: Benchmark
+
+# Model performance comparison (docs/benchmarks.md): EtAlii.Dllm against transformers (PyTorch) and llama.cpp on one
+# runner, for the pinned SmolLM2-135M, Qwen2.5-0.5B, Qwen3-0.6B and Qwen2.5-1.5B. Throughput, latency, perplexity and
+# determinism; the results are the job summary and the benchmark-results artifact.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - benchmarks/**
+      - .github/workflows/benchmark.yml
+
+permissions:
+  contents: read
+
+env:
+  LLAMA_CPP_TAG: b11260
+  LLAMA_CPP_PYTHON: 0.3.35
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    env:
+      DLLM_REFERENCE_MODELS: ${{ github.workspace }}/.reference-models
+    steps:
+      - name: Free disk space for the float32 model files
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h .
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build and install with the reference implementation (CPU torch)
+        run: pip install ".[dev,reference]" sentencepiece protobuf --extra-index-url https://download.pytorch.org/whl/cpu
+      - name: Cache the pinned model snapshots
+        uses: actions/cache@v4
+        with:
+          path: .reference-models
+          key: reference-models-${{ hashFiles('tests/test_reference_models.py') }}
+          restore-keys: reference-models-
+      - name: Download the pinned models (skipped for cached files)
+        run: python tests/test_reference_models.py "$DLLM_REFERENCE_MODELS"
+      - name: Build llama.cpp (CPU)
+        run: |
+          git clone --depth 1 --branch "$LLAMA_CPP_TAG" https://github.com/ggml-org/llama.cpp ../llama.cpp
+          cmake -S ../llama.cpp -B ../llama.cpp/build -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF -DGGML_NATIVE=ON
+          cmake --build ../llama.cpp/build -j 4 --target llama-bench llama-perplexity llama-server
+      - name: Install llama-cpp-python (raw logits for the llama.cpp determinism probes)
+        run: CMAKE_ARGS="-DGGML_NATIVE=ON -DLLAMA_CURL=OFF" pip install "llama-cpp-python==$LLAMA_CPP_PYTHON"
+      - name: Benchmark
+        run: |
+          lscpu && free -g && df -h .
+          python benchmarks/benchmark.py suite --snapshots "$DLLM_REFERENCE_MODELS" --output benchmark-results.json \
+            --llamacpp ../llama.cpp/build/bin --llamacpp-source ../llama.cpp --thread-sweep 1 2 4 | tee report.md
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: |
+            benchmark-results.json
+            report.md
