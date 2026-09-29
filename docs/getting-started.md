@@ -101,7 +101,7 @@ dllm import ./qwen2.5-0.5b-instruct-q8_0.gguf -o qwen2.5-0.5b.dllm
 ```
 
 Supported today: Llama-style models (SmolLM2, TinyLlama's architecture, Llama), Qwen2/Qwen2.5 and Qwen3 (dense) with
-byte-level BPE tokenizers. Anything else is refused with a message saying what is missing. Only Apache-2.0 and MIT models import
+byte-level BPE tokenizers ([full list](../README.md#which-models-can-it-run)). Anything else is refused with a message saying what is missing. Only Apache-2.0 and MIT models import
 without `--accept-licence`; see [model import](research/model-import.md) for the licence policy and candidate
 models.
 
