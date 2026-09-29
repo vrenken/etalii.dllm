@@ -178,7 +178,7 @@ def reference(imported):
 # Synthetic checkpoints: the decoder matches transformers on both families
 
 
-@pytest.mark.parametrize("family", ["llama", "qwen2", "qwen3"])
+@pytest.mark.parametrize("family", ["llama", "mistral", "qwen2", "qwen3"])
 def test_tiny_checkpoint_matches_transformers(family, tmp_path):
     torch = pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")

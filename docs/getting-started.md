@@ -108,7 +108,7 @@ dllm import ./SmolLM2-360M-Instruct -o smollm2-360m.dllm --repo HuggingFaceTB/Sm
 dllm import ./qwen2.5-0.5b-instruct-q8_0.gguf -o qwen2.5-0.5b.dllm
 ```
 
-Supported today: Llama-style models (SmolLM2, TinyLlama, Llama), Qwen2/Qwen2.5 and Qwen3 (dense) with
+Supported today: Llama-style models (SmolLM2, TinyLlama, Llama), Mistral, Qwen2/Qwen2.5 and Qwen3 (dense) with
 byte-level or SentencePiece-style BPE tokenizers ([full list](../README.md#which-models-can-it-run)). Anything else is refused with a message saying what is missing. Only Apache-2.0 and MIT models import
 without `--accept-licence`; see [model import](research/model-import.md) for the licence policy and candidate
 models.
@@ -328,7 +328,8 @@ gives byte-identical responses to a native install. Build it yourself with `dock
 - Five real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
   Qwen2.5-0.5B-Instruct, Qwen2.5-1.5B-Instruct, Qwen3-0.6B and TinyLlama-1.1B-Chat (tokenizer, chat template, logits within 1e-3 and the
   same greedy answer; see `tests/test_reference_models.py`). Other Llama/Qwen2/Qwen3 models should work but are not
-  checked; if one misbehaves,
+  checked. Mistral is checked against `transformers` only on a tiny synthetic model (its real checkpoints are gated
+  and 7B or larger); if one misbehaves,
   please open an issue with the `dllm inspect` output.
 - Speed: on a 4-core cloud VM, SmolLM2-135M reads a prompt at about 150 tokens per second and generates about 20
   tokens per second (about 35 with `--quantize q8_0`); Qwen2.5-0.5B is roughly four times slower. On an RTX 4080,
@@ -343,6 +344,6 @@ gives byte-identical responses to a native install. Build it yourself with `dock
 - MCP servers' own resources and prompts are not offered to the model (only their tools), and servers that ask
   the client for sampling or elicitation are not supported.
 - Models with Unigram or WordPiece tokenizers, GGUF files with a SentencePiece vocabulary (convert from the
-  Hugging Face checkpoint instead), sliding-window attention, YaRN RoPE scaling or other architectures (including
+  Hugging Face checkpoint instead), YaRN RoPE scaling or other architectures (including
   Qwen3's mixture-of-experts models) are refused at import; Phase 9 of the roadmap adds the mainstream ones. Qwen3's thinking
   is returned as part of the answer text, not split into a separate reasoning field.

@@ -41,6 +41,8 @@ def reference_logits(config: TransformerConfig, w: dict[str, np.ndarray], tokens
     group = config.heads // config.kv_heads
     mask = np.triu(np.full((n, n), -np.inf), 1)
     for i in range(config.layers):
+        window = config.window(i)
+        layer_mask = mask if window is None else mask + np.tril(np.full((n, n), -np.inf), -window)
         p = f"layers.{i}."
         h = norm(x, w[p + "attention_norm.weight"])
         q = proj(h, p + "attention.q").reshape(n, config.heads, hd)
@@ -51,7 +53,7 @@ def reference_logits(config: TransformerConfig, w: dict[str, np.ndarray], tokens
         v = proj(h, p + "attention.v").reshape(n, config.kv_heads, hd)
         out = np.empty((n, config.heads, hd))
         for head in range(config.heads):
-            scores = q[:, head] @ k[:, head // group].T / np.sqrt(hd) + mask
+            scores = q[:, head] @ k[:, head // group].T / np.sqrt(hd) + layer_mask
             probs = np.exp(scores - scores.max(-1, keepdims=True))
             out[:, head] = (probs / probs.sum(-1, keepdims=True)) @ v[:, head // group]
         x = x + out.reshape(n, -1) @ w[p + "attention.o.weight"].T
@@ -62,7 +64,7 @@ def reference_logits(config: TransformerConfig, w: dict[str, np.ndarray], tokens
     return norm(x, w["final_norm.weight"])[-1] @ head.T
 
 
-@pytest.fixture(scope="module", params=["llama", "qwen2", "qwen3"])
+@pytest.fixture(scope="module", params=["llama", "mistral", "qwen2", "qwen3"])
 def model(request, tmp_path_factory) -> Transformer:
     directory = tmp_path_factory.mktemp(request.param)
     config = tiny_config(request.param)

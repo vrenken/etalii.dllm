@@ -10,8 +10,9 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 # Families the decoder implements. "qwen2" is "llama" with biases on the q/k/v projections; "qwen3" is "llama" with
-# an RMSNorm over each query and key head before the rotary embedding (QK-norm).
-FAMILIES = ("llama", "qwen2", "qwen3")
+# an RMSNorm over each query and key head before the rotary embedding (QK-norm); "mistral" is "llama", usually with
+# sliding-window attention.
+FAMILIES = ("llama", "mistral", "qwen2", "qwen3")
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,10 @@ class TransformerConfig:
     rope_interleaved: bool = False
     bos_token_id: int | None = None
     eos_token_ids: tuple[int, ...] = field(default_factory=tuple)
+    sliding_window: int | None = None
+    """Sliding-window attention (Mistral): each query sees only the last ``sliding_window`` keys, itself included."""
+    sliding_window_layers: tuple[int, ...] | None = None
+    """The layers that use the sliding window; ``None`` means all of them."""
 
     def __post_init__(self) -> None:
         if self.family not in FAMILIES:
@@ -50,18 +55,39 @@ class TransformerConfig:
             raise ValueError("head_dim must be even for rotary embeddings")
         if self.activation != "silu":
             raise ValueError(f"unsupported activation {self.activation!r}")
+        if self.sliding_window is not None and self.sliding_window < 1:
+            raise ValueError("sliding_window must be positive")
+        if self.sliding_window_layers is not None and any(
+            not 0 <= layer < self.layers for layer in self.sliding_window_layers
+        ):
+            raise ValueError("sliding_window_layers must be layer indices")
+
+    def window(self, layer: int) -> int | None:
+        """The attention window of ``layer``: ``None`` for full causal attention."""
+        if self.sliding_window is None:
+            return None
+        if self.sliding_window_layers is not None and layer not in self.sliding_window_layers:
+            return None
+        return self.sliding_window
 
     def to_dict(self) -> dict[str, Any]:
         values = asdict(self)
         values["eos_token_ids"] = list(self.eos_token_ids)
         if not self.qk_norm:  # model files written before QK-norm existed stay byte-identical
             del values["qk_norm"]
+        for name in ("sliding_window", "sliding_window_layers"):  # likewise
+            if values[name] is None:
+                del values[name]
+        if values.get("sliding_window_layers") is not None:
+            values["sliding_window_layers"] = list(values["sliding_window_layers"])
         return values
 
     @classmethod
     def from_dict(cls, values: dict[str, Any]) -> TransformerConfig:
         values = dict(values)
         values["eos_token_ids"] = tuple(values.get("eos_token_ids", ()))
+        if values.get("sliding_window_layers") is not None:
+            values["sliding_window_layers"] = tuple(values["sliding_window_layers"])
         return cls(**values)
 
     def tensor_shapes(self) -> dict[str, tuple[int, ...]]:

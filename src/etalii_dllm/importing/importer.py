@@ -112,16 +112,15 @@ def _rope_from_hf(config: dict[str, Any]) -> tuple[float, dict[str, Any] | None]
 
 
 def hf_config(config: dict[str, Any], generation: dict[str, Any] | None = None) -> TransformerConfig:
-    """Maps a Hugging Face ``config.json`` (Llama, Qwen2 or Qwen3) to our description."""
+    """Maps a Hugging Face ``config.json`` (Llama, Mistral, Qwen2 or Qwen3) to our description."""
     family = config.get("model_type")
-    if family not in ("llama", "qwen2", "qwen3"):
-        raise ModelImportError(f"model_type {family!r} is not supported (supported: llama, qwen2, qwen3)")
+    if family not in ("llama", "mistral", "qwen2", "qwen3"):
+        raise ModelImportError(f"model_type {family!r} is not supported (supported: llama, mistral, qwen2, qwen3)")
     if config.get("hidden_act", "silu") != "silu":
         raise ModelImportError(f"activation {config.get('hidden_act')!r} is not supported")
     if config.get("mlp_bias"):
         raise ModelImportError("MLP biases are not supported")
-    if family in ("qwen2", "qwen3") and config.get("use_sliding_window"):
-        raise ModelImportError("sliding-window attention is not supported")
+    window, window_layers = _sliding_window_from_hf(config, family)
     heads = int(config["num_attention_heads"])
     hidden = int(config["hidden_size"])
     theta, scaling = _rope_from_hf(config)
@@ -148,7 +147,32 @@ def hf_config(config: dict[str, Any], generation: dict[str, Any] | None = None) 
         tie_word_embeddings=bool(config.get("tie_word_embeddings", False)),
         bos_token_id=None if bos is None else int(bos),
         eos_token_ids=tuple(eos),
+        sliding_window=window,
+        sliding_window_layers=window_layers,
     )
+
+
+def _sliding_window_from_hf(config: dict[str, Any], family: str) -> tuple[int | None, tuple[int, ...] | None]:
+    """``(window, layers)``: Mistral slides on every layer; Qwen2/Qwen3 with ``use_sliding_window`` on the layers from
+    ``max_window_layers`` on. A ``layer_types`` list, where present, names the layers explicitly."""
+    window = config.get("sliding_window")
+    if family == "llama" or window is None:
+        return None, None
+    if family in ("qwen2", "qwen3") and not config.get("use_sliding_window"):
+        return None, None
+    layers = int(config["num_hidden_layers"])
+    layer_types = config.get("layer_types")
+    if isinstance(layer_types, list):
+        if len(layer_types) != layers or any(t not in ("sliding_attention", "full_attention") for t in layer_types):
+            raise ModelImportError(f"layer_types {layer_types!r} is not supported")
+        sliding = tuple(i for i, kind in enumerate(layer_types) if kind == "sliding_attention")
+    elif family in ("qwen2", "qwen3"):
+        sliding = tuple(range(int(config.get("max_window_layers", layers)), layers))
+    else:
+        sliding = tuple(range(layers))
+    if not sliding:
+        return None, None
+    return int(window), None if len(sliding) == layers else sliding
 
 
 def _hf_name(name: str) -> str | None:

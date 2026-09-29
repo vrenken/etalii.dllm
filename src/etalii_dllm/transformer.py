@@ -278,7 +278,9 @@ class Transformer:
             attended = []
             for (_, start, cache), lo, hi in zip(segments, bounds[:-1], bounds[1:], strict=True):
                 keys, values = cache.append(layer, start, k[lo:hi], v[lo:hi])
-                attended.append(attention(q[lo:hi], keys, values, causal=True, q_offset=start).numpy())
+                attended.append(
+                    attention(q[lo:hi], keys, values, causal=True, q_offset=start, window=config.window(layer)).numpy()
+                )
             a = attended[0] if len(attended) == 1 else np.concatenate(attended)
             x = x + linear(a.reshape(count, config.heads * config.head_dim), w[p + "attention.o.weight"]).numpy()
             h = rms_norm(x, w[p + "mlp_norm.weight"], config.rms_norm_eps)
@@ -325,7 +327,16 @@ class Transformer:
                 keys, values = cache.append(layer, start, k[lo:hi], v[lo:hi])
                 end = start + int(hi - lo)
                 parts.append(
-                    cuda.attention(q[lo:hi], keys, values, kv_len=end, scale=scale, causal=True, q_offset=start)
+                    cuda.attention(
+                        q[lo:hi],
+                        keys,
+                        values,
+                        kv_len=end,
+                        scale=scale,
+                        causal=True,
+                        q_offset=start,
+                        window=config.window(layer),
+                    )
                 )
             if len(parts) == 1:
                 attended = parts[0]
