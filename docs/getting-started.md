@@ -123,7 +123,8 @@ dllm --model smollm2-135m.dllm chat "Invent a cat" --json-schema '{"type": "obje
 ```
 
 Determinism: the same model file, prompt, options and seed give the same tokens every time on the same machine,
-also under concurrent load. Temperature 0 (the default) is greedy decoding.
+also under concurrent load, where `dllm-server` decodes simultaneous requests as one batch to serve them faster
+([concurrent requests](api.md#concurrent-requests)). Temperature 0 (the default) is greedy decoding.
 
 Speed options (they work the same for `dllm`, `dllm-server` and `dllm-mcp`):
 
