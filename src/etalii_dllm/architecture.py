@@ -9,8 +9,9 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-# Families the decoder implements. "qwen2" is "llama" with biases on the q/k/v projections.
-FAMILIES = ("llama", "qwen2")
+# Families the decoder implements. "qwen2" is "llama" with biases on the q/k/v projections; "qwen3" is "llama" with
+# an RMSNorm over each query and key head before the rotary embedding (QK-norm).
+FAMILIES = ("llama", "qwen2", "qwen3")
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,8 @@ class TransformerConfig:
     rope_theta: float
     rope_scaling: dict[str, Any] | None = None
     attention_bias: bool = False
+    qk_norm: bool = False
+    """RMSNorm (weights ``[head_dim]``, shared by the heads) on every query and key head before RoPE (Qwen3)."""
     tie_word_embeddings: bool = False
     activation: str = "silu"
     # Rotary pairs (i, i + d/2) as in Hugging Face checkpoints. Imports convert other layouts to this one.
@@ -51,6 +54,8 @@ class TransformerConfig:
     def to_dict(self) -> dict[str, Any]:
         values = asdict(self)
         values["eos_token_ids"] = list(self.eos_token_ids)
+        if not self.qk_norm:  # model files written before QK-norm existed stay byte-identical
+            del values["qk_norm"]
         return values
 
     @classmethod
@@ -74,6 +79,9 @@ class TransformerConfig:
                 shapes[p + "attention.q.bias"] = (q,)
                 shapes[p + "attention.k.bias"] = (kv,)
                 shapes[p + "attention.v.bias"] = (kv,)
+            if self.qk_norm:
+                shapes[p + "attention.q_norm.weight"] = (self.head_dim,)
+                shapes[p + "attention.k_norm.weight"] = (self.head_dim,)
             shapes[p + "attention.o.weight"] = (self.hidden_size, q)
             shapes[p + "mlp_norm.weight"] = (self.hidden_size,)
             shapes[p + "mlp.gate.weight"] = (self.intermediate_size, self.hidden_size)

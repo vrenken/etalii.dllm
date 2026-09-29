@@ -39,7 +39,7 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
 - `src/etalii_dllm/`: `tensor` (aligned float32 `Tensor`), `numerics` (thin wrappers over `_kernels`, fingerprints),
   `sampling`, `tokenization`, `models`, `generation`, `prompt_cache` (KV caches reused across requests),
   `batching` (concurrent generations share `forward_batch` steps), `chat`, `engine` (`DllmEngine`, the facade shared by every front
-  end; `DLLM_MODEL`/`--model` selects a `model.dllm`), `transformer` (Llama/Qwen2 decoder + KV cache), `bpe` and
+  end; `DLLM_MODEL`/`--model` selects a `model.dllm`), `transformer` (Llama/Qwen2/Qwen3 decoder + KV cache), `bpe` and
   `chat_template` (the model's own tokenizer and Jinja template), `cuda` (the GPU backend: NVRTC discovery, `CudaTensor`, device
   ops; `--device cuda`/`DLLM_DEVICE`), `architecture` (`TransformerConfig`), `modelfile`
   (the `model.dllm` container, `docs/model-format.md`), `importing` (safetensors/GGUF readers and `dllm import`),
@@ -52,7 +52,7 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
   non-streamed responses are assembled from the same event stream as streamed ones. `mcp_host.py` is the MCP client
   host (the model calls external MCP tools in a loop over `chat_stream`); both MCP directions: `docs/mcp.md`.
 - `tests/`: pytest. `tests/golden_values.py` holds the reference hashes. `tests/test_reference_models.py` compares the
-  real pinned SmolLM2-135M/Qwen2.5-0.5B/Qwen2.5-1.5B imports with `transformers` (`DLLM_REFERENCE_MODELS=<dir>`, extra `reference`; the
+  real pinned SmolLM2-135M/Qwen2.5-0.5B/Qwen2.5-1.5B/Qwen3-0.6B imports with `transformers` (`DLLM_REFERENCE_MODELS=<dir>`, extra `reference`; the
   `Reference models` workflow downloads them); cached copies live in `/mnt/project-files/models` in cloud sessions.
 
 ## Determinism rules (inference and training code)

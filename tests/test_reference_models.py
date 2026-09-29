@@ -2,7 +2,7 @@
 
 Two groups of tests:
 
-- Synthetic: tiny Llama and Qwen2 checkpoints from ``model_fixtures`` loaded by both transformers and our decoder.
+- Synthetic: tiny Llama, Qwen2 and Qwen3 checkpoints from ``model_fixtures`` loaded by transformers and our decoder.
   Needs ``torch`` and ``transformers`` only.
 - Real: the pinned open-weight models of ``REFERENCE_MODELS``, found under ``$DLLM_REFERENCE_MODELS`` either as
   ``<dir>/<name>/`` or in the ``dllm import`` hub cache layout ``<dir>/<org>/<name>/<commit>/``. Tokenizer tests need
@@ -23,7 +23,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from golden_values import REFERENCE_MODEL_FINGERPRINTS
-from model_fixtures import TINY_LLAMA_CONFIG, write_hf_checkpoint
+from model_fixtures import tiny_config, write_hf_checkpoint
 
 from etalii_dllm import cuda
 from etalii_dllm.bpe import BpeTokenizer, special_token_text
@@ -58,7 +58,11 @@ REFERENCE_MODELS = {
     "qwen2.5-1.5b": ReferenceModel(
         "Qwen/Qwen2.5-1.5B-Instruct", "989aa7980e4cf806f80c7fef2b1adb7bc71aa306", "Apache-2.0"
     ),
+    "qwen3": ReferenceModel("Qwen/Qwen3-0.6B", "main", "Apache-2.0"),
 }
+
+# Extra chat template variables per model for the greedy chat: Qwen3 answers directly instead of thinking first.
+CHAT_VARIABLES = {"qwen3": {"enable_thinking": False}}
 
 TEXTS = [
     "Hello, world!",
@@ -170,13 +174,11 @@ def reference(imported):
 # Synthetic checkpoints: the decoder matches transformers on both families
 
 
-@pytest.mark.parametrize("family", ["llama", "qwen2"])
+@pytest.mark.parametrize("family", ["llama", "qwen2", "qwen3"])
 def test_tiny_checkpoint_matches_transformers(family, tmp_path):
     torch = pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")
-    config = {**TINY_LLAMA_CONFIG, "model_type": family}
-    if family == "qwen2":
-        config.update(architectures=["Qwen2ForCausalLM"], use_sliding_window=False, tie_word_embeddings=False)
+    config = tiny_config(family)
     write_hf_checkpoint(tmp_path / "checkpoint", config)
     import_model(tmp_path / "checkpoint", tmp_path / "tiny.dllm", repository="example/tiny")
     ours = Transformer.from_file(tmp_path / "tiny.dllm")
@@ -253,7 +255,7 @@ def test_greedy_chat_matches_reference(model_key, imported, reference):
 
     _, result = imported
     engine = DllmEngine.from_model_file(result.path)
-    prompt = engine.chat_template.render(CHAT)
+    prompt = engine.chat_template.render(CHAT, **CHAT_VARIABLES.get(model_key, {}))
     tokens = engine.tokenizer.encode(prompt)
     generated = engine.complete(prompt, GENERATED_TOKENS, GREEDY)
     with torch.no_grad():
@@ -274,7 +276,8 @@ def test_greedy_chat_on_the_gpu_gives_the_golden_answer(model_key, imported):
     """Issue #31: the GPU reproduces the CPU bits, so the golden answer does not depend on the device."""
     _, result = imported
     engine = DllmEngine.from_model_file(result.path, device="cuda")
-    generated = engine.complete(engine.chat_template.render(CHAT), GENERATED_TOKENS, GREEDY)
+    prompt = engine.chat_template.render(CHAT, **CHAT_VARIABLES.get(model_key, {}))
+    generated = engine.complete(prompt, GENERATED_TOKENS, GREEDY)
     assert generated.fingerprint == REFERENCE_MODEL_FINGERPRINTS[model_key]["chat"]
 
 
@@ -292,10 +295,11 @@ def test_quantized_model_stays_close_to_reference(imported, reference):
         assert int(np.argmax(ours.forward(tokens))) == int(np.argmax(expected)), prompt
 
 
-def test_quantized_greedy_chat(imported):
+def test_quantized_greedy_chat(model_key, imported):
     _, result = imported
     engine = DllmEngine.from_model_file(result.path, quantize="q8_0")
-    assert "Paris" in engine.complete(engine.chat_template.render(CHAT), GENERATED_TOKENS, GREEDY).text
+    prompt = engine.chat_template.render(CHAT, **CHAT_VARIABLES.get(model_key, {}))
+    assert "Paris" in engine.complete(prompt, GENERATED_TOKENS, GREEDY).text
 
 
 def main() -> None:

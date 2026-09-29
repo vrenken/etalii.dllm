@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import pytest
 from golden_values import TINY_LOGITS_FINGERPRINT
-from model_fixtures import TINY_LLAMA_CONFIG, write_hf_checkpoint
+from model_fixtures import tiny_config, write_hf_checkpoint
 
 from etalii_dllm.architecture import TransformerConfig
 from etalii_dllm.importing import import_model
@@ -21,7 +21,7 @@ def reference_logits(config: TransformerConfig, w: dict[str, np.ndarray], tokens
     """Straightforward float64 NumPy version of the Hugging Face Llama/Qwen2 forward pass (test-only; NumPy
     reductions are fine here because this is the yardstick, not the engine)."""
     w = {name: np.asarray(values, dtype=np.float64) for name, values in w.items()}
-    n, d, hd = len(tokens), config.hidden_size, config.head_dim
+    n, hd = len(tokens), config.head_dim
     inv_freq = config.rope_theta ** (-np.arange(0, hd, 2, dtype=np.float64) / hd)
     angles = np.arange(n, dtype=np.float64)[:, None] * inv_freq[None, :]
     cos, sin = np.cos(np.concatenate([angles, angles], 1)), np.sin(np.concatenate([angles, angles], 1))
@@ -43,15 +43,18 @@ def reference_logits(config: TransformerConfig, w: dict[str, np.ndarray], tokens
     for i in range(config.layers):
         p = f"layers.{i}."
         h = norm(x, w[p + "attention_norm.weight"])
-        q = rotate(proj(h, p + "attention.q").reshape(n, config.heads, hd))
-        k = rotate(proj(h, p + "attention.k").reshape(n, config.kv_heads, hd))
+        q = proj(h, p + "attention.q").reshape(n, config.heads, hd)
+        k = proj(h, p + "attention.k").reshape(n, config.kv_heads, hd)
+        if config.qk_norm:
+            q, k = norm(q, w[p + "attention.q_norm.weight"]), norm(k, w[p + "attention.k_norm.weight"])
+        q, k = rotate(q), rotate(k)
         v = proj(h, p + "attention.v").reshape(n, config.kv_heads, hd)
         out = np.empty((n, config.heads, hd))
         for head in range(config.heads):
             scores = q[:, head] @ k[:, head // group].T / np.sqrt(hd) + mask
             probs = np.exp(scores - scores.max(-1, keepdims=True))
             out[:, head] = (probs / probs.sum(-1, keepdims=True)) @ v[:, head // group]
-        x = x + out.reshape(n, d) @ w[p + "attention.o.weight"].T
+        x = x + out.reshape(n, -1) @ w[p + "attention.o.weight"].T
         h = norm(x, w[p + "mlp_norm.weight"])
         gate = h @ w[p + "mlp.gate.weight"].T
         x = x + (gate / (1 + np.exp(-gate)) * (h @ w[p + "mlp.up.weight"].T)) @ w[p + "mlp.down.weight"].T
@@ -59,12 +62,10 @@ def reference_logits(config: TransformerConfig, w: dict[str, np.ndarray], tokens
     return norm(x, w["final_norm.weight"])[-1] @ head.T
 
 
-@pytest.fixture(scope="module", params=["llama", "qwen2"])
+@pytest.fixture(scope="module", params=["llama", "qwen2", "qwen3"])
 def model(request, tmp_path_factory) -> Transformer:
     directory = tmp_path_factory.mktemp(request.param)
-    config = {**TINY_LLAMA_CONFIG, "model_type": request.param}
-    if request.param == "qwen2":
-        config["tie_word_embeddings"] = False
+    config = tiny_config(request.param)
     write_hf_checkpoint(directory / "checkpoint", config)
     import_model(directory / "checkpoint", directory / "model.dllm")
     return Transformer.from_file(directory / "model.dllm")

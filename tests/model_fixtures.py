@@ -34,6 +34,17 @@ TINY_LLAMA_CONFIG = {
     "torch_dtype": "bfloat16",
 }
 
+
+def tiny_config(family: str) -> dict:
+    """The tiny config for ``family``: Qwen2 unties the head; Qwen3 adds QK-norm and a head size of its own."""
+    config = {**TINY_LLAMA_CONFIG, "model_type": family}
+    if family == "qwen2":
+        config.update(architectures=["Qwen2ForCausalLM"], use_sliding_window=False, tie_word_embeddings=False)
+    elif family == "qwen3":
+        config.update(architectures=["Qwen3ForCausalLM"], use_sliding_window=False, head_dim=8, attention_bias=False)
+    return config
+
+
 TOKENIZER_JSON = {"version": "1.0", "model": {"type": "BPE", "vocab": {"a": 0, "b": 1}, "merges": []}}
 TOKENIZER_CONFIG = {"chat_template": "{% for m in messages %}{{ m['content'] }}{% endfor %}", "eos_token": "</s>"}
 MODEL_CARD = "---\nlicense: apache-2.0\nlibrary_name: transformers\n---\n\n# Tiny test model\n"
@@ -50,22 +61,28 @@ def bf16_to_float32(bits: np.ndarray) -> np.ndarray:
     return (bits.astype("<u4") << np.uint32(16)).view("<f4")
 
 
+def head_dim(config: dict) -> int:
+    return config.get("head_dim") or config["hidden_size"] // config["num_attention_heads"]
+
+
 def hf_weights(config: dict, seed: int = 11) -> dict[str, np.ndarray]:
-    """Float32 weights (already bf16-representable) for a Llama/Qwen2 config, keyed by Hugging Face name."""
+    """Float32 weights (already bf16-representable) for a Llama/Qwen2/Qwen3 config, keyed by Hugging Face name."""
+    family = config["model_type"]
     ours = TransformerConfig.from_dict(
         {
-            "family": "qwen2" if config["model_type"] == "qwen2" else "llama",
+            "family": family if family in ("qwen2", "qwen3") else "llama",
             "vocabulary_size": config["vocab_size"],
             "hidden_size": config["hidden_size"],
             "intermediate_size": config["intermediate_size"],
             "layers": config["num_hidden_layers"],
             "heads": config["num_attention_heads"],
             "kv_heads": config["num_key_value_heads"],
-            "head_dim": config["hidden_size"] // config["num_attention_heads"],
+            "head_dim": head_dim(config),
             "context_length": config["max_position_embeddings"],
             "rms_norm_eps": config["rms_norm_eps"],
             "rope_theta": config["rope_theta"],
-            "attention_bias": config["model_type"] == "qwen2",
+            "attention_bias": family == "qwen2",
+            "qk_norm": family == "qwen3",
             "tie_word_embeddings": config["tie_word_embeddings"],
         }
     )
@@ -89,7 +106,11 @@ def hf_weights(config: dict, seed: int = 11) -> dict[str, np.ndarray]:
             _, layer, rest = name.split(".", 2)
             if rest.startswith("attention."):
                 _, projection, kind = rest.split(".")
-                hf_rest = f"self_attn.{projection}_proj.{kind}"
+                hf_rest = (
+                    f"self_attn.{projection}.{kind}"
+                    if projection.endswith("_norm")
+                    else f"self_attn.{projection}_proj.{kind}"
+                )
             else:
                 hf_rest = layer_names[rest]
             hf = f"model.layers.{layer}.{hf_rest}"
@@ -154,6 +175,8 @@ _HF_TO_GGUF = {
     "self_attn.q_proj.bias": "attn_q.bias",
     "self_attn.k_proj.bias": "attn_k.bias",
     "self_attn.v_proj.bias": "attn_v.bias",
+    "self_attn.q_norm.weight": "attn_q_norm.weight",
+    "self_attn.k_norm.weight": "attn_k_norm.weight",
     "mlp.gate_proj.weight": "ffn_gate.weight",
     "mlp.up_proj.weight": "ffn_up.weight",
     "mlp.down_proj.weight": "ffn_down.weight",
@@ -189,7 +212,9 @@ def write_gguf(path: Path, config: dict | None = None, quantization: str | None 
     writer.add_feed_forward_length(config["intermediate_size"])
     writer.add_head_count(config["num_attention_heads"])
     writer.add_head_count_kv(config["num_key_value_heads"])
-    writer.add_rope_dimension_count(config["hidden_size"] // config["num_attention_heads"])
+    writer.add_rope_dimension_count(head_dim(config))
+    writer.add_key_length(head_dim(config))
+    writer.add_value_length(head_dim(config))
     writer.add_rope_freq_base(config["rope_theta"])
     writer.add_layer_norm_rms_eps(config["rms_norm_eps"])
     writer.add_vocab_size(config["vocab_size"])

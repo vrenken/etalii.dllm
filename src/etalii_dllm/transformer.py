@@ -1,4 +1,4 @@
-"""Llama-style decoder (Llama, SmolLM2, TinyLlama, Qwen2) running on the deterministic kernels.
+"""Llama-style decoder (Llama, SmolLM2, TinyLlama, Qwen2, Qwen3) running on the deterministic kernels.
 
 Every reduction goes through :mod:`etalii_dllm.numerics`, whose kernels give each output element one fixed
 accumulation order, independent of how many tokens are processed together. Consequently the KV cache is an
@@ -268,8 +268,12 @@ class Transformer:
             q = linear(h, w[p + "attention.q.weight"], w.get(p + "attention.q.bias"))
             k = linear(h, w[p + "attention.k.weight"], w.get(p + "attention.k.bias"))
             v = linear(h, w[p + "attention.v.weight"], w.get(p + "attention.v.bias"))
-            q = rope(q.reshape(count, config.heads, config.head_dim), positions, self._inv_freq).numpy()
-            k = rope(k.reshape(count, config.kv_heads, config.head_dim), positions, self._inv_freq).numpy()
+            q, k = q.reshape(count, config.heads, config.head_dim), k.reshape(count, config.kv_heads, config.head_dim)
+            if config.qk_norm:  # Qwen3: RMSNorm over each head's dimensions, before the rotation
+                q = rms_norm(q, w[p + "attention.q_norm.weight"], config.rms_norm_eps)
+                k = rms_norm(k, w[p + "attention.k_norm.weight"], config.rms_norm_eps)
+            q = rope(q, positions, self._inv_freq).numpy()
+            k = rope(k, positions, self._inv_freq).numpy()
             v = v.numpy().reshape(count, config.kv_heads, config.head_dim)
             attended = []
             for (_, start, cache), lo, hi in zip(segments, bounds[:-1], bounds[1:], strict=True):
@@ -309,8 +313,12 @@ class Transformer:
             q = cuda.linear(h, w[p + "attention.q.weight"], w.get(p + "attention.q.bias"))
             k = cuda.linear(h, w[p + "attention.k.weight"], w.get(p + "attention.k.bias"))
             v = cuda.linear(h, w[p + "attention.v.weight"], w.get(p + "attention.v.bias"))
-            q = cuda.rope(q.reshape(count, config.heads, config.head_dim), on_gpu_positions, self._gpu_inv_freq)
-            k = cuda.rope(k.reshape(count, config.kv_heads, config.head_dim), on_gpu_positions, self._gpu_inv_freq)
+            q, k = q.reshape(count, config.heads, config.head_dim), k.reshape(count, config.kv_heads, config.head_dim)
+            if config.qk_norm:
+                q = cuda.rms_norm(q, w[p + "attention.q_norm.weight"], config.rms_norm_eps)
+                k = cuda.rms_norm(k, w[p + "attention.k_norm.weight"], config.rms_norm_eps)
+            q = cuda.rope(q, on_gpu_positions, self._gpu_inv_freq)
+            k = cuda.rope(k, on_gpu_positions, self._gpu_inv_freq)
             v = v.reshape(count, config.kv_heads, config.head_dim)
             parts = []
             for (_, start, cache), lo, hi in zip(segments, bounds[:-1], bounds[1:], strict=True):

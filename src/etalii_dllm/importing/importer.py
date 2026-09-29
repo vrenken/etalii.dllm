@@ -67,6 +67,8 @@ _HF_LAYER_NAMES = {
     "self_attn.q_proj.bias": "attention.q.bias",
     "self_attn.k_proj.bias": "attention.k.bias",
     "self_attn.v_proj.bias": "attention.v.bias",
+    "self_attn.q_norm.weight": "attention.q_norm.weight",
+    "self_attn.k_norm.weight": "attention.k_norm.weight",
     "mlp.gate_proj.weight": "mlp.gate.weight",
     "mlp.up_proj.weight": "mlp.up.weight",
     "mlp.down_proj.weight": "mlp.down.weight",
@@ -109,15 +111,15 @@ def _rope_from_hf(config: dict[str, Any]) -> tuple[float, dict[str, Any] | None]
 
 
 def hf_config(config: dict[str, Any], generation: dict[str, Any] | None = None) -> TransformerConfig:
-    """Maps a Hugging Face ``config.json`` (Llama or Qwen2) to our description."""
+    """Maps a Hugging Face ``config.json`` (Llama, Qwen2 or Qwen3) to our description."""
     family = config.get("model_type")
-    if family not in ("llama", "qwen2"):
-        raise ModelImportError(f"model_type {family!r} is not supported (supported: llama, qwen2)")
+    if family not in ("llama", "qwen2", "qwen3"):
+        raise ModelImportError(f"model_type {family!r} is not supported (supported: llama, qwen2, qwen3)")
     if config.get("hidden_act", "silu") != "silu":
         raise ModelImportError(f"activation {config.get('hidden_act')!r} is not supported")
     if config.get("mlp_bias"):
         raise ModelImportError("MLP biases are not supported")
-    if family == "qwen2" and config.get("use_sliding_window"):
+    if family in ("qwen2", "qwen3") and config.get("use_sliding_window"):
         raise ModelImportError("sliding-window attention is not supported")
     heads = int(config["num_attention_heads"])
     hidden = int(config["hidden_size"])
@@ -141,6 +143,7 @@ def hf_config(config: dict[str, Any], generation: dict[str, Any] | None = None) 
         rope_theta=theta,
         rope_scaling=scaling,
         attention_bias=family == "qwen2" or bool(config.get("attention_bias", False)),
+        qk_norm=family == "qwen3",
         tie_word_embeddings=bool(config.get("tie_word_embeddings", False)),
         bos_token_id=None if bos is None else int(bos),
         eos_token_ids=tuple(eos),
@@ -267,6 +270,8 @@ _GGUF_LAYER_NAMES = {
     "attn_q.bias": "attention.q.bias",
     "attn_k.bias": "attention.k.bias",
     "attn_v.bias": "attention.v.bias",
+    "attn_q_norm.weight": "attention.q_norm.weight",
+    "attn_k_norm.weight": "attention.k_norm.weight",
     "ffn_gate.weight": "mlp.gate.weight",
     "ffn_up.weight": "mlp.up.weight",
     "ffn_down.weight": "mlp.down.weight",
@@ -300,8 +305,8 @@ def unpermute_rotary(weight: np.ndarray, heads: int) -> np.ndarray:
 def gguf_config(gguf: GgufFile) -> TransformerConfig:
     metadata = gguf.metadata
     family = metadata.get("general.architecture")
-    if family not in ("llama", "qwen2"):
-        raise ModelImportError(f"GGUF architecture {family!r} is not supported (supported: llama, qwen2)")
+    if family not in ("llama", "qwen2", "qwen3"):
+        raise ModelImportError(f"GGUF architecture {family!r} is not supported (supported: llama, qwen2, qwen3)")
 
     def key(name: str, default: Any = None) -> Any:
         value = metadata.get(f"{family}.{name}", default)
@@ -343,6 +348,7 @@ def gguf_config(gguf: GgufFile) -> TransformerConfig:
         rope_theta=float(key("rope.freq_base", 10000.0)),
         rope_scaling=scaling,
         attention_bias=family == "qwen2" or "blk.0.attn_q.bias" in gguf,
+        qk_norm=family == "qwen3",
         tie_word_embeddings="output.weight" not in gguf,
         bos_token_id=None if bos is None else int(bos),
         eos_token_ids=tuple(eos),

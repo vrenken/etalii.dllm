@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import pytest
 from golden_values import KERNEL_FINGERPRINTS, TINY_LOGITS_FINGERPRINT
-from model_fixtures import TINY_LLAMA_CONFIG, write_hf_checkpoint
+from model_fixtures import TINY_LLAMA_CONFIG, tiny_config, write_hf_checkpoint
 
 from etalii_dllm import _kernels, cuda, numerics
 from etalii_dllm import engine as engine_module
@@ -226,12 +226,10 @@ def test_concurrent_gpu_calls_match_serial_ones():
 PROMPT = [1, 17, 42, 5, 63, 0, 9, 9, 30]
 
 
-@pytest.fixture(scope="module", params=["llama", "qwen2"])
+@pytest.fixture(scope="module", params=["llama", "qwen2", "qwen3"])
 def tiny_model_path(request, tmp_path_factory):
     directory = tmp_path_factory.mktemp(f"cuda-{request.param}")
-    config = {**TINY_LLAMA_CONFIG, "model_type": request.param}
-    if request.param == "qwen2":
-        config["tie_word_embeddings"] = False
+    config = tiny_config(request.param)
     write_hf_checkpoint(directory / "checkpoint", config)
     import_model(directory / "checkpoint", directory / "model.dllm")
     return directory / "model.dllm"
