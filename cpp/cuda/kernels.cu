@@ -255,12 +255,18 @@ extern "C" __global__ void quantize_q8(const float* x, signed char* q, float* sc
     }
 }
 
-// The decoder's float32 elementwise steps: the SwiGLU product float(silu(gate)) * up and the residual addition.
-extern "C" __global__ void swiglu(const float* gate, const float* up, float* out, u64 n) {
+// The decoder's float32 elementwise steps: the gated product float(act(gate)) * up (kind 0 silu, 2 gelu_tanh, as
+// activation above) and the residual addition.
+extern "C" __global__ void swiglu(const float* gate, const float* up, float* out, u64 n, int kind) {
     for (u64 i = thread_index(); i < n; i += thread_stride()) {
         const double d = gate[i];
-        const float s = static_cast<float>(d * dllm::sigmoid(d));
-        out[i] = s * up[i];
+        double y;
+        if (kind == 0) {
+            y = d * dllm::sigmoid(d);
+        } else {
+            y = 0.5 * d * (1.0 + dllm::tanh(7.97884560802865355879e-01 * (d + 0.044715 * d * d * d)));
+        }
+        out[i] = static_cast<float>(y) * up[i];
     }
 }
 

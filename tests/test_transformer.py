@@ -22,21 +22,34 @@ def reference_logits(config: TransformerConfig, w: dict[str, np.ndarray], tokens
     reductions are fine here because this is the yardstick, not the engine)."""
     w = {name: np.asarray(values, dtype=np.float64) for name, values in w.items()}
     n, hd, rd = len(tokens), config.head_dim, config.rotary_dimension
-    inv_freq = config.rope_theta ** (-np.arange(0, rd, 2, dtype=np.float64) / rd)
-    if config.rope_scaling and config.rope_scaling["rope_type"] == "longrope":
-        inv_freq = inv_freq / np.array(config.rope_scaling["short_factor"])
-    angles = np.arange(n, dtype=np.float64)[:, None] * inv_freq[None, :]
-    factor = config.rope_attention_factor
-    cos, sin = np.cos(np.concatenate([angles, angles], 1)), np.sin(np.concatenate([angles, angles], 1))
-    cos, sin = cos * factor, sin * factor
+
+    def tables(theta, scaling):
+        inv_freq = theta ** (-np.arange(0, rd, 2, dtype=np.float64) / rd)
+        if scaling and scaling["rope_type"] == "longrope":
+            inv_freq = inv_freq / np.array(scaling["short_factor"])
+        elif scaling and scaling["rope_type"] == "linear":
+            inv_freq = inv_freq / scaling["factor"]
+        angles = np.arange(n, dtype=np.float64)[:, None] * inv_freq[None, :]
+        factor = config.rope_attention_factor
+        angles = np.concatenate([angles, angles], 1)
+        return np.cos(angles) * factor, np.sin(angles) * factor
+
+    global_tables = tables(config.rope_theta, config.rope_scaling)
+    local_tables = tables(config.local_rope_theta, None) if config.local_rope_theta else global_tables
+    offset = 1.0 if config.norm_unit_offset else 0.0
 
     def norm(x, weight):
-        return x / np.sqrt(np.mean(x * x, axis=-1, keepdims=True) + config.rms_norm_eps) * weight
+        return x / np.sqrt(np.mean(x * x, axis=-1, keepdims=True) + config.rms_norm_eps) * (offset + weight)
 
-    def rotate(x):  # x: [n, heads, hd]; only the first rd dimensions rotate
+    def rotate(x, cos, sin):  # x: [n, heads, hd]; only the first rd dimensions rotate
         r, rest = x[..., :rd], x[..., rd:]
         half = np.concatenate([-r[..., rd // 2 :], r[..., : rd // 2]], axis=-1)
         return np.concatenate([r * cos[:, None, :] + half * sin[:, None, :], rest], axis=-1)
+
+    def act(gate):
+        if config.activation == "gelu_tanh":
+            return 0.5 * gate * (1 + np.tanh(np.sqrt(2 / np.pi) * (gate + 0.044715 * gate**3)))
+        return gate / (1 + np.exp(-gate))
 
     def proj(x, name):
         out = x @ w[name + ".weight"].T
@@ -49,15 +62,16 @@ def reference_logits(config: TransformerConfig, w: dict[str, np.ndarray], tokens
         window = config.window(i)
         layer_mask = mask if window is None else mask + np.tril(np.full((n, n), -np.inf), -window)
         p = f"layers.{i}."
-        post = config.norm_placement == "post"
-        h = x if post else norm(x, w[p + "attention_norm.weight"])
+        pre, post = config.has_pre_norms, config.has_post_norms
+        h = norm(x, w[p + "attention_norm.weight"]) if pre else x
         q, k = proj(h, p + "attention.q"), proj(h, p + "attention.k")
         if config.qk_norm and config.qk_norm_scope == "all":
             q, k = norm(q, w[p + "attention.q_norm.weight"]), norm(k, w[p + "attention.k_norm.weight"])
         q, k = q.reshape(n, config.heads, hd), k.reshape(n, config.kv_heads, hd)
         if config.qk_norm and config.qk_norm_scope == "head":
             q, k = norm(q, w[p + "attention.q_norm.weight"]), norm(k, w[p + "attention.k_norm.weight"])
-        q, k = rotate(q), rotate(k)
+        cos, sin = local_tables if config.uses_local_rope(i) else global_tables
+        q, k = rotate(q, cos, sin), rotate(k, cos, sin)
         v = proj(h, p + "attention.v").reshape(n, config.kv_heads, hd)
         out = np.empty((n, config.heads, hd))
         for head in range(config.heads):
@@ -66,16 +80,16 @@ def reference_logits(config: TransformerConfig, w: dict[str, np.ndarray], tokens
             out[:, head] = (probs / probs.sum(-1, keepdims=True)) @ v[:, head // group]
         attended = out.reshape(n, -1) @ w[p + "attention.o.weight"].T * config.residual_multiplier
         x = x + (norm(attended, w[p + "attention_post_norm.weight"]) if post else attended)
-        h = x if post else norm(x, w[p + "mlp_norm.weight"])
+        h = norm(x, w[p + "mlp_norm.weight"]) if pre else x
         gate = h @ w[p + "mlp.gate.weight"].T
-        mlp = (gate / (1 + np.exp(-gate)) * (h @ w[p + "mlp.up.weight"].T)) @ w[p + "mlp.down.weight"].T
+        mlp = (act(gate) * (h @ w[p + "mlp.up.weight"].T)) @ w[p + "mlp.down.weight"].T
         mlp = mlp * config.residual_multiplier
         x = x + (norm(mlp, w[p + "mlp_post_norm.weight"]) if post else mlp)
     head = w["token_embedding.weight"] if config.tie_word_embeddings else w["lm_head.weight"]
     return norm(x, w["final_norm.weight"])[-1] @ head.T / config.logits_scaling
 
 
-@pytest.fixture(scope="module", params=["granite", "llama", "mistral", "olmo2", "phi3", "qwen2", "qwen3"])
+@pytest.fixture(scope="module", params=["gemma3", "granite", "llama", "mistral", "olmo2", "phi3", "qwen2", "qwen3"])
 def model(request, tmp_path_factory) -> Transformer:
     directory = tmp_path_factory.mktemp(request.param)
     config = tiny_config(request.param)
