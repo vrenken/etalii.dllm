@@ -87,9 +87,9 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "import": "c34b4666335e7e0dbe110ee9b9fc78936b84391a57a420688fd78036ad6df5b7",
         "chat": "109ee1a8513bf1dad8a34b0483a0f3045fe18cbf7c03820e4e359cc20912201c",
     },
-    "tinyllama": {  # values from the Reference models workflow
-        "import": "",
-        "chat": "",
+    "tinyllama": {
+        "import": "b02b4f3085396f3a0b20e07f5b875c9e4a0fbf996dcbc954953bc7d7346b4a4e",
+        "chat": "12608d6f03ed2ea7892990ed181b39a3d0df693637f168ca34008af1403d4bc3",
     },
     "olmo2": {  # values from the Reference models workflow
         "import": "",
