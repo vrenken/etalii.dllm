@@ -76,7 +76,7 @@ source_pkgs = ["etalii_dllm"]
 branch = true
 
 [tool.coverage.report]
-fail_under = 92
+fail_under = 96
 show_missing = true
 skip_covered = true
 exclude_also = ["if TYPE_CHECKING:", "if __name__ == .__main__.:", "raise NotImplementedError"]
