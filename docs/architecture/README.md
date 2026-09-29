@@ -9,7 +9,7 @@ these pages explain the structure around them and link there for detail.
 | Document | What it covers | Status |
 | --- | --- | --- |
 | Overview (this page) | System context, layers, module map, the one rule every layer follows | ✅ |
-| Determinism by design | Every source of nondeterminism and the layer that removes it | planned ([#64](https://github.com/vrenken/etalii.dllm/issues/64)) |
+| [Determinism by design](determinism.md) | Every source of nondeterminism and the layer that removes it | ✅ |
 | Inference pipeline | One chat request from messages to token stream | planned ([#65](https://github.com/vrenken/etalii.dllm/issues/65)) |
 | Kernels and compute backends | The C++ layer, SIMD and thread dispatch, CUDA | planned ([#66](https://github.com/vrenken/etalii.dllm/issues/66)) |
 | Model import and format | From safetensors/GGUF to `model.dllm` to a running decoder | planned ([#67](https://github.com/vrenken/etalii.dllm/issues/67)) |
