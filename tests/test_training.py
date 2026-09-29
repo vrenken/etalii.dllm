@@ -437,3 +437,5 @@ def test_architectures_without_a_backward_pass_are_refused():
         DecoderGradients(hf_config(tiny_config("phi3")))
     with pytest.raises(ValueError, match="gemma3"):
         DecoderGradients(hf_config(tiny_config("gemma3")))
+    with pytest.raises(ValueError, match="gemma2"):  # the soft-caps
+        DecoderGradients(hf_config(tiny_config("gemma2")))

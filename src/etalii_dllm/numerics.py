@@ -311,13 +311,15 @@ def attention(
     causal: bool = True,
     q_offset: int | None = None,
     window: int | None = None,
+    softcap: float | None = None,
     device: str = "cpu",
 ) -> Tensor:
     """Scaled dot-product attention over ``[length, heads, dim]`` tensors with grouped-query heads.
 
     ``scale`` defaults to ``1 / sqrt(head_dim)``. With ``causal``, query ``t`` sits at position ``q_offset + t``
     (default ``kv_len - q_len``, i.e. the queries are the last tokens of the KV cache) and sees keys up to it; a
-    ``window`` (sliding-window attention) limits that to the last ``window`` keys, itself included.
+    ``window`` (sliding-window attention) limits that to the last ``window`` keys, itself included. A ``softcap``
+    (Gemma 2) maps each scaled score ``s`` to ``softcap * tanh(s / softcap)`` before the softmax.
     Each output row is computed independently in a fixed order, so prefill and incremental decoding agree bit for bit.
     """
     qa, ka, va = _float32(q), _float32(k), _float32(v)
@@ -326,6 +328,8 @@ def attention(
     if q_offset is not None and q_offset < 0:
         raise ValueError("q_offset must be non-negative")
     s = 1.0 / math.sqrt(qa.shape[2]) if scale is None else float(scale)
+    if softcap is not None and not softcap > 0:
+        raise ValueError("softcap must be positive")
     if _gpu(device):
         if ka.ndim != 3 or va.ndim != 3 or va.shape[0] != ka.shape[0] or ka.shape[2] != qa.shape[2]:
             raise ValueError("q, k and v must be [length, heads, dim] with matching lengths and head_dim")
@@ -341,9 +345,16 @@ def attention(
             causal=causal,
             q_offset=offset,
             window=window,
+            softcap=softcap,
         )
         return Tensor(on_gpu.numpy())
-    return Tensor(_kernels.attention(qa, ka, va, s, causal, -1 if q_offset is None else q_offset, _window(window)))
+    offset = -1 if q_offset is None else q_offset
+    return Tensor(_kernels.attention(qa, ka, va, s, causal, offset, _window(window), softcap or 0.0))
+
+
+def softcap(x: npt.ArrayLike | Tensor, cap: float) -> Tensor:
+    """Logit soft-capping (Gemma 2): ``cap * tanh(x / cap)`` elementwise, in double from dllm ``tanh``."""
+    return Tensor(_kernels.softcap(_float32(x), float(cap)))
 
 
 def _window(window: int | None) -> int:

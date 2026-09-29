@@ -75,7 +75,10 @@ def reference_logits(config: TransformerConfig, w: dict[str, np.ndarray], tokens
         v = proj(h, p + "attention.v").reshape(n, config.kv_heads, hd)
         out = np.empty((n, config.heads, hd))
         for head in range(config.heads):
-            scores = q[:, head] @ k[:, head // group].T * config.attention_scale + layer_mask
+            scores = q[:, head] @ k[:, head // group].T * config.attention_scale
+            if config.attention_softcap:
+                scores = config.attention_softcap * np.tanh(scores / config.attention_softcap)
+            scores = scores + layer_mask
             probs = np.exp(scores - scores.max(-1, keepdims=True))
             out[:, head] = (probs / probs.sum(-1, keepdims=True)) @ v[:, head // group]
         attended = out.reshape(n, -1) @ w[p + "attention.o.weight"].T * config.residual_multiplier
@@ -86,10 +89,15 @@ def reference_logits(config: TransformerConfig, w: dict[str, np.ndarray], tokens
         mlp = mlp * config.residual_multiplier
         x = x + (norm(mlp, w[p + "mlp_post_norm.weight"]) if post else mlp)
     head = w["token_embedding.weight"] if config.tie_word_embeddings else w["lm_head.weight"]
-    return norm(x, w["final_norm.weight"])[-1] @ head.T / config.logits_scaling
+    logits = norm(x, w["final_norm.weight"])[-1] @ head.T / config.logits_scaling
+    if config.logits_softcap:
+        logits = config.logits_softcap * np.tanh(logits / config.logits_softcap)
+    return logits
 
 
-@pytest.fixture(scope="module", params=["gemma3", "granite", "llama", "mistral", "olmo2", "phi3", "qwen2", "qwen3"])
+@pytest.fixture(
+    scope="module", params=["gemma2", "gemma3", "granite", "llama", "mistral", "olmo2", "phi3", "qwen2", "qwen3"]
+)
 def model(request, tmp_path_factory) -> Transformer:
     directory = tmp_path_factory.mktemp(request.param)
     config = tiny_config(request.param)

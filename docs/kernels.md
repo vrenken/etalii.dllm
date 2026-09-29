@@ -57,6 +57,7 @@ uses the first, API `logprobs` the second.
   eps)` (IEEE `sqrt` is correctly rounded), `out = x * inv * w` (or `* (1 + w)` for Gemma), rounded once.
 - **`silu`**: `x * sigmoid(x)`. **`gelu`**: exact `0.5 x (1 + erf(x / sqrt 2))` (evaluated as `0.5 x erfc(-x / sqrt 2)` so the negative tail does not cancel), or with `approximate="tanh"` the
   GPT-2 form. All elementwise in double, rounded once.
+- **`softcap(x, cap)`**: `cap * tanh(x / cap)` in double, rounded once (Gemma 2's final logits).
 
 ## RoPE
 
@@ -72,7 +73,7 @@ uses the first, API `logprobs` the second.
 
 ## Attention
 
-`attention(q, k, v, scale, causal, q_offset, window)` with `q[q_len, q_heads, d]`, `k[kv_len, kv_heads, d]`,
+`attention(q, k, v, scale, causal, q_offset, window, softcap)` with `q[q_len, q_heads, d]`, `k[kv_len, kv_heads, d]`,
 `v[kv_len, kv_heads, dv]`. Query head `h` uses key/value head `h / (q_heads / kv_heads)` (MHA, GQA and MQA). With
 `causal`, query `t` is at position `q_offset + t` (default `kv_len - q_len`) and sees keys `0 ..= q_offset + t`. A
 non-zero `window` (sliding-window attention, Mistral) keeps only the last `window` of those keys,
@@ -81,7 +82,8 @@ exactly plain attention over those keys.
 
 For each (query, head), independently:
 
-1. scores `s_j = (sum_i q_i k_ji) * scale`, dot over `i` ascending, kept in double;
+1. scores `s_j = (sum_i q_i k_ji) * scale`, dot over `i` ascending, kept in double; with a positive `softcap`
+   (Gemma 2), `s_j = softcap * tanh(s_j / softcap)` with `math.hpp`'s `tanh`, still in double;
 2. `m = max_j s_j`; `p_j = exp(s_j - m)`; `Z = sum_j p_j` over `j` ascending;
 3. `out_i = (sum_j p_j v_ji) / Z`, the sum over `j` ascending, rounded once.
 

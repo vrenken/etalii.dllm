@@ -150,10 +150,11 @@ extern "C" __global__ void rope(const float* x, const long long* positions, cons
 // Attention: one block per (query, head) row, rows [row0, row0 + gridDim.x). Scores are one thread per key (each its
 // own dot product over head_dim ascending); the maximum and the softmax total are taken by thread 0 over the keys
 // ascending; the output is one thread per value dimension, summing over the keys ascending. scratch holds
-// kv_len doubles per block. A non-zero window keeps only the last `window` visible keys (sliding-window attention).
+// kv_len doubles per block. A non-zero window keeps only the last `window` visible keys (sliding-window attention); a
+// positive softcap maps each scaled score s to softcap * tanh(s / softcap), as the CPU kernel.
 extern "C" __global__ void attention(const float* q, const float* k, const float* v, float* out, double* scratch,
                                      u64 row0, u64 kv_len, u64 q_heads, u64 kv_heads, u64 head_dim, u64 value_dim,
-                                     double scale, int causal, u64 q_offset, u64 window) {
+                                     double scale, int causal, u64 q_offset, u64 window, double softcap) {
     __shared__ double max_score;
     __shared__ double inv_total;
     const u64 row = row0 + blockIdx.x;
@@ -184,7 +185,11 @@ extern "C" __global__ void attention(const float* q, const float* k, const float
         for (u64 i = 0; i < head_dim; ++i) {
             dot += static_cast<double>(qh[i]) * static_cast<double>(kj[i]);
         }
-        scores[j] = dot * scale;
+        double score = dot * scale;
+        if (softcap > 0.0) {
+            score = softcap * dllm::tanh(score / softcap);
+        }
+        scores[j] = score;
     }
     __syncthreads();
     if (threadIdx.x == 0) {

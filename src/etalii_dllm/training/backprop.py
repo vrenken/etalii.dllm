@@ -52,6 +52,8 @@ class DecoderGradients:
             or config.norm_unit_offset
             or config.activation != "silu"
             or config.local_rope_theta is not None
+            or config.attention_softcap is not None
+            or config.logits_softcap is not None
         ):
             raise ValueError(f"fine-tuning is not supported for the {config.family} architecture yet")
         self.config = config

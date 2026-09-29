@@ -562,12 +562,31 @@ def test_gemma3_configs_are_mapped():
     assert config.local_rope_theta == 10_000.0 and config.tie_word_embeddings and config.sliding_window_layers is None
 
 
+def test_gemma2_configs_are_mapped():
+    from etalii_dllm.importing.importer import hf_config
+
+    config = hf_config(tiny_config("gemma2"))
+    assert (config.family, config.norm_placement, config.norm_unit_offset, config.activation) == (
+        "gemma2",
+        "sandwich",
+        True,
+        "gelu_tanh",
+    )
+    assert (config.attention_softcap, config.logits_softcap) == (0.02, 0.05)
+    assert not config.qk_norm and config.tie_word_embeddings and config.local_rope_theta is None
+    assert config.embedding_multiplier == 4.0 and config.attention_multiplier == 12**-0.5
+    # Without layer_types Gemma 2 alternates: even layers slide.
+    plain = {k: v for k, v in tiny_config("gemma2").items() if k != "layer_types"}
+    plain.update(num_hidden_layers=4, attn_logit_softcapping=None, final_logit_softcapping=None)
+    config = hf_config(plain)
+    assert config.sliding_window_layers == (0, 2) and config.attention_softcap is None
+    assert "attention_softcap" not in config.to_dict() and "logits_softcap" not in config.to_dict()
+
+
 @pytest.mark.parametrize(
     ("change", "message"),
     [
         ({"model_type": "gemma3"}, "import the text-only Gemma 3 checkpoint"),
-        ({"attn_logit_softcapping": 50.0}, "attn_logit_softcapping is not supported yet"),
-        ({"final_logit_softcapping": 30.0}, "final_logit_softcapping is not supported yet"),
         ({"hidden_activation": "gelu"}, "activation 'gelu' is not supported"),
         (
             {"rope_parameters": {"full_attention": {}, "sliding_attention": {"rope_type": "linear", "factor": 2.0}}},
