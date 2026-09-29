@@ -26,6 +26,8 @@ dev = [
   "pytest>=8", "httpx>=0.27", "ruff>=0.6", "gguf>=0.17", "safetensors>=0.4", "tokenizers>=0.20",
   "openai>=1.60", "anthropic>=0.60", "jsonschema>=4.20",
 ]
+# NVRTC, the CUDA runtime compiler the GPU backend needs (--device cuda); the NVIDIA driver provides the rest.
+cuda = ["nvidia-cuda-nvrtc-cu12>=12.1"]
 # Hugging Face transformers as the reference the imported models are compared with (tests/test_reference_models.py).
 reference = ["torch>=2.4", "transformers>=4.50"]
 

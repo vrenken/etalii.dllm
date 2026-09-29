@@ -15,7 +15,8 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
-from etalii_dllm import _kernels
+from etalii_dllm import _kernels, cuda
+from etalii_dllm.cuda import CudaQuantizedWeight, CudaTensor, CudaWeight
 from etalii_dllm.tensor import Tensor
 
 DeterministicRandom = _kernels.Random
@@ -121,14 +122,27 @@ class QuantizedWeight:
         return self.values.astype(np.float32) * np.repeat(self.scales, 32, axis=1)
 
 
+def _gpu(device: str) -> bool:
+    """Whether ``device`` is the GPU; validates the name."""
+    if device == "cpu":
+        return False
+    if device == "cuda":
+        return True
+    raise ValueError(f"unknown device {device!r}; supported: {', '.join(cuda.DEVICES)}")
+
+
 def linear(
     x: npt.ArrayLike | Tensor,
-    weight: npt.ArrayLike | Tensor | PackedWeight | QuantizedWeight,
+    weight: npt.ArrayLike | Tensor | PackedWeight | QuantizedWeight | CudaWeight | CudaQuantizedWeight,
     bias: npt.ArrayLike | Tensor | None = None,
 ) -> Tensor:
     """``x[..., in] @ weight[out, in]^T + bias``. Each output is summed over ``in`` ascending in double; plain and
-    packed weights give identical bits, on any number of threads. A :class:`QuantizedWeight` runs the Q8_0 kernel."""
+    packed weights give identical bits, on any number of threads. A :class:`QuantizedWeight` runs the Q8_0 kernel.
+    :class:`CudaWeight` and :class:`CudaQuantizedWeight` run the same kernels on the GPU, with the same bits."""
     b = None if bias is None else _float32(bias)
+    if isinstance(weight, CudaWeight | CudaQuantizedWeight):
+        on_gpu = cuda.linear(CudaTensor.upload(_float32(x)), weight, None if b is None else CudaTensor.upload(b))
+        return Tensor(on_gpu.numpy())
     if isinstance(weight, PackedWeight):
         return Tensor(_kernels.linear_packed(_float32(x), weight.data, weight.out_features, b))
     if isinstance(weight, QuantizedWeight):
@@ -165,24 +179,39 @@ def rms_norm(
     eps: float = 1e-6,
     *,
     add_unit_offset: bool = False,
+    device: str = "cpu",
 ) -> Tensor:
-    """RMSNorm over the last dimension; ``add_unit_offset`` scales by ``1 + weight`` (Gemma)."""
+    """RMSNorm over the last dimension; ``add_unit_offset`` scales by ``1 + weight`` (Gemma). ``device="cuda"``
+    runs it on the GPU, with the same bits (as for every kernel below)."""
     w = None if weight is None else _float32(weight)
+    if _gpu(device):
+        on_gpu = cuda.rms_norm(
+            CudaTensor.upload(_float32(x)),
+            None if w is None else CudaTensor.upload(w),
+            eps,
+            add_unit_offset=add_unit_offset,
+        )
+        return Tensor(on_gpu.numpy())
     return Tensor(_kernels.rms_norm(_float32(x), w, eps, add_unit_offset))
 
 
-def silu(x: npt.ArrayLike | Tensor) -> Tensor:
+def silu(x: npt.ArrayLike | Tensor, *, device: str = "cpu") -> Tensor:
     """Elementwise ``x * sigmoid(x)``."""
+    if _gpu(device):
+        return Tensor(cuda.activation(CudaTensor.upload(_float32(x)), "silu").numpy())
     return Tensor(_kernels.silu(_float32(x)))
 
 
-def gelu(x: npt.ArrayLike | Tensor, *, approximate: str = "none") -> Tensor:
+def gelu(x: npt.ArrayLike | Tensor, *, approximate: str = "none", device: str = "cpu") -> Tensor:
     """Elementwise GELU; ``approximate="tanh"`` gives the tanh form used by GPT-2 and Gemma."""
+    if approximate not in ("none", "tanh"):
+        raise ValueError(f"unknown GELU approximation {approximate!r}")
+    if _gpu(device):
+        kind = "gelu" if approximate == "none" else "gelu_tanh"
+        return Tensor(cuda.activation(CudaTensor.upload(_float32(x)), kind).numpy())
     if approximate == "none":
         return Tensor(_kernels.gelu(_float32(x)))
-    if approximate == "tanh":
-        return Tensor(_kernels.gelu_tanh(_float32(x)))
-    raise ValueError(f"unknown GELU approximation {approximate!r}")
+    return Tensor(_kernels.gelu_tanh(_float32(x)))
 
 
 def rope_inv_freq(
@@ -239,6 +268,7 @@ def rope(
     *,
     interleaved: bool = False,
     inverse: bool = False,
+    device: str = "cpu",
 ) -> Tensor:
     """Rotary position embedding of ``x[tokens, heads, head_dim]`` at absolute ``positions``.
 
@@ -248,6 +278,20 @@ def rope(
     """
     pos = np.ascontiguousarray(positions, dtype=np.int64)
     freqs = np.ascontiguousarray(inv_freq, dtype=np.float64)
+    if _gpu(device):
+        xa = _float32(x)
+        if xa.ndim != 3 or len(pos) != xa.shape[0] or 2 * len(freqs) > xa.shape[2]:
+            raise ValueError(
+                "rope needs x[tokens, heads, head_dim], one position per token, 2 * len(inv_freq) <= head_dim"
+            )
+        on_gpu = cuda.rope(
+            CudaTensor.upload(xa),
+            cuda.upload_raw(pos),
+            cuda.upload_raw(freqs),
+            interleaved=interleaved,
+            inverse=inverse,
+        )
+        return Tensor(on_gpu.numpy())
     return Tensor(_kernels.rope(_float32(x), pos, freqs, interleaved, inverse))
 
 
@@ -259,6 +303,7 @@ def attention(
     scale: float | None = None,
     causal: bool = True,
     q_offset: int | None = None,
+    device: str = "cpu",
 ) -> Tensor:
     """Scaled dot-product attention over ``[length, heads, dim]`` tensors with grouped-query heads.
 
@@ -272,6 +317,22 @@ def attention(
     if q_offset is not None and q_offset < 0:
         raise ValueError("q_offset must be non-negative")
     s = 1.0 / math.sqrt(qa.shape[2]) if scale is None else float(scale)
+    if _gpu(device):
+        if ka.ndim != 3 or va.ndim != 3 or va.shape[0] != ka.shape[0] or ka.shape[2] != qa.shape[2]:
+            raise ValueError("q, k and v must be [length, heads, dim] with matching lengths and head_dim")
+        offset = ka.shape[0] - qa.shape[0] if q_offset is None else q_offset
+        if offset < 0:
+            raise ValueError("q_offset must be non-negative")
+        on_gpu = cuda.attention(
+            CudaTensor.upload(qa),
+            CudaTensor.upload(ka),
+            CudaTensor.upload(va),
+            kv_len=ka.shape[0],
+            scale=s,
+            causal=causal,
+            q_offset=offset,
+        )
+        return Tensor(on_gpu.numpy())
     return Tensor(_kernels.attention(qa, ka, va, s, causal, -1 if q_offset is None else q_offset))
 
 

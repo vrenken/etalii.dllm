@@ -25,6 +25,7 @@ import pytest
 from golden_values import REFERENCE_MODEL_FINGERPRINTS
 from model_fixtures import TINY_LLAMA_CONFIG, write_hf_checkpoint
 
+from etalii_dllm import cuda
 from etalii_dllm.bpe import BpeTokenizer, special_token_text
 from etalii_dllm.chat_template import ChatTemplate
 from etalii_dllm.engine import DllmEngine
@@ -262,6 +263,15 @@ def test_greedy_chat_matches_reference(model_key, imported, reference):
         expected = expected[:-1]
     assert list(generated.tokens) == expected
     assert "Paris" in generated.text
+    assert generated.fingerprint == REFERENCE_MODEL_FINGERPRINTS[model_key]["chat"]
+
+
+@pytest.mark.skipif(not cuda.available(), reason="needs an NVIDIA GPU and NVRTC")
+def test_greedy_chat_on_the_gpu_gives_the_golden_answer(model_key, imported):
+    """Issue #31: the GPU reproduces the CPU bits, so the golden answer does not depend on the device."""
+    _, result = imported
+    engine = DllmEngine.from_model_file(result.path, device="cuda")
+    generated = engine.complete(engine.chat_template.render(CHAT), GENERATED_TOKENS, GREEDY)
     assert generated.fingerprint == REFERENCE_MODEL_FINGERPRINTS[model_key]["chat"]
 
 

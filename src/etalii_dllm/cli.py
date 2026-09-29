@@ -7,6 +7,7 @@ import json
 import sys
 from pathlib import Path
 
+from etalii_dllm import cuda
 from etalii_dllm.chat import ChatMessage
 from etalii_dllm.engine import (
     ChatRequest,
@@ -201,12 +202,19 @@ def main(argv: list[str] | None = None) -> int:
         return _import(args)
     if args.command == "inspect":
         return _inspect(args)
-    use_model_file(args.model, args.quantize, args.threads)
-    engine = default_engine()
+    use_model_file(args.model, args.quantize, args.threads, args.device)
+    try:
+        engine = default_engine()
+    except cuda.CudaUnavailableError as error:
+        print(f"dllm: --device cuda: {error}", file=sys.stderr)
+        return 1
 
     if args.command == "info":
         print(f"model:              {engine.model.id}")
         print(f"system_fingerprint: {engine.system_fingerprint}")
+        device = getattr(engine.model, "device", "cpu")
+        gpu = cuda.info() if device == "cuda" else None
+        print(f"device:             {device}" + (f" ({gpu.name}, {gpu.architecture}, {gpu.compiler})" if gpu else ""))
         return 0
 
     options = SamplingOptions(temperature=args.temperature, top_k=args.top_k, top_p=args.top_p, seed=args.seed)

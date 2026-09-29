@@ -5,6 +5,10 @@
 //    threads, batch size or the vector width of a BLAS library.
 //  - exp is built from + - * / only, so a C library update cannot shift results.
 //  - The extension is compiled with FMA contraction and fast-math disabled (see CMakeLists.txt).
+//
+// The CUDA backend compiles this file for the GPU as well (NVRTC with --fmad=false, see cuda.hpp): every function
+// then runs the same IEEE operations in the same order on the device and returns the same bits. Under NVRTC the
+// standard headers below are small shims supplied by cuda.hpp.
 #pragma once
 
 #include <cmath>
@@ -34,9 +38,11 @@ inline float dot(const float* a, const float* b, std::size_t n) {
 
 // Index of the largest value; ties resolve to the lowest index.
 inline std::size_t argmax(const float* values, std::size_t n) {
+#ifndef __CUDACC_RTC__
     if (n == 0) {
         throw std::invalid_argument("argmax of an empty array");
     }
+#endif
     std::size_t best = 0;
     for (std::size_t i = 1; i < n; ++i) {
         if (values[i] > values[best]) {

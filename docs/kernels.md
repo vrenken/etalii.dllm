@@ -136,9 +136,44 @@ whose input size is not a multiple of 32 stay float32. Embedding lookups stay fl
 
 ## GPU
 
-Not yet (issue #31). The design carries over: one GPU thread per output element running the documented order,
-no atomics and no split-K reductions, with `math.hpp` compiled for the device, would even reproduce the CPU bits.
-What is missing is hardware to prove it: neither the CI runners nor the cloud sessions have a GPU.
+`--device cuda` (or `DLLM_DEVICE=cuda`, `Transformer(..., device="cuda")`) runs the decoder on an NVIDIA GPU and
+**gives the CPU's bits**: the same logits, the same tokens and the same `system_fingerprint`, float32 or Q8_0. All
+golden hashes, including the real SmolLM2 and Qwen2.5 answers, are reproduced on the GPU (`tests/test_cuda.py`,
+`tests/test_reference_models.py`). Measured on an RTX 4080 (Windows, driver 616) against a 32-thread CPU:
+
+| | SmolLM2-135M, 64-token prompt | SmolLM2-135M, per token | Qwen2.5-0.5B, 64-token prompt | Qwen2.5-0.5B, per token |
+| --- | --- | --- | --- | --- |
+| CPU, float32 | 160 ms | 27 ms | 426 ms | 48 ms |
+| GPU, float32 | 70 ms | 17 ms | 202 ms | 25 ms |
+| CPU, Q8_0 | 165 ms | 22 ms | 353 ms | 25 ms |
+| GPU, Q8_0 | 133 ms | 8 ms | 201 ms | 9 ms |
+
+How it works:
+
+- **The same order.** `cpp/cuda/kernels.cu` has one kernel per CPU kernel, and each GPU thread computes whole output
+  elements with exactly the accumulation of the CPU kernel: `linear` sums over `k` ascending in double (one thread
+  per output, weights stored transposed so a warp reads consecutive words), attention computes each score in its own
+  thread and takes the maximum and the softmax total in one thread over the keys ascending, RMSNorm sums its squares
+  in one thread. There are no atomics, no split-K, no warp-shuffle reductions and no tensor cores, so nothing depends
+  on scheduling.
+- **The same arithmetic.** The kernels are compiled at run time by NVRTC with `--fmad=false` (no multiply-add
+  contraction), IEEE division and square root and no flush-to-zero. Double `+ - * /` and `sqrt` are then correctly
+  rounded on the GPU as on the CPU. The one explicit `fma` (in `linear`) multiplies two floats, whose product is
+  exact in double, so it rounds like the separate multiply and add. The transcendentals are `math.hpp` itself,
+  compiled for the device (it is built from `+ - * /` only), never CUDA's `exp` or `sin`.
+- **Q8_0** quantises the activations on the GPU with the same float operations as `quantize_q8_0` (explicit round
+  half to even); the block sums are exact int32 (`dp4a`) and the blocks are combined in double, ascending.
+- **Device-resident.** Weights are uploaded once; activations and the KV cache stay on the GPU; only the embedding
+  rows go up and the logits come back. Operations are queued on one stream without waiting (the download of the
+  logits waits), and callers on several threads take turns queueing, which cannot change any result.
+- **No CUDA at build time.** The extension loads the NVIDIA driver and NVRTC dynamically, so the same wheel builds
+  and runs everywhere; without a GPU `--device cuda` fails with a message saying what is missing.
+
+Double precision is slow on consumer GPUs (1/64 of float32 on the RTX 40 series), and the fixed per-output order
+leaves a GPU partly idle when a layer has few outputs, so this is far from the speed of a float32 GPU engine. It is
+still faster than the CPU, and much faster with Q8_0, where most of the work is exact integer arithmetic. Obvious
+next steps: tiling `linear` through shared memory for prompts, CUDA graphs to cut launch overhead, and sampling on
+the GPU.
 
 ## Gradients (`grad.hpp`)
 

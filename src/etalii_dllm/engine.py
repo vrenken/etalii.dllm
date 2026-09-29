@@ -23,6 +23,7 @@ import numpy as np
 from etalii_dllm import tools as tooling
 from etalii_dllm.chat import TOOL_CALL_OPEN, ChatMessage, ToolCall, render
 from etalii_dllm.chat_template import ChatTemplate
+from etalii_dllm.cuda import DEVICES
 from etalii_dllm.generation import Generation, GenerationResult, Generator, TokenLogprobs
 from etalii_dllm.grammar import Grammar, TokenConstraint, TokenTrie
 from etalii_dllm.models import BigramModel, LanguageModel
@@ -36,6 +37,8 @@ MODEL_ENVIRONMENT_VARIABLE = "DLLM_MODEL"
 """Path of a ``model.dllm`` file for the front ends to serve; the placeholder bigram model when unset."""
 QUANTIZE_ENVIRONMENT_VARIABLE = "DLLM_QUANTIZE"
 """Weight quantisation for the served model (``q8_0``); float32 weights when unset or ``none``."""
+DEVICE_ENVIRONMENT_VARIABLE = "DLLM_DEVICE"
+"""Where the served model runs: ``cpu`` (default) or ``cuda``. Never changes the output."""
 
 
 @dataclass(frozen=True)
@@ -152,10 +155,12 @@ class DllmEngine:
         self._trie: TokenTrie | None = None
 
     @staticmethod
-    def from_model_file(path: str | Path, verify: bool = True, quantize: str | None = None) -> DllmEngine:
+    def from_model_file(
+        path: str | Path, verify: bool = True, quantize: str | None = None, device: str = "cpu"
+    ) -> DllmEngine:
         """An engine for an imported ``model.dllm``: its decoder, BPE tokenizer and chat template. ``quantize``
         (``"q8_0"``) runs the linear layers on quantised weights; that changes the output, and so the
-        ``system_fingerprint``."""
+        ``system_fingerprint``. ``device="cuda"`` runs the decoder on the GPU with the same output."""
         from etalii_dllm.bpe import from_model_header, special_token_text
         from etalii_dllm.modelfile import ModelFile
         from etalii_dllm.transformer import Transformer
@@ -165,7 +170,12 @@ class DllmEngine:
             raise ValueError(f"{path}: the model file has no tokenizer")
         model_id = str(file.source.get("repository") or Path(path).stem)
         model = Transformer(
-            file.config, file.tensors, model_id=model_id, weights_fingerprint=file.fingerprint, quantize=quantize
+            file.config,
+            file.tensors,
+            model_id=model_id,
+            weights_fingerprint=file.fingerprint,
+            quantize=quantize,
+            device=device,
         )
         tokenizer = from_model_header(file.tokenizer)
         template = None
@@ -374,20 +384,25 @@ def _answer_prefix(text: str) -> str:
     return stripped.rstrip()
 
 
-def use_model_file(path: str | Path | None, quantize: str | None = None, threads: int | None = None) -> None:
-    """Makes the front ends serve ``path`` (sets ``DLLM_MODEL``, and ``DLLM_QUANTIZE`` when ``quantize`` is given)
-    and resets the default engine. ``threads`` sets the kernel thread count, which never changes the output."""
+def use_model_file(
+    path: str | Path | None, quantize: str | None = None, threads: int | None = None, device: str | None = None
+) -> None:
+    """Makes the front ends serve ``path`` (sets ``DLLM_MODEL``, and ``DLLM_QUANTIZE``/``DLLM_DEVICE`` when
+    ``quantize``/``device`` are given) and resets the default engine. ``threads`` sets the kernel thread count; it
+    and ``device`` never change the output."""
     if path:
         os.environ[MODEL_ENVIRONMENT_VARIABLE] = str(path)
     if quantize:
         os.environ[QUANTIZE_ENVIRONMENT_VARIABLE] = quantize
+    if device:
+        os.environ[DEVICE_ENVIRONMENT_VARIABLE] = device
     if threads is not None:
         set_threads(threads)
     default_engine.cache_clear()
 
 
 def add_runtime_arguments(parser: argparse.ArgumentParser) -> None:
-    """The ``--model``, ``--quantize`` and ``--threads`` options every front end shares."""
+    """The ``--model``, ``--quantize``, ``--threads`` and ``--device`` options every front end shares."""
     parser.add_argument("--model", help="model.dllm file to use (default: $DLLM_MODEL, else the placeholder model)")
     parser.add_argument(
         "--quantize",
@@ -396,6 +411,11 @@ def add_runtime_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--threads", type=int, help="kernel threads (default: $DLLM_THREADS, else all cores); never changes output"
+    )
+    parser.add_argument(
+        "--device",
+        choices=DEVICES,
+        help="run the model on the CPU or an NVIDIA GPU (default: $DLLM_DEVICE, else cpu); never changes output",
     )
 
 
@@ -409,9 +429,19 @@ def configured_quantization() -> str | None:
     return value
 
 
+def configured_device() -> str:
+    """``$DLLM_DEVICE``, or ``"cpu"`` when it is unset or empty."""
+    value = os.environ.get(DEVICE_ENVIRONMENT_VARIABLE, "").strip().lower() or "cpu"
+    if value not in DEVICES:
+        raise ValueError(f"{DEVICE_ENVIRONMENT_VARIABLE}={value!r}; supported: {', '.join(DEVICES)}")
+    return value
+
+
 @cache
 def default_engine() -> DllmEngine:
     """Process-wide default engine: the model named by ``DLLM_MODEL``, else the placeholder. Models are immutable
     and ``forward`` keeps no shared state, so sharing the engine between requests is safe."""
     path = os.environ.get(MODEL_ENVIRONMENT_VARIABLE)
-    return DllmEngine.from_model_file(path, quantize=configured_quantization()) if path else DllmEngine.create_default()
+    if not path:
+        return DllmEngine.create_default()
+    return DllmEngine.from_model_file(path, quantize=configured_quantization(), device=configured_device())
