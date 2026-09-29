@@ -167,6 +167,7 @@ AdamW from `grad.hpp`.
 | `include/dllm/grad.hpp` | Backward kernels, cross-entropy and the AdamW update, with the same ordering rules. |
 | `include/dllm/quant.hpp` | Q8_0 quantisation with exact integer block sums. |
 | `include/dllm/parallel.hpp` | A thread pool whose tasks own disjoint outputs, so the thread count never changes a bit. |
+| `include/dllm/fpenv.hpp` | Runs every binding in the IEEE default floating point state (no flush-to-zero), whatever the process set. |
 | `include/dllm/simd.hpp` | AVX2, SSE2 or NEON variants picked once per machine; lanes hold different outputs, never parts of one sum. |
 | `include/dllm/cuda.hpp`, `cuda/kernels.cu` | The CUDA backend, compiled at run time by NVRTC with `--fmad=false`; one thread per output element. |
 | `kernels.cpp` | The nanobind bindings (`etalii_dllm._kernels`); kept thin. |

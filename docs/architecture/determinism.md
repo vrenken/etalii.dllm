@@ -73,7 +73,7 @@ flowchart TB
         f2["parallel.hpp: threads split outputs,<br/>never a sum"]
         f3["nn.hpp: one strategy for every shape<br/>(batch invariance)"]
         f4["simd.hpp: lanes hold different outputs;<br/>path fixed once per machine; no BLAS"]
-        f5["CMakeLists.txt: no fast-math,<br/>-ffp-contract=off"]
+        f5["CMakeLists.txt: no fast-math,<br/>-ffp-contract=off; fpenv.hpp:<br/>IEEE default FP state per call"]
         f6["math.hpp: exp, log, sin, cos, tanh, erf<br/>from + - * / and sqrt"]
         f7["random.hpp: xoshiro256** seeded by SplitMix64<br/>(DeterministicRandom)"]
         f8["sampling.py: total order<br/>(probability desc, token id asc)"]

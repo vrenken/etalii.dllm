@@ -168,6 +168,13 @@ def instruction_set() -> str:
     return str(_kernels.isa())
 
 
+def fp_environment_is_canonical() -> bool:
+    """Whether this thread's floating point environment is the IEEE default (round to nearest, subnormals kept).
+    The kernels never depend on it (each call runs in the default and restores the caller's state), but NumPy
+    elementwise operations outside them do, so ``dllm verify`` reports it."""
+    return bool(_kernels.fp_environment_is_canonical())
+
+
 def matmul(a: npt.ArrayLike | Tensor, b: npt.ArrayLike | Tensor) -> Tensor:
     """``a[m, k] @ b[k, n]``. Each output equals ``dot(a[i, :], b[:, j])`` bit for bit."""
     return Tensor(_kernels.matmul(_float32(a), _float32(b)))

@@ -29,7 +29,8 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
 ## Layout
 
 - `cpp/include/dllm/`: header-only C++ kernels (`random.hpp`, `math.hpp` transcendentals, `nn.hpp` matmul/norm/RoPE/
-  attention, `grad.hpp` their gradients plus cross-entropy and AdamW, `quant.hpp` Q8_0, `parallel.hpp` the thread pool,
+  attention, `grad.hpp` their gradients plus cross-entropy and AdamW, `quant.hpp` Q8_0, `parallel.hpp` the thread pool, `fpenv.hpp` the
+  floating point environment every binding runs in,
   `simd.hpp` the per-machine AVX2/SSE2/NEON dispatch, `cuda.hpp` the CUDA backend; evaluation orders in `docs/kernels.md`);
   `cpp/kernels.cpp` binds them as `etalii_dllm._kernels`. `cpp/cuda/kernels.cu` holds the GPU kernels: CMake embeds it
   and `math.hpp` in the extension and `cuda.hpp` compiles them at run time with NVRTC (`--fmad=false`), loading the

@@ -14,6 +14,24 @@ makes the output reproducible. Changing it is a deliberate, golden-value-changin
 - No kernel switches strategy on input size. Threads partition outputs, never reductions (see
   [threads and SIMD](#threads-and-simd)).
 - Transcendentals come from `math.hpp` (built from `+ - * /` and `sqrt` only), never from the C runtime.
+- Every kernel runs in the IEEE default floating point environment, whatever the caller set (see
+  [floating point environment](#floating-point-environment)).
+
+## Floating point environment
+
+IEEE 754 fixes the result of `+ - * /` and `sqrt` only for a given rounding mode and subnormal handling. The kernels
+assume the default: round to nearest even, subnormals kept, exceptions masked. A process can be in another state
+without knowing it: a library built with `-ffast-math` turns flush-to-zero (FTZ) and denormals-are-zero (DAZ) on for
+the whole process when it loads, and a host application may change the rounding mode. `fpenv.hpp` makes that
+irrelevant: every binding in `_kernels` runs under `FpEnvGuard`, which puts the calling thread into the default state
+(MXCSR on x86-64, FPCR on arm64) for the duration of the call and restores the caller's state afterwards, and the
+thread pool's workers enter the default state when they start. The cost is one control-register read per kernel
+call (two writes only when the state differs). The GPU kernels are compiled with `--ftz=false`,
+`--prec-div=true` and `--prec-sqrt=true` for the same reason.
+
+NumPy's own elementwise operations outside the kernels still follow the caller's environment;
+`numerics.fp_environment_is_canonical()` reports whether it is the default. `tests/test_fp_environment.py` turns
+FTZ/DAZ on and requires the kernels' subnormal results and golden fingerprints to stay the same.
 
 ## Tensor
 

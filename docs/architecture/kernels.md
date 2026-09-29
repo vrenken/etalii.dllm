@@ -75,6 +75,9 @@ flowchart LR
   Each task owns a disjoint set of outputs and nothing is combined across tasks, so the thread count and scheduling
   are speed settings only. When the pool is busy with another caller's kernel, the tasks run on the calling thread,
   with the same result. After `fork()` a child starts its own workers.
+- **`fpenv.hpp`**: every binding runs under `FpEnvGuard`, which sets round-to-nearest with subnormals kept for the
+  call and restores the caller's state; pool workers enter that state when they start. A library that turned
+  flush-to-zero on for the process therefore cannot change a kernel's bits.
 - **`simd.hpp`**: the widest supported variant is chosen once per process. SIMD lanes hold *different* outputs,
   each advancing through `k` in the same order as the scalar loop. The product of two floats is exact in double, so
   an FMA rounds once exactly like a multiply plus an add, and every variant equals `linear_reference` bit for bit.
