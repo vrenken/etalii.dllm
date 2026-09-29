@@ -35,6 +35,25 @@ whatever the thread count or batch, and `--quantize q8_0` runs 8-bit weights wit
 [docs/kernels.md](docs/kernels.md#threads-and-simd)).
 Without a model file the engine falls back to a seeded placeholder (a bigram table).
 
+## Which models can it run?
+
+Not every model, but any model in a supported family. Determinism is a property of the engine, not of the weights:
+`dllm import` only converts a model's weights, tokenizer and chat template to our [model.dllm](docs/model-format.md)
+format, and every model the engine runs is deterministic. So a model becomes deterministic as soon as it imports.
+What limits the choice is which architectures the engine implements.
+
+| | Supported | Refused at import (for now) |
+| --- | --- | --- |
+| Architecture | Llama-style decoders (`model_type` `llama`: SmolLM2, Llama 3.x, ...), Qwen2/Qwen2.5, dense Qwen3 | Mistral, Gemma, Phi, mixture-of-experts models (including Qwen3-MoE), sliding-window attention, GELU MLPs, MLP biases, YaRN RoPE scaling |
+| Tokenizer | Byte-level BPE from `tokenizer.json` (the model's own, with its Jinja chat template) | SentencePiece/Unigram tokenizers (Llama 2, TinyLlama, older Mistral, Gemma) |
+| Files | Hugging Face safetensors (F32/F16/BF16), GGUF (F32/F16/BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K, Q6_K), PEFT LoRA adapters | Other GGUF quantisations |
+| Size | Weights are held in memory as float32 (or Q8_0 with `--quantize q8_0`), so memory and CPU speed set the limit; about 1.5B parameters is practical today | |
+
+Verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct, Qwen2.5-0.5B-Instruct,
+Qwen2.5-1.5B-Instruct and Qwen3-0.6B. Other models in these families should work but are not checked. An unsupported
+model fails at `dllm import` with an error that names the missing feature, never with silently wrong output. A server
+serves one model, chosen at start-up with `--model`/`DLLM_MODEL`.
+
 ## Quick start
 
 New here? [Getting started](docs/getting-started.md) walks through installing, importing a real model and using it
@@ -131,7 +150,7 @@ module map), with Mermaid diagrams.
 | --- | --- |
 | 0. Bootstrap ✅ | Solution skeleton, deterministic RNG and math, sampler, byte tokenizer, placeholder model, OpenAI-style API, MCP server, CI with golden hashes |
 | 1. Kernels ✅ | Tensor type, deterministic matmul with fixed tiling, RMSNorm, RoPE with deterministic `sin`/`cos`, SiLU/GELU, attention with fixed-order softmax |
-| 2. Import existing models ✅ | Llama-style decoder with KV cache; `dllm import` converting small open-weight models (SmolLM2, Qwen2.5, TinyLlama, ...) from safetensors/GGUF to our own format with licence metadata; BPE tokenizer and chat templates. SmolLM2-135M and Qwen2.5-0.5B verified against `transformers` in CI. See [model import](docs/research/model-import.md) |
+| 2. Import existing models ✅ | Llama-style decoder with KV cache; `dllm import` converting small open-weight models (SmolLM2, Qwen2.5, ...) from safetensors/GGUF to our own format with licence metadata; BPE tokenizer and chat templates. SmolLM2-135M and Qwen2.5-0.5B verified against `transformers` in CI. See [model import](docs/research/model-import.md) |
 | 3. Fine-tuning ✅ | Deterministic backprop and AdamW on top of imported weights, fixed data order, reproducible checkpoints |
 | 4. API parity ✅ | Streaming (SSE), tool/function calling, JSON-schema structured output, logprobs, Anthropic Messages endpoint, embeddings. See [HTTP API](docs/api.md) |
 | 5. MCP, both directions ✅ | Richer MCP server (prompts, resources); MCP client host so the model can call external tools during a chat. See [MCP](docs/mcp.md) |
