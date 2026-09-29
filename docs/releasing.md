@@ -34,6 +34,14 @@ without releasing anything.
 3. When all wheels pass, the workflow creates the GitHub Release `v0.2.0` with generated notes and every wheel
    and the sdist attached.
 
+## Docker image
+
+A release also runs `.github/workflows/docker.yml`, which builds the image, checks that it answers identical
+requests identically, and pushes it for linux/amd64 and linux/arm64 as `ghcr.io/vrenken/etalii-dllm:<version>` and
+`:latest`. Running that workflow by hand with tags (for example `edge`) publishes the current branch. A new package
+on ghcr.io starts out private: make it public once in the package settings
+(<https://github.com/users/vrenken/packages/container/etalii-dllm/settings>, Danger Zone > Change visibility).
+
 ## PyPI
 
 Publishing to PyPI is switched off until the repository owner sets it up once (issue #44):
