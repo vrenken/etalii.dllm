@@ -11,7 +11,7 @@ these pages explain the structure around them and link there for detail.
 | Overview (this page) | System context, layers, module map, the one rule every layer follows | ✅ |
 | [Determinism by design](determinism.md) | Every source of nondeterminism and the layer that removes it | ✅ |
 | [Inference pipeline](inference.md) | One chat request from messages to token stream, KV and prompt caches, batching | ✅ |
-| Kernels and compute backends | The C++ layer, SIMD and thread dispatch, CUDA | planned ([#66](https://github.com/vrenken/etalii.dllm/issues/66)) |
+| [Kernels and compute backends](kernels.md) | The C++ layer, SIMD and thread dispatch, CUDA, the build | ✅ |
 | Model import and format | From safetensors/GGUF to `model.dllm` to a running decoder | planned ([#67](https://github.com/vrenken/etalii.dllm/issues/67)) |
 | Front ends, APIs and MCP | How the CLI, servers and MCP share one engine | planned ([#68](https://github.com/vrenken/etalii.dllm/issues/68)) |
 | Fine-tuning | One reproducible training step, checkpoints and resume | planned ([#69](https://github.com/vrenken/etalii.dllm/issues/69)) |
