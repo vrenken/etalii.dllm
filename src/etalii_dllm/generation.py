@@ -13,6 +13,7 @@ from typing import Any
 
 import numpy as np
 
+from etalii_dllm.batching import Batcher
 from etalii_dllm.grammar import TokenConstraint
 from etalii_dllm.models import LanguageModel
 from etalii_dllm.numerics import fingerprint, log_softmax
@@ -172,7 +173,12 @@ class Generation:
             if constraint is not None and constraint.finished:
                 finish_reason = "stop"
                 break
-            logits = model.forward(context) if cache is None else model.forward_cached(context, cache)
+            if cache is None:
+                logits = model.forward(context)
+            elif generator.batcher is not None:
+                logits = generator.batcher.forward_cached(context, cache)
+            else:
+                logits = model.forward_cached(context, cache)
             token = self._choose(sampler, logits, generator.stop_tokens, constraint)
             if token is None or token in generator.stop_tokens:
                 finish_reason = "stop"
@@ -240,11 +246,13 @@ class Generator:
     ) -> None:
         """``prompt_cache`` is how many KV caches of finished generations to keep for reuse by later prompts that
         share a prefix (:mod:`etalii_dllm.prompt_cache`); 0, or a model without a KV cache, disables it. It never
-        changes the output."""
+        changes the output. Models that can run several sequences in one pass (``forward_batch``) decode concurrent
+        generations together (:mod:`etalii_dllm.batching`), which never changes the output either."""
         self.model = model
         self.tokenizer = tokenizer
         self.stop_tokens = frozenset(t for t in [tokenizer.end_of_sequence, *stop_tokens] if t >= 0)
         new_cache = getattr(model, "new_cache", None)
+        self.batcher = Batcher(model) if hasattr(model, "forward_batch") else None  # type: ignore[arg-type]
         self.prompt_cache: PromptCache | None = (
             PromptCache(new_cache, prompt_cache) if new_cache is not None and prompt_cache > 0 else None
         )

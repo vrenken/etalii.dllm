@@ -59,6 +59,19 @@ the same as without it (`tests/test_prompt_cache.py`).
   45 KB per token for SmolLM2-135M, 56 KB for Qwen2.5-1.5B). A cache serves one request at a time; a request whose
   prefix is cached but in use starts afresh. When the pool is full the least recently used cache goes.
 
+## Concurrent requests
+
+Requests that arrive together are decoded together (continuous batching, as vLLM and TGI do): at every step the new
+tokens of all running requests, prompts being read and single tokens being generated alike, go through the model as
+one batch, so the weights are read once per step instead of once per request. A request joins at the next step after
+it arrives and leaves when it is done. With SmolLM2-135M on a 4-core VM, eight concurrent greedy requests of 32 tokens
+finish in 8.6 s instead of 16.7 s one after another.
+
+Unlike other batching servers, this cannot change anyone's answer. Every kernel computes each row on its own in a
+fixed order and attention runs per request, so a request gets exactly the bits it gets alone, whichever requests
+share its steps and whenever they arrived (`tests/test_batching.py`, and `tests/test_batch_invariance.py` fires 36
+overlapping requests at the server and compares every response with a lone run). Nothing needs configuring.
+
 ## Streaming
 
 `"stream": true` returns server-sent events. OpenAI: `chat.completion.chunk` objects, a first chunk with the role,
