@@ -483,14 +483,14 @@ NB_MODULE(_kernels, module) {
         "cuda_attention",
         [](const Array& q, const Array& k, const Array& v, std::size_t q_len, std::size_t kv_len, std::size_t q_heads,
            std::size_t kv_heads, std::size_t head_dim, std::size_t value_dim, double scale, bool causal,
-           std::size_t q_offset) {
+           std::size_t q_offset, std::size_t window) {
             nb::gil_scoped_release release;
             return dllm::cuda::attention(q, k, v, q_len, kv_len, q_heads, kv_heads, head_dim, value_dim, scale, causal,
-                                         q_offset);
+                                         q_offset, window);
         },
         nb::arg("q"), nb::arg("k"), nb::arg("v"), nb::arg("q_len"), nb::arg("kv_len"), nb::arg("q_heads"),
         nb::arg("kv_heads"), nb::arg("head_dim"), nb::arg("value_dim"), nb::arg("scale"), nb::arg("causal"),
-        nb::arg("q_offset"), "attention() on the GPU (reads the first kv_len keys and values); the same bits.");
+        nb::arg("q_offset"), nb::arg("window") = 0, "attention() on the GPU (reads the first kv_len keys and values); the same bits.");
 
     m.def(
         "matmul",
@@ -543,7 +543,8 @@ NB_MODULE(_kernels, module) {
 
     m.def(
         "attention",
-        [](FloatTensor q, FloatTensor k, FloatTensor v, double scale, bool causal, std::int64_t q_offset) {
+        [](FloatTensor q, FloatTensor k, FloatTensor v, double scale, bool causal, std::int64_t q_offset,
+           std::size_t window) {
             require(q.ndim() == 3 && k.ndim() == 3 && v.ndim() == 3, "q, k and v must be [length, heads, dim]");
             const std::size_t q_len = q.shape(0);
             const std::size_t kv_len = k.shape(0);
@@ -558,11 +559,11 @@ NB_MODULE(_kernels, module) {
             auto result = make_array({q_len, q.shape(1), v.shape(2)}, &out);
             nb::gil_scoped_release release;
             dllm::attention(q.data(), k.data(), v.data(), out, q_len, kv_len, q.shape(1), k.shape(1), q.shape(2),
-                            v.shape(2), scale, causal, static_cast<std::size_t>(q_offset));
+                            v.shape(2), scale, causal, static_cast<std::size_t>(q_offset), window);
             return result;
         },
         nb::arg("q"), nb::arg("k"), nb::arg("v"), nb::arg("scale"), nb::arg("causal") = true,
-        nb::arg("q_offset") = -1, "Scaled dot-product attention with grouped-query heads and a fixed order.");
+        nb::arg("q_offset") = -1, nb::arg("window") = 0, "Scaled dot-product attention with grouped-query heads and a fixed order.");
 
     m.def(
         "linear_backward",
@@ -626,7 +627,7 @@ NB_MODULE(_kernels, module) {
     m.def(
         "attention_backward",
         [](FloatTensor q, FloatTensor k, FloatTensor v, FloatTensor dout, double scale, bool causal,
-           std::int64_t q_offset) {
+           std::int64_t q_offset, std::size_t window) {
             require(q.ndim() == 3 && k.ndim() == 3 && v.ndim() == 3, "q, k and v must be [length, heads, dim]");
             const std::size_t q_len = q.shape(0);
             const std::size_t kv_len = k.shape(0);
@@ -648,11 +649,11 @@ NB_MODULE(_kernels, module) {
             auto dv_array = make_array(shape_of(v), &dv);
             dllm::attention_backward(q.data(), k.data(), v.data(), dout.data(), dq, dk, dv, q_len, kv_len,
                                      q.shape(1), k.shape(1), q.shape(2), v.shape(2), scale, causal,
-                                     static_cast<std::size_t>(q_offset));
+                                     static_cast<std::size_t>(q_offset), window);
             return std::make_tuple(dq_array, dk_array, dv_array);
         },
         nb::arg("q"), nb::arg("k"), nb::arg("v"), nb::arg("dout"), nb::arg("scale"), nb::arg("causal") = true,
-        nb::arg("q_offset") = -1, "Gradients (dq, dk, dv) of attention(); fixed order, double accumulators.");
+        nb::arg("q_offset") = -1, nb::arg("window") = 0, "Gradients (dq, dk, dv) of attention(); fixed order, double accumulators.");
 
     m.def(
         "cross_entropy",

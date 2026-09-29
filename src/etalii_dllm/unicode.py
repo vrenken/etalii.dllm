@@ -290,6 +290,8 @@ def _property(pattern: str, i: int) -> tuple[str, bool, int]:
 def translate(pattern: str) -> str:
     """Replaces every ``\\p{..}``/``\\P{..}`` general-category class with explicit code point ranges from the pinned
     tables, so that the ``regex`` package's own Unicode version no longer matters."""
+    if "\\p" not in pattern and "\\P" not in pattern:
+        return pattern
     out: list[str] = []
     i = 0
     in_class = False

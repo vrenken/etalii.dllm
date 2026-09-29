@@ -106,7 +106,61 @@ def llama3_style():
     )
 
 
-@pytest.fixture(scope="module", params=[smollm2_style, qwen2_style, gpt2_style, llama3_style])
+def sentencepiece_style(normalizer, pre_tokenizer, decoder, *, byte_fallback=True):
+    """A tokenizer shaped like ``transformers``' conversion of a SentencePiece BPE model (Llama 2, Mistral): ``▁`` for
+    spaces, a small alphabet so that rare characters need the ``<0xAB>`` byte tokens (or ``<unk>``)."""
+    from tokenizers import Tokenizer, models, trainers
+
+    tokenizer = Tokenizer(models.BPE(unk_token="<unk>", fuse_unk=True, byte_fallback=byte_fallback))
+    tokenizer.normalizer = normalizer
+    tokenizer.pre_tokenizer = pre_tokenizer
+    tokenizer.decoder = decoder
+    trainer = trainers.BpeTrainer(
+        vocab_size=400, special_tokens=["<unk>", "<s>", "</s>", *SPECIAL], limit_alphabet=60, show_progress=False
+    )
+    tokenizer.train_from_iterator(CORPUS * 3, trainer)
+    spec = json.loads(tokenizer.to_str())
+    vocab = spec["model"]["vocab"]
+    if byte_fallback:
+        for byte in range(256):
+            vocab.setdefault(f"<0x{byte:02X}>", len(vocab))
+    return Tokenizer.from_str(json.dumps(spec))
+
+
+def llama2_style():
+    from tokenizers import decoders, normalizers, processors
+
+    tokenizer = sentencepiece_style(
+        normalizers.Sequence([normalizers.Prepend("▁"), normalizers.Replace(" ", "▁")]),
+        None,
+        decoders.Sequence(
+            [decoders.Replace("▁", " "), decoders.ByteFallback(), decoders.Fuse(), decoders.Strip(" ", 1, 0)]
+        ),
+    )
+    tokenizer.post_processor = processors.TemplateProcessing(single="<s> $A", special_tokens=[("<s>", 1)])
+    return tokenizer
+
+
+def mistral_style():
+    from tokenizers import decoders, pre_tokenizers
+
+    metaspace = {"replacement": "▁", "prepend_scheme": "first", "split": False}
+    return sentencepiece_style(None, pre_tokenizers.Metaspace(**metaspace), decoders.Metaspace(**metaspace))
+
+
+def metaspace_split_style():
+    from tokenizers import decoders, pre_tokenizers
+
+    metaspace = {"replacement": "▁", "prepend_scheme": "always", "split": True}
+    return sentencepiece_style(
+        None, pre_tokenizers.Metaspace(**metaspace), decoders.Metaspace(**metaspace), byte_fallback=False
+    )
+
+
+STYLES = [smollm2_style, qwen2_style, gpt2_style, llama3_style, llama2_style, mistral_style, metaspace_split_style]
+
+
+@pytest.fixture(scope="module", params=STYLES)
 def pair(request):
     reference = request.param()
     ours = BpeTokenizer(json.loads(reference.to_str()), end_of_sequence="<|im_end|>")
@@ -150,7 +204,18 @@ def test_unsupported_components_fail_loudly():
     with pytest.raises(TokenizerError, match="byte-level"):
         BpeTokenizer(base)
     with pytest.raises(TokenizerError, match="Metaspace"):
-        BpeTokenizer({**base, "pre_tokenizer": {"type": "Metaspace"}})
+        BpeTokenizer({**base, "pre_tokenizer": {"type": "Metaspace", "prepend_scheme": "sometimes"}})
+    with pytest.raises(TokenizerError, match="WordPiece"):
+        BpeTokenizer({**base, "decoder": {"type": "WordPiece"}})
+
+
+def test_sentencepiece_decoding_drops_one_leading_space_of_the_text_only():
+    tokenizer = BpeTokenizer(json.loads(llama2_style().to_str()))
+    ids = tokenizer.encode("Hello world")
+    assert tokenizer.decode(ids) == "Hello world"
+    # Streaming concatenates single tokens; their bytes keep the space, so that joining them gives the sequence.
+    assert b"".join(tokenizer.decode_bytes([i]) for i in ids) == b" Hello world"
+    assert tokenizer.strips_leading_space
 
 
 @pytest.mark.parametrize(("style", "pre"), [(smollm2_style, "smollm"), (qwen2_style, "qwen2")])
@@ -176,3 +241,31 @@ def test_gguf_tokenizer_metadata_matches_the_original(style, pre):
         assert ours.encode(text) == reference.encode(text, add_special_tokens=False).ids
     with pytest.raises(TokenizerError, match="pre-tokenizer"):
         spec_from_gguf({**metadata, "tokenizer.ggml.pre": "deepseek-coder"})
+
+
+def test_chat_answers_drop_the_leading_space_but_completions_keep_it():
+    """A chat answer is a new text, so it loses the ``▁`` its first word starts with (as transformers decodes it); a
+    completion continues the prompt and keeps it. Streamed deltas add up to the same text."""
+    import numpy as np
+
+    from etalii_dllm.generation import Generator
+    from etalii_dllm.sampling import GREEDY
+
+    tokenizer = BpeTokenizer(json.loads(llama2_style().to_str()))
+    word = tokenizer.encode("Hello")
+    assert tokenizer.id_to_token(word[0]).startswith("▁")
+
+    class Scripted:
+        """Always predicts the next token of ``word``."""
+
+        def forward(self, context):
+            logits = np.zeros(tokenizer.vocabulary_size, dtype=np.float32)
+            logits[word[min(len(context) - 1, len(word) - 1)]] = 1.0
+            return logits
+
+    generator = Generator(Scripted(), tokenizer)
+    completion = generator.generate([1], len(word), GREEDY)
+    answer = generator.stream([1], len(word), GREEDY, new_text=True)
+    deltas = "".join(step.text for step in answer)
+    assert completion.text == " Hello"
+    assert answer.result().text == deltas == "Hello"

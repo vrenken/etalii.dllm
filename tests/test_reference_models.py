@@ -62,6 +62,14 @@ REFERENCE_MODELS = {
         "Qwen/Qwen2.5-1.5B-Instruct", "989aa7980e4cf806f80c7fef2b1adb7bc71aa306", "Apache-2.0"
     ),
     "qwen3": ReferenceModel("Qwen/Qwen3-0.6B", "c1899de289a04d12100db370d81485cdf75e47ca", "Apache-2.0"),
+    # Llama 2 architecture with a SentencePiece-style tokenizer (Metaspace-like normaliser, byte fallback).
+    "tinyllama": ReferenceModel(
+        "TinyLlama/TinyLlama-1.1B-Chat-v1.0", "fe8a4ea1ffedaf415f4da2f062534de366a451e6", "Apache-2.0"
+    ),
+    # Post-norms and QK-norm over the whole projections.
+    "olmo2": ReferenceModel(
+        "allenai/OLMo-2-0425-1B-Instruct", "48d788eca847d4d7548f375ad03d3c9312f6139e", "Apache-2.0"
+    ),
 }
 
 # Extra chat template variables per model for the greedy chat: Qwen3 answers directly instead of thinking first.
@@ -179,7 +187,7 @@ def reference(imported):
 # Synthetic checkpoints: the decoder matches transformers on both families
 
 
-@pytest.mark.parametrize("family", ["llama", "qwen2", "qwen3"])
+@pytest.mark.parametrize("family", ["granite", "llama", "mistral", "olmo2", "qwen2", "qwen3"])
 def test_tiny_checkpoint_matches_transformers(family, tmp_path):
     torch = pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")

@@ -254,6 +254,23 @@ def test_attention_prefill_equals_incremental_decoding():
     np.testing.assert_array_equal(padded, prefill[5:9])
 
 
+@pytest.mark.parametrize("window", [1, 3, 20])
+def test_sliding_window_attention_sees_only_the_last_keys(window):
+    """Query t attends to keys t - window + 1 .. t: the same bits as plain attention over exactly those keys, so a
+    windowed row is also independent of prefill, decoding and cache length."""
+    q, k, v = gaussian(17, 10, 4, 8), gaussian(18, 10, 2, 8), gaussian(19, 10, 2, 8)
+    out = numerics.attention(q, k, v, window=window).numpy()
+    for t in range(10):
+        first = max(0, t + 1 - window)
+        row = numerics.attention(q[t : t + 1], k[first : t + 1], v[first : t + 1]).numpy()
+        np.testing.assert_array_equal(out[t], row[0])
+        step = numerics.attention(q[t : t + 1], k, v, q_offset=t, window=window).numpy()
+        np.testing.assert_array_equal(step[0], out[t])
+    np.testing.assert_array_equal(numerics.attention(q, k, v, window=10).numpy(), numerics.attention(q, k, v).numpy())
+    with pytest.raises(ValueError):
+        numerics.attention(q, k, v, window=0)
+
+
 def test_attention_rejects_bad_head_counts():
     with pytest.raises(ValueError):
         numerics.attention(

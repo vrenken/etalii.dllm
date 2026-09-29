@@ -90,9 +90,12 @@ uses the first, API `logprobs` the second.
 
 ## Attention
 
-`attention(q, k, v, scale, causal, q_offset)` with `q[q_len, q_heads, d]`, `k[kv_len, kv_heads, d]`,
+`attention(q, k, v, scale, causal, q_offset, window)` with `q[q_len, q_heads, d]`, `k[kv_len, kv_heads, d]`,
 `v[kv_len, kv_heads, dv]`. Query head `h` uses key/value head `h / (q_heads / kv_heads)` (MHA, GQA and MQA). With
-`causal`, query `t` is at position `q_offset + t` (default `kv_len - q_len`) and sees keys `0 ..= q_offset + t`.
+`causal`, query `t` is at position `q_offset + t` (default `kv_len - q_len`) and sees keys `0 ..= q_offset + t`. A
+non-zero `window` (sliding-window attention, Mistral) keeps only the last `window` of those keys,
+`q_offset + t - window + 1 ..= q_offset + t`; the sums below then run over that range, from its first key on, which is
+exactly plain attention over those keys.
 
 For each (query, head), independently:
 
@@ -100,7 +103,8 @@ For each (query, head), independently:
 2. `m = max_j s_j`; `p_j = exp(s_j - m)`; `Z = sum_j p_j` over `j` ascending;
 3. `out_i = (sum_j p_j v_ji) / Z`, the sum over `j` ascending, rounded once.
 
-Keys beyond the causal horizon are never read, so the result does not depend on how long the KV cache is, and a
+Keys beyond the causal horizon (or before the window) are never read, so the result does not depend on how long the
+KV cache is, and a
 prefill of `n` tokens gives exactly the same bits as decoding them one at a time (`tests/test_kernels.py`).
 
 ## Threads and SIMD

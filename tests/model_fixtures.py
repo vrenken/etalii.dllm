@@ -36,9 +36,23 @@ TINY_LLAMA_CONFIG = {
 
 
 def tiny_config(family: str) -> dict:
-    """The tiny config for ``family``: Qwen2 unties the head; Qwen3 adds QK-norm and a head size of its own."""
+    """The tiny config for ``family``: Qwen2 unties the head; Qwen3 adds QK-norm and a head size of its own; Mistral
+    slides a window of 3 tokens (shorter than the test prompts, so the window matters); OLMo 2 normalises outputs
+    instead of inputs and the whole query and key projections; Granite adds its four multipliers."""
     config = {**TINY_LLAMA_CONFIG, "model_type": family}
-    if family == "qwen2":
+    if family == "granite":
+        config.update(
+            architectures=["GraniteForCausalLM"],
+            embedding_multiplier=12.0,
+            attention_multiplier=0.125,
+            residual_multiplier=0.22,
+            logits_scaling=8.0,
+        )
+    elif family == "olmo2":
+        config.update(architectures=["Olmo2ForCausalLM"], tie_word_embeddings=False, attention_bias=False)
+    elif family == "mistral":
+        config.update(architectures=["MistralForCausalLM"], sliding_window=3, tie_word_embeddings=False)
+    elif family == "qwen2":
         config.update(architectures=["Qwen2ForCausalLM"], use_sliding_window=False, tie_word_embeddings=False)
     elif family == "qwen3":
         config.update(architectures=["Qwen3ForCausalLM"], use_sliding_window=False, head_dim=8, attention_bias=False)
@@ -70,7 +84,7 @@ def hf_weights(config: dict, seed: int = 11) -> dict[str, np.ndarray]:
     family = config["model_type"]
     ours = TransformerConfig.from_dict(
         {
-            "family": family if family in ("qwen2", "qwen3") else "llama",
+            "family": family if family in ("granite", "mistral", "olmo2", "qwen2", "qwen3") else "llama",
             "vocabulary_size": config["vocab_size"],
             "hidden_size": config["hidden_size"],
             "intermediate_size": config["intermediate_size"],
@@ -82,7 +96,9 @@ def hf_weights(config: dict, seed: int = 11) -> dict[str, np.ndarray]:
             "rms_norm_eps": config["rms_norm_eps"],
             "rope_theta": config["rope_theta"],
             "attention_bias": family == "qwen2",
-            "qk_norm": family == "qwen3",
+            "qk_norm": family in ("olmo2", "qwen3"),
+            "qk_norm_scope": "all" if family == "olmo2" else "head",
+            "norm_placement": "post" if family == "olmo2" else "pre",
             "tie_word_embeddings": config["tie_word_embeddings"],
         }
     )
@@ -97,6 +113,8 @@ def hf_weights(config: dict, seed: int = 11) -> dict[str, np.ndarray]:
         "mlp.gate.weight": "mlp.gate_proj.weight",
         "mlp.up.weight": "mlp.up_proj.weight",
         "mlp.down.weight": "mlp.down_proj.weight",
+        "attention_post_norm.weight": "post_attention_layernorm.weight",
+        "mlp_post_norm.weight": "post_feedforward_layernorm.weight",
     }
     weights = {}
     for index, (name, shape) in enumerate(sorted(ours.tensor_shapes().items())):

@@ -74,6 +74,11 @@ _HF_LAYER_NAMES = {
     "mlp.up_proj.weight": "mlp.up.weight",
     "mlp.down_proj.weight": "mlp.down.weight",
 }
+# OLMo 2 normalises the outputs of attention and the MLP instead of their inputs.
+_HF_POST_NORM_NAMES = {
+    "post_attention_layernorm.weight": "attention_post_norm.weight",
+    "post_feedforward_layernorm.weight": "mlp_post_norm.weight",
+}
 _HF_GLOBAL_NAMES = {
     "model.embed_tokens.weight": "token_embedding.weight",
     "model.norm.weight": "final_norm.weight",
@@ -112,16 +117,17 @@ def _rope_from_hf(config: dict[str, Any]) -> tuple[float, dict[str, Any] | None]
 
 
 def hf_config(config: dict[str, Any], generation: dict[str, Any] | None = None) -> TransformerConfig:
-    """Maps a Hugging Face ``config.json`` (Llama, Qwen2 or Qwen3) to our description."""
+    """Maps a Hugging Face ``config.json`` (Granite, Llama, Mistral, OLMo 2, Qwen2 or Qwen3) to our description."""
     family = config.get("model_type")
-    if family not in ("llama", "qwen2", "qwen3"):
-        raise ModelImportError(f"model_type {family!r} is not supported (supported: llama, qwen2, qwen3)")
+    if family not in ("granite", "llama", "mistral", "olmo2", "qwen2", "qwen3"):
+        raise ModelImportError(
+            f"model_type {family!r} is not supported (supported: granite, llama, mistral, olmo2, qwen2, qwen3)"
+        )
     if config.get("hidden_act", "silu") != "silu":
         raise ModelImportError(f"activation {config.get('hidden_act')!r} is not supported")
     if config.get("mlp_bias"):
         raise ModelImportError("MLP biases are not supported")
-    if family in ("qwen2", "qwen3") and config.get("use_sliding_window"):
-        raise ModelImportError("sliding-window attention is not supported")
+    window, window_layers = _sliding_window_from_hf(config, family)
     heads = int(config["num_attention_heads"])
     hidden = int(config["hidden_size"])
     theta, scaling = _rope_from_hf(config)
@@ -144,14 +150,53 @@ def hf_config(config: dict[str, Any], generation: dict[str, Any] | None = None) 
         rope_theta=theta,
         rope_scaling=scaling,
         attention_bias=family == "qwen2" or bool(config.get("attention_bias", False)),
-        qk_norm=family == "qwen3",
+        qk_norm=family in ("olmo2", "qwen3"),
+        qk_norm_scope="all" if family == "olmo2" else "head",
+        norm_placement="post" if family == "olmo2" else "pre",
         tie_word_embeddings=bool(config.get("tie_word_embeddings", False)),
         bos_token_id=None if bos is None else int(bos),
         eos_token_ids=tuple(eos),
+        sliding_window=window,
+        sliding_window_layers=window_layers,
+        **_granite_multipliers(config, family),
     )
 
 
-def _hf_name(name: str) -> str | None:
+def _granite_multipliers(config: dict[str, Any], family: str) -> dict[str, Any]:
+    if family != "granite":
+        return {}
+    return {
+        "embedding_multiplier": float(config.get("embedding_multiplier", 1.0)),
+        "attention_multiplier": float(config["attention_multiplier"]) if "attention_multiplier" in config else None,
+        "residual_multiplier": float(config.get("residual_multiplier", 1.0)),
+        "logits_scaling": float(config.get("logits_scaling", 1.0)),
+    }
+
+
+def _sliding_window_from_hf(config: dict[str, Any], family: str) -> tuple[int | None, tuple[int, ...] | None]:
+    """``(window, layers)``: Mistral slides on every layer; Qwen2/Qwen3 with ``use_sliding_window`` on the layers from
+    ``max_window_layers`` on. A ``layer_types`` list, where present, names the layers explicitly."""
+    window = config.get("sliding_window")
+    if family == "llama" or window is None:
+        return None, None
+    if family in ("qwen2", "qwen3") and not config.get("use_sliding_window"):
+        return None, None
+    layers = int(config["num_hidden_layers"])
+    layer_types = config.get("layer_types")
+    if isinstance(layer_types, list):
+        if len(layer_types) != layers or any(t not in ("sliding_attention", "full_attention") for t in layer_types):
+            raise ModelImportError(f"layer_types {layer_types!r} is not supported")
+        sliding = tuple(i for i, kind in enumerate(layer_types) if kind == "sliding_attention")
+    elif family in ("qwen2", "qwen3"):
+        sliding = tuple(range(int(config.get("max_window_layers", layers)), layers))
+    else:
+        sliding = tuple(range(layers))
+    if not sliding:
+        return None, None
+    return int(window), None if len(sliding) == layers else sliding
+
+
+def _hf_name(name: str, config: TransformerConfig) -> str | None:
     """Our name for a checkpoint tensor; None for buffers that carry no weights."""
     if name in _HF_GLOBAL_NAMES:
         return _HF_GLOBAL_NAMES[name]
@@ -159,8 +204,9 @@ def _hf_name(name: str) -> str | None:
     if match:
         if match.group(2) == "self_attn.rotary_emb.inv_freq":
             return None
-        if match.group(2) in _HF_LAYER_NAMES:
-            return f"layers.{int(match.group(1))}.{_HF_LAYER_NAMES[match.group(2)]}"
+        names = {**_HF_LAYER_NAMES, **_HF_POST_NORM_NAMES} if config.norm_placement == "post" else _HF_LAYER_NAMES
+        if match.group(2) in names:
+            return f"layers.{int(match.group(1))}.{names[match.group(2)]}"
     raise ModelImportError(f"unexpected tensor {name!r}")
 
 
@@ -212,7 +258,7 @@ def _convert_huggingface(directory: Path) -> _Converted:
 
     tensors: dict[str, TensorSource] = {}
     for tensor in checkpoint.values():
-        name = _hf_name(tensor.name)
+        name = _hf_name(tensor.name, config)
         if name is None:
             continue
         if name == "lm_head.weight" and config.tie_word_embeddings:

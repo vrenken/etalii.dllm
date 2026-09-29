@@ -24,6 +24,8 @@ from etalii_dllm.sampling import SamplingOptions
 
 def _import(args: argparse.Namespace) -> int:
     from etalii_dllm.importing import ModelImportError, import_model
+    from etalii_dllm.importing.gguf import GgufError
+    from etalii_dllm.importing.safetensors import SafetensorsError
 
     try:
         result = import_model(
@@ -37,7 +39,7 @@ def _import(args: argparse.Namespace) -> int:
             cache=args.cache,
             base=args.base,
         )
-    except (ModelImportError, OSError) as error:
+    except (ModelImportError, GgufError, SafetensorsError, OSError) as error:
         print(f"dllm import: {error}", file=sys.stderr)
         return 1
     config = result.config

@@ -103,6 +103,7 @@ class Generation:
         stop: Sequence[str],
         constraint: TokenConstraint | None,
         top_logprobs: int | None,
+        new_text: bool = False,
     ) -> None:
         self.prompt_tokens = len(context)
         # Models with a KV cache reuse it across steps; by construction that gives the same logits as forward().
@@ -121,6 +122,9 @@ class Generation:
         self._finish_reason: str | None = None
         self.stop_sequence: str | None = None
         """The stop sequence that ended the generation, if any."""
+        # A new text (a chat message) drops the leading space SentencePiece-style tokens start words with, as the
+        # tokenizer's own decoder does; a completion keeps it, since it continues the prompt's text.
+        self._strip_leading_space = new_text and bool(getattr(generator.tokenizer, "strips_leading_space", False))
         self._steps = self._run(generator, context, cache, max_tokens, options, stop, constraint, top_logprobs)
 
     def __iter__(self) -> Iterator[Step]:
@@ -166,6 +170,7 @@ class Generation:
         stop = [s for s in stop if s]
         sampler = Sampler(options)
         data = bytearray()
+        strip_leading_space = self._strip_leading_space
         emitted = ""
         finish_reason = "length"
 
@@ -192,6 +197,10 @@ class Generation:
                 self._logprobs.append(logprobs)
 
             data.extend(tokenizer.decode_bytes([token]))
+            if strip_leading_space and data:
+                if data[0] == 0x20:
+                    del data[0]
+                strip_leading_space = False
             text = bytes(data[: _complete_prefix(data)]).decode("utf-8", errors="replace")
             found = [(i, n) for n, s in enumerate(stop) if (i := text.find(s, max(0, len(emitted) - len(s)))) >= 0]
             if found:
@@ -266,16 +275,19 @@ class Generator:
         stop: Sequence[str] = (),
         constraint: TokenConstraint | None = None,
         top_logprobs: int | None = None,
+        new_text: bool = False,
     ) -> Generation:
         """Starts a generation. ``stop`` ends it at the first occurrence of any of the strings (which are not part
         of the text); ``constraint`` restricts the tokens (structured output, tool calls); ``top_logprobs``
-        (0 to 20) records each token's log-probability and that many alternatives."""
+        (0 to 20) records each token's log-probability and that many alternatives. ``new_text`` says the output
+        starts a new text (a chat message) rather than continuing the prompt, so a SentencePiece-style tokenizer's
+        leading space is dropped from it."""
         if max_tokens < 0:
             raise ValueError("max_tokens must be non-negative")
         if top_logprobs is not None and not 0 <= top_logprobs <= MAX_TOP_LOGPROBS:
             raise ValueError(f"top_logprobs must be between 0 and {MAX_TOP_LOGPROBS}")
         context = self.tokenizer.encode(prompt) if isinstance(prompt, str) else list(prompt)
-        return Generation(self, context, max_tokens, options, stop, constraint, top_logprobs)
+        return Generation(self, context, max_tokens, options, stop, constraint, top_logprobs, new_text)
 
     def generate(
         self,

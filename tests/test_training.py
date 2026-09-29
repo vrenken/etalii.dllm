@@ -104,7 +104,7 @@ def test_rope_inverse_is_the_transpose(interleaved):
     close(restored, x, 1e-6)
 
 
-def reference_attention(q, k, v, scale):
+def reference_attention(q, k, v, scale, window=None):
     q_len, heads, _ = q.shape
     group = heads // k.shape[1]
     out = np.zeros((q_len, heads, v.shape[2]))
@@ -112,21 +112,27 @@ def reference_attention(q, k, v, scale):
     for h in range(heads):
         scores = q[:, h] @ k[:, h // group].T * scale
         scores = scores + np.triu(np.full(scores.shape, -np.inf), offset + 1)
+        if window is not None:
+            scores = scores + np.tril(np.full(scores.shape, -np.inf), offset - window)
         p = np.exp(scores - scores.max(-1, keepdims=True))
         out[:, h] = (p / p.sum(-1, keepdims=True)) @ v[:, h // group]
     return out
 
 
-@pytest.mark.parametrize("q_len", [4, 2])
-def test_attention_backward_matches_numeric_gradient(q_len):
+@pytest.mark.parametrize(("q_len", "window"), [(4, None), (2, None), (4, 2), (2, 1)])
+def test_attention_backward_matches_numeric_gradient(q_len, window):
     q, k, v = gaussian(12, q_len, 4, 6), gaussian(13, 4, 2, 6), gaussian(14, 4, 2, 5)
     dout = gaussian(15, q_len, 4, 5)
     scale = 1 / np.sqrt(6)
-    dq, dk, dv = numerics.attention_backward(q, k, v, dout)
+    dq, dk, dv = numerics.attention_backward(q, k, v, dout, window=window)
     q64, k64, v64 = (a.astype(np.float64) for a in (q, k, v))
-    close(dq, numeric_gradient(lambda a: float((reference_attention(a, k64, v64, scale) * dout).sum()), q), 1e-6)
-    close(dk, numeric_gradient(lambda a: float((reference_attention(q64, a, v64, scale) * dout).sum()), k), 1e-6)
-    close(dv, numeric_gradient(lambda a: float((reference_attention(q64, k64, a, scale) * dout).sum()), v), 1e-6)
+
+    def loss(a, b, c):
+        return float((reference_attention(a, b, c, scale, window) * dout).sum())
+
+    close(dq, numeric_gradient(lambda a: loss(a, k64, v64), q), 1e-6)
+    close(dk, numeric_gradient(lambda a: loss(q64, a, v64), k), 1e-6)
+    close(dv, numeric_gradient(lambda a: loss(q64, k64, a), v), 1e-6)
 
 
 def test_cross_entropy_matches_float64():
@@ -170,7 +176,7 @@ def test_adamw_step_is_the_documented_formula():
 # Decoder gradients
 
 
-@pytest.fixture(scope="module", params=["llama", "qwen2", "qwen3"])
+@pytest.fixture(scope="module", params=["llama", "mistral", "qwen2", "qwen3"])
 def model_file(request, tmp_path_factory) -> ModelFile:
     directory = tmp_path_factory.mktemp(request.param)
     config = tiny_config(request.param)
@@ -207,7 +213,8 @@ def reference_loss(config, w, tokens, targets) -> float:
             q, k = norm(q, w[p + "attention.q_norm.weight"]), norm(k, w[p + "attention.k_norm.weight"])
         q, k = rotate(q), rotate(k)
         v = proj(h, p + "attention.v").reshape(n, config.kv_heads, hd)
-        x = x + reference_attention(q, k, v, 1 / np.sqrt(hd)).reshape(n, -1) @ w[p + "attention.o.weight"].T
+        attended = reference_attention(q, k, v, 1 / np.sqrt(hd), config.window(i))
+        x = x + attended.reshape(n, -1) @ w[p + "attention.o.weight"].T
         h = norm(x, w[p + "mlp_norm.weight"])
         gate = h @ w[p + "mlp.gate.weight"].T
         x = x + (gate / (1 + np.exp(-gate)) * (h @ w[p + "mlp.up.weight"].T)) @ w[p + "mlp.down.weight"].T
@@ -416,3 +423,13 @@ def test_cli_finetune_and_resume(tmp_path, capsys):
     assert "fine-tuned:         4 steps" in capsys.readouterr().out
     assert cli(["--model", str(tmp_path / "a.dllm"), "chat", "What is 3 plus 3?", "--max-tokens", "4"]) == 0
     assert cli([*common, "-o", str(tmp_path / "missing.dllm"), "--resume", str(tmp_path / "nope")]) == 1
+
+
+def test_architectures_without_a_backward_pass_are_refused():
+    """OLMo 2's post-norms have no gradient code yet; training must say so rather than compute something else."""
+    from etalii_dllm.importing.importer import hf_config
+
+    with pytest.raises(ValueError, match="olmo2"):
+        DecoderGradients(hf_config(tiny_config("olmo2")))
+    with pytest.raises(ValueError, match="granite"):
+        DecoderGradients(hf_config(tiny_config("granite")))

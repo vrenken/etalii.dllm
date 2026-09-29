@@ -142,7 +142,7 @@ AdamW from `grad.hpp`.
 | `prompt_cache.py` | KV caches of earlier requests, lent to the next prompt that shares their prefix; saves work, never changes tokens. |
 | `batching.py` | Continuous batching: concurrent generations share one `forward_batch` per step, each keeping its solo bits. |
 | `sampling.py` | Temperature, top-k and top-p sampling with a seeded generator and ties broken on token id. |
-| `tokenization.py`, `bpe.py` | The byte tokenizer of the placeholder model, and byte-level BPE driven by a `tokenizer.json`. |
+| `tokenization.py`, `bpe.py` | The byte tokenizer of the placeholder model, and BPE (byte-level or SentencePiece-style) driven by a `tokenizer.json`. |
 | `verify.py` | `dllm verify`: one fingerprint of a fixed workload (kernels, Unicode, tokenizer, logits, answers) to compare machines. |
 | `unicode.py` | Normalisation, lower-casing and regex categories from Unicode 15.1 tables shipped in the package, so the Python version cannot change tokenization. |
 | `models.py` | The `LanguageModel` protocol and the seeded placeholder `BigramModel`. |

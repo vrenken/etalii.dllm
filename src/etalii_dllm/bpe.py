@@ -1,8 +1,13 @@
-"""Byte-level BPE tokenizer driven by a Hugging Face ``tokenizer.json`` (GPT-2, SmolLM2, Qwen2, Llama 3 style).
+"""BPE tokenizer driven by a Hugging Face ``tokenizer.json``.
+
+Two families are supported: byte-level BPE (GPT-2, SmolLM2, Qwen2, Llama 3) and the SentencePiece-style BPE that
+``transformers`` converts Llama 2, TinyLlama, Mistral and Phi-3 tokenizers to (spaces become ``▁``, unknown
+characters fall back to ``<0xAB>`` byte tokens).
 
 The pipeline mirrors the ``tokenizers`` library: added tokens are split out first, the rest is normalised,
-pre-tokenised (``Split``, ``Digits``, ``ByteLevel``), mapped to byte-level characters and merged with the same
-priority rule (lowest merge rank first, leftmost on ties). Tests compare the output with the reference library.
+pre-tokenised (``Split``, ``Digits``, ``ByteLevel``, ``Metaspace``), mapped to byte-level characters (byte-level
+BPE only) and merged with the same priority rule (lowest merge rank first, leftmost on ties). Tests compare the
+output with the reference library.
 
 Determinism: no sets or dict iteration decide an outcome, and nothing depends on the locale or ``PYTHONHASHSEED``.
 Normalisation, lower-casing and the Unicode classes (``\\p{L}``, ...) in the regular expressions come from
@@ -47,6 +52,13 @@ def bytes_to_unicode() -> dict[int, str]:
 # --- normalisers -------------------------------------------------------------------------------------------------
 
 
+def _pattern(spec: Mapping[str, Any]) -> regex.Pattern[str]:
+    """A ``tokenizers`` pattern: ``{"String": ...}`` (literal) or ``{"Regex": ...}``."""
+    if "Regex" in spec:
+        return unicode.compile(spec["Regex"])
+    return regex.compile(regex.escape(spec["String"]))
+
+
 def _normalizer(spec: Mapping[str, Any] | None) -> Callable[[str], str]:
     if spec is None:
         return lambda text: text
@@ -56,6 +68,21 @@ def _normalizer(spec: Mapping[str, Any] | None) -> Callable[[str], str]:
         return lambda text: unicode.normalize(form, text)
     if kind == "Lowercase":
         return unicode.lower
+    if kind == "Prepend":
+        prefix = spec["prepend"]
+        return lambda text: prefix + text if text else text
+    if kind == "Replace":
+        pattern, content = _pattern(spec["pattern"]), spec["content"]
+        return lambda text: pattern.sub(lambda _: content, text)
+    if kind == "Strip":
+        left, right = bool(spec.get("strip_left", True)), bool(spec.get("strip_right", True))
+
+        def strip(text: str) -> str:
+            if left:
+                text = text.lstrip()
+            return text.rstrip() if right else text
+
+        return strip
     if kind == "Sequence":
         steps = [_normalizer(s) for s in spec["normalizers"]]
 
@@ -70,7 +97,9 @@ def _normalizer(spec: Mapping[str, Any] | None) -> Callable[[str], str]:
 
 # --- pre-tokenisers ----------------------------------------------------------------------------------------------
 
-PreTokenizer = Callable[[list[str]], list[str]]
+PreTokenizer = Callable[[list[str], bool], list[str]]
+"""Maps pieces to pieces. The flag says whether the first piece starts at the beginning of the input text (not
+after an added token), which ``Metaspace`` with ``prepend_scheme: first`` needs."""
 
 
 def _split_by(pattern: regex.Pattern[str], text: str, behavior: str, invert: bool) -> list[str]:
@@ -119,7 +148,7 @@ def _split_by(pattern: regex.Pattern[str], text: str, behavior: str, invert: boo
         merged = []
         previous: bool | None = None
         for piece, is_match in pieces:
-            if is_match and previous is True:
+            if is_match == previous:  # tokenizers merges runs of either kind (with invert, runs of delimiters)
                 merged[-1] += piece
             else:
                 merged.append(piece)
@@ -131,33 +160,45 @@ def _split_by(pattern: regex.Pattern[str], text: str, behavior: str, invert: boo
 def _pre_tokenizer(spec: Mapping[str, Any] | None) -> tuple[PreTokenizer, bool]:
     """Returns the pre-tokeniser and whether it includes the byte-level mapping."""
     if spec is None:
-        return (lambda pieces: pieces), False
+        return (lambda pieces, _: pieces), False
     kind = spec.get("type")
     if kind == "Sequence":
         steps = [_pre_tokenizer(s) for s in spec["pretokenizers"]]
 
-        def run(pieces: list[str]) -> list[str]:
+        def run(pieces: list[str], at_start: bool) -> list[str]:
             for step, _ in steps:
-                pieces = step(pieces)
+                pieces = step(pieces, at_start)
             return pieces
 
         return run, any(byte_level for _, byte_level in steps)
     if kind == "Split":
-        pattern_spec = spec["pattern"]
-        if "Regex" in pattern_spec:
-            pattern = unicode.compile(pattern_spec["Regex"])
-        else:
-            pattern = regex.compile(regex.escape(pattern_spec["String"]))
+        pattern = _pattern(spec["pattern"])
         behavior, invert = spec.get("behavior", "Isolated"), bool(spec.get("invert", False))
-        return (lambda pieces: [p for piece in pieces for p in _split_by(pattern, piece, behavior, invert)]), False
+        return (lambda pieces, _: [p for piece in pieces for p in _split_by(pattern, piece, behavior, invert)]), False
     if kind == "Digits":
         digits = unicode.compile(r"\p{Nd}" if spec.get("individual_digits") else r"\p{Nd}+")
-        return (lambda pieces: [p for piece in pieces for p in _split_by(digits, piece, "Isolated", False)]), False
+        return (lambda pieces, _: [p for piece in pieces for p in _split_by(digits, piece, "Isolated", False)]), False
+    if kind == "Metaspace":
+        replacement = spec.get("replacement", "▁")
+        scheme = _prepend_scheme(spec)
+        delimiter = regex.compile(regex.escape(replacement)) if spec.get("split", True) else None
+
+        def metaspace(pieces: list[str], at_start: bool) -> list[str]:
+            out = []
+            for i, piece in enumerate(pieces):
+                piece = piece.replace(" ", replacement)
+                prepend = scheme == "always" or (scheme == "first" and at_start and i == 0)
+                if prepend and piece and not piece.startswith(replacement):
+                    piece = replacement + piece
+                out.extend(_split_by(delimiter, piece, "MergedWithNext", False) if delimiter else [piece])
+            return out
+
+        return metaspace, False
     if kind == "ByteLevel":
         add_prefix_space = bool(spec.get("add_prefix_space", False))
         gpt2 = unicode.compile(GPT2_PATTERN) if spec.get("use_regex", True) else None
 
-        def byte_level(pieces: list[str]) -> list[str]:
+        def byte_level(pieces: list[str], _: bool) -> list[str]:
             out = []
             for piece in pieces:
                 if add_prefix_space and not piece.startswith(" "):
@@ -167,6 +208,62 @@ def _pre_tokenizer(spec: Mapping[str, Any] | None) -> tuple[PreTokenizer, bool]:
 
         return byte_level, True
     raise TokenizerError(f"pre-tokenizer {kind!r} is not supported")
+
+
+def _prepend_scheme(spec: Mapping[str, Any]) -> str:
+    """``Metaspace``'s prepend scheme; files written before ``prepend_scheme`` existed use ``add_prefix_space``."""
+    if "prepend_scheme" in spec:
+        scheme = str(spec["prepend_scheme"])
+    else:
+        scheme = "always" if spec.get("add_prefix_space", True) else "never"
+    if scheme not in ("always", "first", "never"):
+        raise TokenizerError(f"Metaspace prepend_scheme {scheme!r} is not supported")
+    return scheme
+
+
+# --- decoders ----------------------------------------------------------------------------------------------------
+
+_BYTE_TOKEN = regex.compile(r"<0x([0-9A-F]{2})>")
+
+
+@dataclass(frozen=True)
+class SentencePieceDecoding:
+    """What the SentencePiece-style decoder chain does: ``replacement`` becomes a space, ``<0xAB>`` tokens become
+    their byte (``ByteFallback``), and one leading space of the whole text is dropped (``Strip`` after ``Fuse``) or,
+    for ``Metaspace`` with a prepend scheme, every replacement character of the first token."""
+
+    replacement: str
+    byte_fallback: bool
+    strip_leading_space: bool
+    strip_first_token: bool = False
+
+
+def _sentencepiece_decoding(spec: Mapping[str, Any]) -> SentencePieceDecoding:
+    steps = spec["decoders"] if spec.get("type") == "Sequence" else [spec]
+    replacement: str | None = None
+    byte_fallback = strip = fused = first_token = False
+    for step in steps:
+        kind = step.get("type")
+        if kind == "Replace" and "String" in step["pattern"] and step["content"] == " " and replacement is None:
+            replacement = step["pattern"]["String"]
+        elif kind == "Metaspace" and replacement is None:
+            replacement = step.get("replacement", "▁")
+            first_token = _prepend_scheme(step) != "never"
+            strip = strip or first_token
+        elif kind == "ByteFallback":
+            byte_fallback = True
+        elif kind == "Fuse":
+            fused = True
+        elif kind == "Strip" and step.get("content") == " " and int(step.get("stop", 0)) == 0:
+            # Before Fuse, Strip would act on every token; after it, on the start of the text.
+            if int(step.get("start", 0)) > 1 or (int(step.get("start", 0)) and not fused):
+                raise TokenizerError(f"Strip decoder {step!r} is not supported")
+            strip = strip or int(step.get("start", 0)) == 1
+        else:
+            raise TokenizerError(f"decoder {kind!r} ({step!r}) is not supported")
+    if replacement is None:
+        raise TokenizerError("a SentencePiece-style decoder must map the replacement character back to a space")
+    return SentencePieceDecoding(replacement, byte_fallback, strip, first_token)
 
 
 # --- BPE model ---------------------------------------------------------------------------------------------------
@@ -251,16 +348,24 @@ class BpeTokenizer:
             self._merges.setdefault(pair, (rank, merged))
         self._ignore_merges = bool(model.get("ignore_merges", False))
         self._byte_fallback = bool(model.get("byte_fallback", False))
+        self._fuse_unk = bool(model.get("fuse_unk", False))
         unk = model.get("unk_token")
         self._unk = self._vocab.get(unk) if unk is not None else None
 
         self._normalize = _normalizer(spec.get("normalizer"))
-        self._pre_tokenize, byte_level = _pre_tokenizer(spec.get("pre_tokenizer"))
-        if not byte_level:
-            raise TokenizerError("only byte-level BPE (a ByteLevel pre-tokenizer) is supported")
+        self._pre_tokenize, self._byte_level = _pre_tokenizer(spec.get("pre_tokenizer"))
         decoder = spec.get("decoder") or {}
-        if decoder.get("type") != "ByteLevel":
-            raise TokenizerError(f"decoder {decoder.get('type')!r} is not supported (only ByteLevel)")
+        self._sentencepiece: SentencePieceDecoding | None = None
+        if self._byte_level:
+            if decoder.get("type") != "ByteLevel":
+                raise TokenizerError(f"decoder {decoder.get('type')!r} is not supported with a ByteLevel pre-tokenizer")
+        elif decoder.get("type") == "ByteLevel":
+            raise TokenizerError("a ByteLevel decoder needs a ByteLevel pre-tokenizer (byte-level BPE)")
+        else:
+            self._sentencepiece = _sentencepiece_decoding(decoder)
+        self.strips_leading_space = self._sentencepiece is not None and self._sentencepiece.strip_leading_space
+        """Whether decoding drops one leading space of the text (SentencePiece-style tokenizers). ``decode`` does it;
+        callers that concatenate ``decode_bytes`` of single tokens, as streaming does, drop it themselves."""
         self._post = self._post_processor(spec.get("post_processor"))
 
         self._added = [
@@ -279,6 +384,11 @@ class BpeTokenizer:
         self._id_to_token: dict[int, str] = {}
         for token, index in sorted(self._vocab.items(), key=lambda item: (item[1], item[0])):
             self._id_to_token.setdefault(index, token)
+        self._byte_tokens = {
+            index: int(match.group(1), 16)
+            for token, index in self._vocab.items()
+            if (match := _BYTE_TOKEN.fullmatch(token)) is not None
+        }
         self._byte_encoder = bytes_to_unicode()
         self._byte_decoder = {character: byte for byte, character in self._byte_encoder.items()}
         self._cache: dict[str, tuple[int, ...]] = {}
@@ -361,18 +471,26 @@ class BpeTokenizer:
             result: tuple[int, ...] = (self._vocab[piece],)
         else:
             symbols: list[int] = []
+            previous_unknown = False
             for character in piece:
                 index = self._vocab.get(character)
                 if index is not None:
                     symbols.append(index)
-                elif self._byte_fallback:
-                    symbols.extend(self._vocab[f"<0x{b:02X}>"] for b in character.encode("utf-8"))
-                elif self._unk is not None:
-                    symbols.append(self._unk)
-                else:
+                    previous_unknown = False
+                    continue
+                if self._byte_fallback:
+                    fallback = [self._vocab.get(f"<0x{b:02X}>") for b in character.encode("utf-8")]
+                    if all(token is not None for token in fallback):
+                        symbols.extend(token for token in fallback if token is not None)
+                        previous_unknown = False
+                        continue
+                if self._unk is None:
                     raise TokenizerError(f"character {character!r} is not in the vocabulary")
+                if not (self._fuse_unk and previous_unknown):
+                    symbols.append(self._unk)
+                previous_unknown = True
             result = tuple(_merge(symbols, self._merges))
-        if len(self._cache) < 100_000:
+        if len(self._cache) < 100_000 and len(piece) <= 256:
             self._cache[piece] = result
         return result
 
@@ -380,26 +498,37 @@ class BpeTokenizer:
         """Token ids for ``text``. ``add_special_tokens`` applies the post-processor (e.g. a BOS token), as the
         ``tokenizers`` default does; chat prompts rendered from a template already contain their special tokens."""
         ids: list[int] = []
-        for part, added in self._split_added(text):
+        for i, (part, added) in enumerate(self._split_added(text)):
             if added is not None:
                 ids.append(added.id)
                 continue
-            for piece in self._pre_tokenize([self._normalize(part)]):
+            for piece in self._pre_tokenize([self._normalize(part)], i == 0):
                 if piece:
-                    mapped = "".join(self._byte_encoder[b] for b in piece.encode("utf-8"))
-                    ids.extend(self._word(mapped))
+                    if self._byte_level:
+                        piece = "".join(self._byte_encoder[b] for b in piece.encode("utf-8"))
+                    ids.extend(self._word(piece))
         return self._post(ids) if add_special_tokens else ids
 
     # -- decoding --
 
     def decode_bytes(self, tokens: Iterable[int], *, skip_special_tokens: bool = True) -> bytes:
-        """The exact bytes of ``tokens`` (useful for streaming, where a token may end mid-character)."""
+        """The exact bytes of ``tokens`` (useful for streaming, where a token may end mid-character). Concatenating
+        the bytes of single tokens gives the bytes of the sequence; see :attr:`strips_leading_space` for the one
+        difference to :meth:`decode`."""
         out = bytearray()
+        sentencepiece = self._sentencepiece
         for token in tokens:
             if skip_special_tokens and token in self._special_ids:
                 continue
             text = self._id_to_token.get(token)
             if text is None:
+                continue
+            if sentencepiece is not None:
+                byte = self._byte_tokens.get(token) if sentencepiece.byte_fallback else None
+                if byte is not None:
+                    out.append(byte)
+                else:
+                    out.extend(text.replace(sentencepiece.replacement, " ").encode("utf-8"))
                 continue
             if text in self._added_by_content:
                 out.extend(text.encode("utf-8"))
@@ -410,7 +539,22 @@ class BpeTokenizer:
         return bytes(out)
 
     def decode(self, tokens: Iterable[int], *, skip_special_tokens: bool = True) -> str:
-        return self.decode_bytes(tokens, skip_special_tokens=skip_special_tokens).decode("utf-8", errors="replace")
+        tokens = [t for t in tokens if not (skip_special_tokens and t in self._special_ids)]
+        sentencepiece = self._sentencepiece
+        if (
+            sentencepiece is not None
+            and sentencepiece.strip_first_token
+            and tokens
+            and not (sentencepiece.byte_fallback and tokens[0] in self._byte_tokens)
+        ):
+            # tokenizers' Metaspace decoder drops every replacement character of the first token, not only one.
+            first = (self._id_to_token.get(tokens[0]) or "").replace(sentencepiece.replacement, "")
+            rest = self.decode_bytes(tokens[1:], skip_special_tokens=False)
+            return (first.encode("utf-8") + rest).decode("utf-8", errors="replace")
+        data = self.decode_bytes(tokens, skip_special_tokens=skip_special_tokens)
+        if self.strips_leading_space and data.startswith(b" "):
+            data = data[1:]
+        return data.decode("utf-8", errors="replace")
 
 
 # --- GGUF tokenizers ---------------------------------------------------------------------------------------------

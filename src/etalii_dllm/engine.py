@@ -304,6 +304,7 @@ class DllmEngine:
             stop=request.stop,
             constraint=constraint,
             top_logprobs=request.top_logprobs,
+            new_text=request.prompt is None,
         )
         return ChatStream(generation.prompt_tokens, self._events(generation, request, tools), generation.cached_tokens)
 

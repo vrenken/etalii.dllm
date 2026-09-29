@@ -310,12 +310,14 @@ def attention(
     scale: float | None = None,
     causal: bool = True,
     q_offset: int | None = None,
+    window: int | None = None,
     device: str = "cpu",
 ) -> Tensor:
     """Scaled dot-product attention over ``[length, heads, dim]`` tensors with grouped-query heads.
 
     ``scale`` defaults to ``1 / sqrt(head_dim)``. With ``causal``, query ``t`` sits at position ``q_offset + t``
-    (default ``kv_len - q_len``, i.e. the queries are the last tokens of the KV cache) and sees keys up to it.
+    (default ``kv_len - q_len``, i.e. the queries are the last tokens of the KV cache) and sees keys up to it; a
+    ``window`` (sliding-window attention) limits that to the last ``window`` keys, itself included.
     Each output row is computed independently in a fixed order, so prefill and incremental decoding agree bit for bit.
     """
     qa, ka, va = _float32(q), _float32(k), _float32(v)
@@ -338,9 +340,18 @@ def attention(
             scale=s,
             causal=causal,
             q_offset=offset,
+            window=window,
         )
         return Tensor(on_gpu.numpy())
-    return Tensor(_kernels.attention(qa, ka, va, s, causal, -1 if q_offset is None else q_offset))
+    return Tensor(_kernels.attention(qa, ka, va, s, causal, -1 if q_offset is None else q_offset, _window(window)))
+
+
+def _window(window: int | None) -> int:
+    if window is None:
+        return 0
+    if window < 1:
+        raise ValueError("window must be positive")
+    return int(window)
 
 
 # Gradients. Each has the evaluation order documented in cpp/include/dllm/grad.hpp and docs/kernels.md.
@@ -377,6 +388,7 @@ def attention_backward(
     scale: float | None = None,
     causal: bool = True,
     q_offset: int | None = None,
+    window: int | None = None,
 ) -> tuple[Tensor, Tensor, Tensor]:
     """``(dq, dk, dv)`` of :func:`attention` with the same arguments."""
     qa = _float32(q)
@@ -386,7 +398,9 @@ def attention_backward(
         raise ValueError("q_offset must be non-negative")
     s = 1.0 / math.sqrt(qa.shape[2]) if scale is None else float(scale)
     offset = -1 if q_offset is None else q_offset
-    dq, dk, dv = _kernels.attention_backward(qa, _float32(k), _float32(v), _float32(dout), s, causal, offset)
+    dq, dk, dv = _kernels.attention_backward(
+        qa, _float32(k), _float32(v), _float32(dout), s, causal, offset, _window(window)
+    )
     return Tensor(dq), Tensor(dk), Tensor(dv)
 
 
