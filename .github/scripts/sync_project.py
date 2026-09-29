@@ -26,8 +26,8 @@ REPO = os.environ["GITHUB_REPOSITORY"]
 OWNER, NAME = REPO.split("/")
 TITLE = os.environ.get("PROJECT_TITLE", "EtAlii.Dllm")
 API = os.environ.get("GITHUB_API_URL", "https://api.github.com")
-PHASE_COUNT = 7
-COLORS = ["GREEN", "BLUE", "PURPLE", "GRAY", "YELLOW", "ORANGE", "RED"]
+PHASE_COUNT = 8
+COLORS = ["GREEN", "BLUE", "PURPLE", "GRAY", "YELLOW", "ORANGE", "RED", "PINK"]
 
 
 def request(method, url, body=None, accept="application/vnd.github+json"):
@@ -140,7 +140,20 @@ def ensure_fields(project, phase_names):
     fields = {f["name"]: f for f in graphql(FIELDS_QUERY, id=project["id"])["node"]["fields"]["nodes"] if f}
     missing = [n for n in phase_names if n not in {o["name"] for o in fields["Phase"]["options"]}]
     if missing:
-        print(f"::warning::Add these options to the Phase field by hand: {', '.join(missing)}")
+        # Replacing the options clears the Phase of every item; main() sets it again for all of them below.
+        options = [{"name": n, "color": COLORS[i % len(COLORS)], "description": ""} for i, n in enumerate(phase_names)]
+        try:
+            graphql(
+                """mutation($f: ID!, $o: [ProjectV2SingleSelectFieldOptionInput!]) {
+                updateProjectV2Field(input: {fieldId: $f, singleSelectOptions: $o}) {
+                    projectV2Field { __typename } } }""",
+                f=fields["Phase"]["id"],
+                o=options,
+            )
+            print(f"Added Phase options: {', '.join(missing)}")
+            fields = {f["name"]: f for f in graphql(FIELDS_QUERY, id=project["id"])["node"]["fields"]["nodes"] if f}
+        except RuntimeError as error:
+            print(f"::warning::Add these options to the Phase field by hand: {', '.join(missing)} ({error})")
     return fields
 
 

@@ -4,7 +4,11 @@ name: Project board sync
 # Requires the repository secret PROJECT_TOKEN (see docs/project-board.md).
 on:
   issues:
-    types: [opened, edited, closed, reopened, milestoned, demilestoned, deleted, transferred]
+    types: [opened, edited, closed, reopened, labeled, milestoned, demilestoned, deleted, transferred]
+  push:
+    branches: [develop]
+    paths:
+      - .github/milestones.json
   milestone:
     types: [created, edited, closed, opened, deleted]
   schedule:
@@ -14,6 +18,8 @@ on:
     paths:
       - .github/workflows/project-sync.yml
       - .github/scripts/sync_project.py
+      - .github/scripts/ensure_milestones.py
+      - .github/milestones.json
 
 concurrency:
   group: project-sync
@@ -23,7 +29,22 @@ permissions:
   contents: read
 
 jobs:
+  # Creates the milestones in .github/milestones.json and files phase-N labelled issues under them. Needs no secret.
+  milestones:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: Ensure milestones
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/ensure_milestones.py
+
   sync:
+    needs: milestones
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

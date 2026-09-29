@@ -7,6 +7,11 @@ Progress is tracked in the user-owned GitHub Project **EtAlii.Dllm**, linked to 
 - `.github/workflows/project-sync.yml` runs `.github/scripts/sync_project.py` on issue and milestone changes, daily,
   and on demand. It creates the project if needed, adds every issue, and sets `Phase`, `Start date`,
   `Target date` and `Status` (Done when closed). Edit issues and milestones, not the board.
+- New milestones are declared in `.github/milestones.json`; `.github/scripts/ensure_milestones.py` (the first job of
+  the same workflow, using the workflow's own token) creates the ones that are missing and files every issue
+  labelled `phase-N` that has no milestone under "Phase N: ...". So adding a phase takes a PR that extends
+  `milestones.json` plus issues with the new label; existing milestones are never changed by it. New phases also
+  get their option in the board's `Phase` field automatically.
 - The **Roadmap** view shows items from `Start date` to `Target date`, grouped by `Phase`.
 
 ## One-time setup

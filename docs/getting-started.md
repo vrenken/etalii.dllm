@@ -6,6 +6,23 @@ work yet.
 
 ## 1. Install
 
+### Pre-built wheel (no compiler needed)
+
+Every [release](https://github.com/vrenken/etalii.dllm/releases) carries wheels for Linux (x86_64, aarch64),
+Windows (x86_64) and macOS (Apple silicon and Intel) for Python 3.11 to 3.13, each tested against the full test
+suite, golden hashes included. pip picks the right one for your machine from the release page:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate          # Windows (PowerShell): .venv\Scripts\Activate.ps1
+pip install etalii-dllm --find-links https://github.com/vrenken/etalii.dllm/releases/expanded_assets/v0.1.0
+```
+
+Add `"etalii-dllm[cuda]"` instead of `etalii-dllm` for the GPU backend (Linux and Windows). Then continue with
+the check below; you need a clone only for the tests and to build from source.
+
+### From source
+
 You need Python 3.11 or newer, CMake 3.18+ and a C++17 compiler (the numeric kernels are a C++ extension that is
 compiled during installation):
 

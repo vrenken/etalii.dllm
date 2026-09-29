@@ -40,7 +40,9 @@ Without a model file the engine falls back to a seeded placeholder (a bigram tab
 New here? [Getting started](docs/getting-started.md) walks through installing, importing a real model and using it
 from the command line, the HTTP API and MCP.
 
-Requires Python 3.11+, CMake and a C++17 compiler (the numeric kernels are a C++ extension built on install).
+Pre-built wheels for Linux, Windows and macOS are attached to every [release](https://github.com/vrenken/etalii.dllm/releases)
+(see [getting started](docs/getting-started.md#1-install)). Building from source requires Python 3.11+, CMake and
+a C++17 compiler (the numeric kernels are a C++ extension built on install).
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
@@ -129,6 +131,7 @@ Summarised from the [research notes](docs/research/deterministic-inference.md):
 | 4. API parity ✅ | Streaming (SSE), tool/function calling, JSON-schema structured output, logprobs, Anthropic Messages endpoint, embeddings. See [HTTP API](docs/api.md) |
 | 5. MCP, both directions ✅ | Richer MCP server (prompts, resources); MCP client host so the model can call external tools during a chat. See [MCP](docs/mcp.md) |
 | 6. Performance ✅ | ✅ SIMD and multi-threading with fixed, batch-invariant reduction order; ✅ integer quantisation (Q8_0, associative int32 accumulation); ✅ batch-invariance stress tests; ✅ CUDA kernels that give the CPU's bits (`--device cuda`). See [kernels](docs/kernels.md#threads-and-simd) and [GPU](docs/kernels.md#gpu) |
+| 7. Usability and releases | Pre-built wheels for Linux, Windows and macOS and tagged GitHub releases ([releasing](docs/releasing.md)); PyPI; the CUDA install route checked in CI; a Docker image; a web chat UI; a larger verified model (Qwen2.5-1.5B) |
 
 ## Working with Claude Code
 
