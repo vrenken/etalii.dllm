@@ -298,9 +298,10 @@ def activation(x: CudaTensor, kind: str) -> CudaTensor:
     return CudaTensor(_kernels.cuda_activation(x.array, ACTIVATIONS[kind]), x.shape)
 
 
-def swiglu(gate: CudaTensor, up: CudaTensor) -> CudaTensor:
-    """``silu(gate) * up`` with the SiLU rounded to float32 first, as the CPU decoder computes it."""
-    return CudaTensor(_kernels.cuda_swiglu(gate.array, up.array), gate.shape)
+def swiglu(gate: CudaTensor, up: CudaTensor, kind: str = "silu") -> CudaTensor:
+    """``act(gate) * up`` (``kind`` ``silu`` or ``gelu_tanh``) with the activation rounded to float32 first, as the
+    CPU decoder computes it."""
+    return CudaTensor(_kernels.cuda_swiglu(gate.array, up.array, ACTIVATIONS[kind]), gate.shape)
 
 
 def add(a: CudaTensor, b: CudaTensor) -> CudaTensor:

@@ -693,9 +693,10 @@ inline Array activation(const Array& x, int kind) {
     return out;
 }
 
-// float(silu(gate)) * up, elementwise in float32 (the SwiGLU product of the decoder).
-inline Array swiglu(const Array& gate, const Array& up) {
+// float(act(gate)) * up, elementwise in float32 (the gated product of the decoder); kind: 0 silu, 2 gelu_tanh.
+inline Array swiglu(const Array& gate, const Array& up, int kind = 0) {
     detail::require(gate.bytes() == up.bytes() && gate.bytes() % sizeof(float) == 0, "swiglu: sizes do not match");
+    detail::require(kind == 0 || kind == 2, "swiglu: kind must be silu (0) or gelu_tanh (2)");
     Runtime& runtime = Runtime::instance();
     auto lock = runtime.acquire();
     Array out(gate.bytes());
@@ -703,7 +704,7 @@ inline Array swiglu(const Array& gate, const Array& up) {
     CUdeviceptr du = up.pointer();
     CUdeviceptr dout = out.pointer();
     unsigned long long n = gate.bytes() / sizeof(float);
-    void* arguments[] = {&dg, &du, &dout, &n};
+    void* arguments[] = {&dg, &du, &dout, &n, &kind};
     runtime.launch(Runtime::kSwiglu, detail::blocks_for(n), 1, detail::kBlock, arguments);
     return out;
 }

@@ -423,11 +423,12 @@ NB_MODULE(_kernels, m) {
         nb::arg("x"), nb::arg("kind"), "silu (0), gelu (1) or gelu_tanh (2) on the GPU; the same bits.");
     m.def(
         "cuda_swiglu",
-        [](const Array& gate, const Array& up) {
+        [](const Array& gate, const Array& up, int kind) {
             nb::gil_scoped_release release;
-            return dllm::cuda::swiglu(gate, up);
+            return dllm::cuda::swiglu(gate, up, kind);
         },
-        nb::arg("gate"), nb::arg("up"), "float32 silu(gate) * up on the GPU.");
+        nb::arg("gate"), nb::arg("up"), nb::arg("kind") = 0,
+        "float32 act(gate) * up on the GPU: silu (0) or gelu_tanh (2).");
     m.def(
         "cuda_add",
         [](const Array& a, const Array& b) {

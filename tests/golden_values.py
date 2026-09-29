@@ -30,6 +30,7 @@ TINY_IMPORT_FINGERPRINT = "1585fbbfe689fd0d52dc36a4b3668f3af07babda2f72c8bfd33d9
 
 # fingerprint() of the decoder's next-token logits for tests/test_transformer.py::PROMPT on the tiny imported models.
 TINY_LOGITS_FINGERPRINT = {
+    "gemma3": "10feca605e2514c582b6d23f28e033b997a9b404f730cd9e2baaec9a37c9eb60",
     "granite": "d899150301a14e954bf92d5f768c0d74ca8fba8b7c60ed433a0e90e89704c5ca",
     "llama": "12a0878056708099f139e39c6948153b7ba152960259846ab9caa940863e1e29",
     "mistral": "a03b36df3ec07340f1e54d9d2150a77afd8e08a261977d61d7d51c59248e075f",

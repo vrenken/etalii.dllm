@@ -528,6 +528,60 @@ def test_fused_tensor_of_the_wrong_size_is_refused(tmp_path):
         import_model(tmp_path / "phi", tmp_path / "out.dllm")
 
 
+def test_gemma3_configs_are_mapped():
+    from etalii_dllm.importing.importer import hf_config
+
+    config = hf_config(tiny_config("gemma3"))
+    assert (config.family, config.norm_placement, config.norm_unit_offset, config.activation) == (
+        "gemma3",
+        "sandwich",
+        True,
+        "gelu_tanh",
+    )
+    assert config.qk_norm and config.tie_word_embeddings and config.local_rope_theta == 100.0
+    assert config.embedding_multiplier == 4.0 and config.attention_multiplier == 12**-0.5
+    assert [config.window(i) for i in range(2)] == [3, None] and config.uses_local_rope(0)
+    assert not config.uses_local_rope(1) and config.rope_scaling == {"rope_type": "linear", "factor": 2.0}
+    # transformers v5: RoPE per layer type; older configs: a sliding_window_pattern instead of layer_types.
+    v5 = {k: v for k, v in tiny_config("gemma3").items() if k not in ("rope_scaling", "rope_local_base_freq")}
+    del v5["layer_types"]
+    v5.update(
+        num_hidden_layers=4,
+        sliding_window_pattern=2,
+        rope_parameters={
+            "full_attention": {"rope_type": "default", "rope_theta": 5e5},
+            "sliding_attention": {"rope_type": "default", "rope_theta": 1e4},
+        },
+    )
+    config = hf_config(v5)
+    assert (config.rope_theta, config.rope_scaling, config.local_rope_theta) == (5e5, None, 1e4)
+    assert config.sliding_window_layers == (0, 2)
+    old = {**tiny_config("gemma3"), "rope_scaling": None}
+    del old["rope_local_base_freq"], old["tie_word_embeddings"], old["layer_types"]
+    config = hf_config(old)
+    assert config.local_rope_theta == 10_000.0 and config.tie_word_embeddings and config.sliding_window_layers is None
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"model_type": "gemma3"}, "import the text-only Gemma 3 checkpoint"),
+        ({"attn_logit_softcapping": 50.0}, "attn_logit_softcapping is not supported yet"),
+        ({"final_logit_softcapping": 30.0}, "final_logit_softcapping is not supported yet"),
+        ({"hidden_activation": "gelu"}, "activation 'gelu' is not supported"),
+        (
+            {"rope_parameters": {"full_attention": {}, "sliding_attention": {"rope_type": "linear", "factor": 2.0}}},
+            "RoPE scaling on Gemma 3's sliding-window layers",
+        ),
+    ],
+)
+def test_unsupported_gemma_configs_are_refused(change, message):
+    from etalii_dllm.importing.importer import hf_config
+
+    with pytest.raises(ModelImportError, match=message):
+        hf_config({**tiny_config("gemma3"), **change})
+
+
 def test_checkpoint_without_config_is_refused(tmp_path):
     write_hf_checkpoint(tmp_path / "tiny")
     (tmp_path / "tiny" / "config.json").unlink()
