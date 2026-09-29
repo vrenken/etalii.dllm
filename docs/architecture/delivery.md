@@ -28,7 +28,7 @@ flowchart LR
 | Workflow | Runs on | Proves |
 | --- | --- | --- |
 | `ci.yml` | every PR, pushes to `develop`/`main` | `ruff check` and `ruff format --check`; the full test suite, golden hashes included, on Linux (Python 3.11, 3.12, 3.13), Windows and macOS; the `[cuda]` extra installs and NVRTC compiles the GPU kernels for every architecture (no GPU needed) |
-| `reference.yml` | every PR, pushes | the real pinned SmolLM2-135M, Qwen2.5-0.5B and Qwen2.5-1.5B imports match `transformers` (tokens, templates, logits, greedy answers) and their golden hashes; measures Qwen2.5-1.5B memory and speed |
+| `reference.yml` | every PR, pushes | the real pinned SmolLM2-135M, Qwen2.5-0.5B, Qwen2.5-1.5B and Qwen3-0.6B imports match `transformers` (tokens, templates, logits, greedy answers) and their golden hashes; LoRA adapters round-trip with `peft`; measures Qwen2.5-1.5B memory and speed |
 | `docker.yml` | pushes to `develop`, PRs touching the build, releases | the image builds, answers identical requests identically and serves the chat page; publishes `ghcr.io/vrenken/etalii-dllm` for amd64 and arm64 |
 | `release.yml` | tags `v*`, manual runs, PRs touching it | sdist and wheels for Linux x86_64/aarch64, Windows x86_64, macOS arm64/x86_64 and CPython 3.11 to 3.13, each running the whole test suite; then the release, the image and optionally PyPI |
 | `project-sync.yml` | issue and milestone changes, daily, manual | creates missing milestones from `.github/milestones.json` and syncs issues to the GitHub Project board |
