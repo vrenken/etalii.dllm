@@ -138,6 +138,10 @@ pip install -e ".[dev,cuda]"      # adds NVRTC (nvidia-cuda-nvrtc-cu12); a CUDA 
 dllm --model smollm2-135m.dllm --device cuda info    # prints the GPU, e.g. "cuda (NVIDIA GeForce RTX 4080, sm_89, ...)"
 ```
 
+If `--device cuda` fails, check NVRTC on its own (this needs no GPU; 89 is the compute capability, 8.9 for the
+RTX 40 series): `python -c "from etalii_dllm import cuda; print(cuda.compile_kernels(89).architecture)"` prints
+`sm_89` when NVRTC is found and compiles the kernels. The `[cuda]` extra installs nothing on macOS, which has no CUDA.
+
 NVRTC is found automatically in the `nvidia-cuda-nvrtc` wheel, PyTorch, `$CUDA_PATH`/`$CUDA_HOME` or
 `/usr/local/cuda`; set `DLLM_NVRTC` to the library's full path (for example `nvrtc64_120_0.dll`) to pick one, and
 `DLLM_CUDA_DEVICE` to choose a GPU other than the first. macOS has no CUDA. Details: [kernels](kernels.md#gpu).

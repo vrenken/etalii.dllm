@@ -147,6 +147,129 @@ struct Nvrtc {
     const char* (*nvrtcGetErrorString)(nvrtcResult);
 };
 
+// The kernels compiled by NVRTC: a cubin (sm_XX) or PTX (compute_XX) image, and what produced it.
+struct CompiledKernels {
+    std::vector<char> image;
+    std::string compiler;
+    std::string architecture;
+};
+
+// NVRTC, loaded at run time, compiling kernels.cu + math.hpp. Needs no GPU or driver, so CI can check that the
+// embedded sources compile (etalii_dllm.cuda.compile_kernels).
+class Compiler {
+public:
+    Compiler() = default;
+    Compiler(const Compiler&) = delete;
+    Compiler& operator=(const Compiler&) = delete;
+
+    void open(const std::string& nvrtc_path) {
+        if (!library_.open(nvrtc_path)) {
+            throw std::runtime_error("CUDA: cannot load NVRTC from " + nvrtc_path);
+        }
+        load_nvrtc();
+    }
+
+    // Compiles the kernels to a cubin for the device's architecture when this NVRTC knows it, else to PTX for the
+    // newest architecture it knows (the driver then compiles that for the device). Either way every floating point
+    // operation is an explicit IEEE round-to-nearest instruction, so the choice cannot change a result.
+    CompiledKernels compile(int arch) const {
+        int major = 0;
+        int minor = 0;
+        check_nvrtc(api_.nvrtcVersion(&major, &minor), "nvrtcVersion");
+        int count = 0;
+        check_nvrtc(api_.nvrtcGetNumSupportedArchs(&count), "nvrtcGetNumSupportedArchs");
+        std::vector<int> archs(static_cast<std::size_t>(count));
+        check_nvrtc(api_.nvrtcGetSupportedArchs(archs.data()), "nvrtcGetSupportedArchs");
+        const bool native = std::find(archs.begin(), archs.end(), arch) != archs.end();
+        int target = arch;
+        if (!native) {
+            target = 0;
+            for (int a : archs) {
+                if (a <= arch && a > target) {
+                    target = a;
+                }
+            }
+            if (target == 0) {
+                throw std::runtime_error("CUDA: NVRTC " + std::to_string(major) + "." + std::to_string(minor) +
+                                         " cannot compile for compute capability " + std::to_string(arch / 10) + "." +
+                                         std::to_string(arch % 10));
+            }
+        }
+        const std::string arch_option =
+            std::string(native ? "--gpu-architecture=sm_" : "--gpu-architecture=compute_") + std::to_string(target);
+        CompiledKernels result;
+        result.compiler = "NVRTC " + std::to_string(major) + "." + std::to_string(minor);
+        result.architecture = (native ? "sm_" : "compute_") + std::to_string(target);
+
+        std::vector<const char*> header_sources(std::begin(kShimSources), std::end(kShimSources));
+        std::vector<const char*> header_names(std::begin(kShimNames), std::end(kShimNames));
+        header_sources.push_back(kCudaMathSource);
+        header_names.push_back("dllm/math.hpp");
+        nvrtcProgram program = nullptr;
+        check_nvrtc(api_.nvrtcCreateProgram(&program, kCudaKernelsSource, "kernels.cu",
+                                              static_cast<int>(header_sources.size()), header_sources.data(),
+                                              header_names.data()),
+                    "nvrtcCreateProgram");
+        const char* options[] = {arch_option.c_str(), "--std=c++17", "--device-as-default-execution-space",
+                                 "--fmad=false", "--prec-div=true", "--prec-sqrt=true", "--ftz=false"};
+        const nvrtcResult compiled =
+            api_.nvrtcCompileProgram(program, static_cast<int>(sizeof(options) / sizeof(options[0])), options);
+        if (compiled != 0) {
+            std::size_t log_size = 0;
+            api_.nvrtcGetProgramLogSize(program, &log_size);
+            std::string log(log_size, '\0');
+            api_.nvrtcGetProgramLog(program, log.data());
+            api_.nvrtcDestroyProgram(&program);
+            throw std::runtime_error("CUDA: compiling the kernels failed:\n" + log);
+        }
+        std::size_t size = 0;
+        std::vector<char>& image = result.image;
+        if (native) {
+            check_nvrtc(api_.nvrtcGetCUBINSize(program, &size), "nvrtcGetCUBINSize");
+            image.resize(size);
+            check_nvrtc(api_.nvrtcGetCUBIN(program, image.data()), "nvrtcGetCUBIN");
+        } else {
+            check_nvrtc(api_.nvrtcGetPTXSize(program, &size), "nvrtcGetPTXSize");
+            image.resize(size);
+            check_nvrtc(api_.nvrtcGetPTX(program, image.data()), "nvrtcGetPTX");
+        }
+        api_.nvrtcDestroyProgram(&program);
+        return result;
+    }
+
+private:
+    void load_nvrtc() {
+        api_.nvrtcVersion = library_.symbol<decltype(api_.nvrtcVersion)>("nvrtcVersion");
+        api_.nvrtcGetNumSupportedArchs =
+            library_.symbol<decltype(api_.nvrtcGetNumSupportedArchs)>("nvrtcGetNumSupportedArchs");
+        api_.nvrtcGetSupportedArchs =
+            library_.symbol<decltype(api_.nvrtcGetSupportedArchs)>("nvrtcGetSupportedArchs");
+        api_.nvrtcCreateProgram = library_.symbol<decltype(api_.nvrtcCreateProgram)>("nvrtcCreateProgram");
+        api_.nvrtcCompileProgram =
+            library_.symbol<decltype(api_.nvrtcCompileProgram)>("nvrtcCompileProgram");
+        api_.nvrtcGetProgramLogSize =
+            library_.symbol<decltype(api_.nvrtcGetProgramLogSize)>("nvrtcGetProgramLogSize");
+        api_.nvrtcGetProgramLog = library_.symbol<decltype(api_.nvrtcGetProgramLog)>("nvrtcGetProgramLog");
+        api_.nvrtcGetCUBINSize = library_.symbol<decltype(api_.nvrtcGetCUBINSize)>("nvrtcGetCUBINSize");
+        api_.nvrtcGetCUBIN = library_.symbol<decltype(api_.nvrtcGetCUBIN)>("nvrtcGetCUBIN");
+        api_.nvrtcGetPTXSize = library_.symbol<decltype(api_.nvrtcGetPTXSize)>("nvrtcGetPTXSize");
+        api_.nvrtcGetPTX = library_.symbol<decltype(api_.nvrtcGetPTX)>("nvrtcGetPTX");
+        api_.nvrtcDestroyProgram =
+            library_.symbol<decltype(api_.nvrtcDestroyProgram)>("nvrtcDestroyProgram");
+        api_.nvrtcGetErrorString =
+            library_.symbol<decltype(api_.nvrtcGetErrorString)>("nvrtcGetErrorString");
+    }
+
+    void check_nvrtc(nvrtcResult result, const char* call) const {
+        if (result != 0) {
+            throw std::runtime_error(std::string("CUDA: ") + call + " failed: " + api_.nvrtcGetErrorString(result));
+        }
+    }
+
+    Library library_;
+    Nvrtc api_{};
+};
+
 class Runtime {
 public:
     // Never destroyed: device memory owned by Python objects may be released during interpreter shutdown.
@@ -221,12 +344,9 @@ public:
         check(driver_.cuDevicePrimaryCtxRetain(&context_, device_), "cuDevicePrimaryCtxRetain");
         check(driver_.cuCtxSetCurrent(context_), "cuCtxSetCurrent");
 
-        if (!nvrtc_library_.open(nvrtc_path)) {
-            throw std::runtime_error("CUDA: cannot load NVRTC from " + nvrtc_path);
-        }
-        load_nvrtc();
-        const std::vector<char> image = compile(major * 10 + minor);
-        check(driver_.cuModuleLoadData(&module_, image.data()), "cuModuleLoadData");
+        nvrtc_.open(nvrtc_path);
+        const CompiledKernels kernels = nvrtc_.compile(major * 10 + minor);
+        check(driver_.cuModuleLoadData(&module_, kernels.image.data()), "cuModuleLoadData");
         const char* names[kFunctionCount] = {"linear_f32", "linear_q8", "quantize_q8", "rms_norm", "activation",
                                              "swiglu",     "add",       "copy_words",  "rope",     "attention"};
         for (std::size_t i = 0; i < kFunctionCount; ++i) {
@@ -234,6 +354,8 @@ public:
         }
         device_index_ = index;
         device_name_ = name;
+        compiler_ = kernels.compiler;
+        architecture_ = kernels.architecture;
         ready_ = true;
     }
 
@@ -344,109 +466,13 @@ private:
         driver_.cuGetErrorString = driver_library_.symbol<decltype(driver_.cuGetErrorString)>("cuGetErrorString");
     }
 
-    void load_nvrtc() {
-        nvrtc_.nvrtcVersion = nvrtc_library_.symbol<decltype(nvrtc_.nvrtcVersion)>("nvrtcVersion");
-        nvrtc_.nvrtcGetNumSupportedArchs =
-            nvrtc_library_.symbol<decltype(nvrtc_.nvrtcGetNumSupportedArchs)>("nvrtcGetNumSupportedArchs");
-        nvrtc_.nvrtcGetSupportedArchs =
-            nvrtc_library_.symbol<decltype(nvrtc_.nvrtcGetSupportedArchs)>("nvrtcGetSupportedArchs");
-        nvrtc_.nvrtcCreateProgram = nvrtc_library_.symbol<decltype(nvrtc_.nvrtcCreateProgram)>("nvrtcCreateProgram");
-        nvrtc_.nvrtcCompileProgram =
-            nvrtc_library_.symbol<decltype(nvrtc_.nvrtcCompileProgram)>("nvrtcCompileProgram");
-        nvrtc_.nvrtcGetProgramLogSize =
-            nvrtc_library_.symbol<decltype(nvrtc_.nvrtcGetProgramLogSize)>("nvrtcGetProgramLogSize");
-        nvrtc_.nvrtcGetProgramLog = nvrtc_library_.symbol<decltype(nvrtc_.nvrtcGetProgramLog)>("nvrtcGetProgramLog");
-        nvrtc_.nvrtcGetCUBINSize = nvrtc_library_.symbol<decltype(nvrtc_.nvrtcGetCUBINSize)>("nvrtcGetCUBINSize");
-        nvrtc_.nvrtcGetCUBIN = nvrtc_library_.symbol<decltype(nvrtc_.nvrtcGetCUBIN)>("nvrtcGetCUBIN");
-        nvrtc_.nvrtcGetPTXSize = nvrtc_library_.symbol<decltype(nvrtc_.nvrtcGetPTXSize)>("nvrtcGetPTXSize");
-        nvrtc_.nvrtcGetPTX = nvrtc_library_.symbol<decltype(nvrtc_.nvrtcGetPTX)>("nvrtcGetPTX");
-        nvrtc_.nvrtcDestroyProgram =
-            nvrtc_library_.symbol<decltype(nvrtc_.nvrtcDestroyProgram)>("nvrtcDestroyProgram");
-        nvrtc_.nvrtcGetErrorString =
-            nvrtc_library_.symbol<decltype(nvrtc_.nvrtcGetErrorString)>("nvrtcGetErrorString");
-    }
-
-    void check_nvrtc(nvrtcResult result, const char* call) const {
-        if (result != 0) {
-            throw std::runtime_error(std::string("CUDA: ") + call + " failed: " + nvrtc_.nvrtcGetErrorString(result));
-        }
-    }
-
-    // Compiles the kernels to a cubin for the device's architecture when this NVRTC knows it, else to PTX for the
-    // newest architecture it knows (the driver then compiles that for the device). Either way every floating point
-    // operation is an explicit IEEE round-to-nearest instruction, so the choice cannot change a result.
-    std::vector<char> compile(int arch) {
-        int major = 0;
-        int minor = 0;
-        check_nvrtc(nvrtc_.nvrtcVersion(&major, &minor), "nvrtcVersion");
-        int count = 0;
-        check_nvrtc(nvrtc_.nvrtcGetNumSupportedArchs(&count), "nvrtcGetNumSupportedArchs");
-        std::vector<int> archs(static_cast<std::size_t>(count));
-        check_nvrtc(nvrtc_.nvrtcGetSupportedArchs(archs.data()), "nvrtcGetSupportedArchs");
-        const bool native = std::find(archs.begin(), archs.end(), arch) != archs.end();
-        int target = arch;
-        if (!native) {
-            target = 0;
-            for (int a : archs) {
-                if (a <= arch && a > target) {
-                    target = a;
-                }
-            }
-            if (target == 0) {
-                throw std::runtime_error("CUDA: NVRTC " + std::to_string(major) + "." + std::to_string(minor) +
-                                         " cannot compile for compute capability " + std::to_string(arch / 10) + "." +
-                                         std::to_string(arch % 10));
-            }
-        }
-        const std::string arch_option =
-            std::string(native ? "--gpu-architecture=sm_" : "--gpu-architecture=compute_") + std::to_string(target);
-        compiler_ = "NVRTC " + std::to_string(major) + "." + std::to_string(minor);
-        architecture_ = (native ? "sm_" : "compute_") + std::to_string(target);
-
-        std::vector<const char*> header_sources(std::begin(kShimSources), std::end(kShimSources));
-        std::vector<const char*> header_names(std::begin(kShimNames), std::end(kShimNames));
-        header_sources.push_back(kCudaMathSource);
-        header_names.push_back("dllm/math.hpp");
-        nvrtcProgram program = nullptr;
-        check_nvrtc(nvrtc_.nvrtcCreateProgram(&program, kCudaKernelsSource, "kernels.cu",
-                                              static_cast<int>(header_sources.size()), header_sources.data(),
-                                              header_names.data()),
-                    "nvrtcCreateProgram");
-        const char* options[] = {arch_option.c_str(), "--std=c++17", "--device-as-default-execution-space",
-                                 "--fmad=false", "--prec-div=true", "--prec-sqrt=true", "--ftz=false"};
-        const nvrtcResult compiled =
-            nvrtc_.nvrtcCompileProgram(program, static_cast<int>(sizeof(options) / sizeof(options[0])), options);
-        if (compiled != 0) {
-            std::size_t log_size = 0;
-            nvrtc_.nvrtcGetProgramLogSize(program, &log_size);
-            std::string log(log_size, '\0');
-            nvrtc_.nvrtcGetProgramLog(program, log.data());
-            nvrtc_.nvrtcDestroyProgram(&program);
-            throw std::runtime_error("CUDA: compiling the kernels failed:\n" + log);
-        }
-        std::size_t size = 0;
-        std::vector<char> image;
-        if (native) {
-            check_nvrtc(nvrtc_.nvrtcGetCUBINSize(program, &size), "nvrtcGetCUBINSize");
-            image.resize(size);
-            check_nvrtc(nvrtc_.nvrtcGetCUBIN(program, image.data()), "nvrtcGetCUBIN");
-        } else {
-            check_nvrtc(nvrtc_.nvrtcGetPTXSize(program, &size), "nvrtcGetPTXSize");
-            image.resize(size);
-            check_nvrtc(nvrtc_.nvrtcGetPTX(program, image.data()), "nvrtcGetPTX");
-        }
-        nvrtc_.nvrtcDestroyProgram(&program);
-        return image;
-    }
-
     std::mutex mutex_;
     std::mutex pool_mutex_;
     std::map<std::size_t, std::vector<CUdeviceptr>> pool_;
     bool ready_ = false;
     Library driver_library_;
-    Library nvrtc_library_;
+    Compiler nvrtc_;
     Driver driver_{};
-    Nvrtc nvrtc_{};
     CUdevice device_ = 0;
     CUcontext context_ = nullptr;
     CUmodule module_ = nullptr;
