@@ -35,7 +35,7 @@ from etalii_dllm.engine import (
 )
 from etalii_dllm.generation import TokenLogprobs
 from etalii_dllm.sampling import SamplingOptions
-from etalii_dllm.server import anthropic_api
+from etalii_dllm.server import anthropic_api, ollama_api
 from etalii_dllm.server.contracts import (
     AssistantMessage,
     ChatCompletionChoice,
@@ -69,6 +69,7 @@ DEFAULT_MAX_TOKENS = 64
 
 app = FastAPI(title="EtAlii.Dllm", version=__version__)
 app.include_router(anthropic_api.router)
+app.include_router(ollama_api.router)
 
 
 def _error(message: str) -> JSONResponse:
@@ -80,6 +81,8 @@ def _validation_error(request: Request, error: RequestValidationError) -> JSONRe
     message = "; ".join(f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in error.errors())
     if request.url.path.startswith("/v1/messages"):
         return anthropic_api.error(message)
+    if request.url.path.startswith("/api/"):
+        return ollama_api.error(message)
     return _error(message)
 
 
@@ -287,7 +290,7 @@ def embeddings(request: EmbeddingsRequest, engine: Engine) -> EmbeddingsResponse
 def main() -> None:
     import uvicorn
 
-    parser = argparse.ArgumentParser(description="EtAlii.Dllm OpenAI- and Anthropic-compatible server")
+    parser = argparse.ArgumentParser(description="EtAlii.Dllm OpenAI-, Anthropic- and Ollama-compatible server")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5080)
     add_runtime_arguments(parser)

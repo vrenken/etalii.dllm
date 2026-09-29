@@ -1,7 +1,7 @@
 # HTTP API
 
-`dllm-server` speaks the OpenAI and the Anthropic wire formats, so the official SDKs of both work against it
-unchanged. Every endpoint is a thin translation layer over the same engine (`DllmEngine.chat_stream`), which is also
+`dllm-server` speaks the OpenAI, the Anthropic and the Ollama wire formats, so the official clients of all three
+work against it unchanged. Every endpoint is a thin translation layer over the same engine (`DllmEngine.chat_stream`), which is also
 what the CLI and the MCP server use, so all front ends give the same answer for the same request.
 
 | Endpoint | Compatible with | Notes |
@@ -11,6 +11,9 @@ what the CLI and the MCP server use, so all front ends give the same answer for 
 | `POST /v1/embeddings` | OpenAI Embeddings | Mean-pooled final hidden states, L2-normalised |
 | `POST /v1/messages` | Anthropic Messages | Streaming, tools, structured output (`output_config.format`), stop sequences |
 | `POST /v1/messages/count_tokens` | Anthropic | Input tokens of a request, tools included |
+| `POST /api/chat`, `POST /api/generate` | Ollama | Streaming (NDJSON, the default), tools, `format` (JSON or a schema), logprobs, `raw` prompts. See [Ollama API](#ollama-api) |
+| `POST /api/embed`, `POST /api/embeddings` | Ollama | Same vectors as `/v1/embeddings` |
+| `GET /api/tags`, `POST /api/show`, `GET /api/ps`, `GET /api/version` | Ollama | The served model, its template and architecture |
 | `GET /` | Browser | A chat page over the streamed `/v1/chat/completions`, with temperature, seed and system prompt; it marks a regenerated answer that is identical to the earlier one. Self-contained, nothing loaded from elsewhere |
 
 ## Determinism guarantees
@@ -71,6 +74,37 @@ Unlike other batching servers, this cannot change anyone's answer. Every kernel 
 fixed order and attention runs per request, so a request gets exactly the bits it gets alone, whichever requests
 share its steps and whenever they arrived (`tests/test_batching.py`, and `tests/test_batch_invariance.py` fires 36
 overlapping requests at the server and compares every response with a lone run). Nothing needs configuring.
+
+## Ollama API
+
+Tools that talk to Ollama (the `ollama` Python and JavaScript clients, Open WebUI, LangChain's `ChatOllama`,
+Continue, ...) work when pointed at `http://127.0.0.1:5080` instead of Ollama's `http://127.0.0.1:11434`:
+
+```python
+import ollama
+
+client = ollama.Client(host="http://127.0.0.1:5080")
+reply = client.chat(
+    model="dllm", messages=[{"role": "user", "content": "Hi!"}], options={"seed": 7, "temperature": 0.7}
+)
+print(reply.message.content)
+```
+
+The answer is the same as the OpenAI and Anthropic endpoints give for the same conversation and options.
+
+- `options`: `temperature` (default 0, Ollama's is 0.8), `seed`, `top_k`, `top_p`, `num_predict` (unset or negative:
+  up to 2048 tokens or the model's context, whichever is smaller) and `stop`; other options are ignored.
+- `format`: `"json"` for any JSON object, or a JSON schema, enforced by constrained decoding.
+- Tools use Ollama's format (arguments as objects). Ollama's calls carry no ids, so the conversation's calls are
+  numbered `call_0`, `call_1`, ...; a `tool` message answers the earliest open call to the tool it names in
+  `tool_name`.
+- `/api/generate` renders `system` and `prompt` with the chat template; with `raw: true` the prompt is used as is.
+  An empty `prompt` returns `done_reason: "load"`, as Ollama does. `suffix`, `template`, `context` and images are
+  refused.
+- `created_at`/`modified_at` are always the Unix epoch and every `*_duration` is 0 (nothing clock-derived);
+  `prompt_eval_count` counts the prompt tokens not read from the [prompt cache](#prompt-caching), as Ollama does.
+- One model is served whatever `model` names; pulling, creating, copying and deleting models is not supported
+  (`dllm import` does that job).
 
 ## Streaming
 
