@@ -43,3 +43,25 @@ jobs:
         run: pip install ".[dev]"
       - name: Test
         run: pytest -v
+
+  # The [cuda] install route without a GPU (runners have none): the extra installs, NVRTC is found and compiles the
+  # embedded kernels for every architecture (tests/test_cuda.py). On macOS the extra installs nothing and the backend
+  # reports clearly that CUDA is unavailable. Bit-exactness on a real GPU stays with the GPU tests in test_cuda.py.
+  cuda-install:
+    name: cuda extra (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build and install with the cuda extra
+        run: pip install ".[dev,cuda]"
+      - name: Compile the GPU kernels with NVRTC
+        env:
+          DLLM_REQUIRE_NVRTC: ${{ runner.os != 'macOS' && '1' || '' }}
+        run: pytest tests/test_cuda.py -v -rs

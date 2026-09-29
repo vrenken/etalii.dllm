@@ -9,8 +9,10 @@ elsewhere they are skipped, except the ones that check the error paths.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import os
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -68,6 +70,40 @@ def test_missing_cuda_is_reported_clearly():
         cuda.initialize()
     with pytest.raises(cuda.CudaUnavailableError):
         CudaWeight(gaussian(1, 4, 4))
+
+
+# -- NVRTC without a GPU: the [cuda] install route --------------------------------------------------------------
+
+# CI sets DLLM_REQUIRE_NVRTC=1 after installing the [cuda] extra: a missing or broken NVRTC fails, never skips.
+nvrtc = pytest.mark.skipif(
+    cuda.find_nvrtc() is None and not os.environ.get("DLLM_REQUIRE_NVRTC"), reason="needs NVRTC (the [cuda] extra)"
+)
+
+
+@nvrtc
+@pytest.mark.parametrize("arch", [50, 61, 70, 75, 80, 86, 89, 90])
+def test_kernels_compile_with_nvrtc(arch):
+    """The embedded kernels.cu + math.hpp compile for every architecture from Maxwell to Hopper, reproducibly."""
+    first = cuda.compile_kernels(arch)
+    assert first.compiler.startswith("NVRTC ")
+    assert first.architecture in (f"sm_{arch}", f"compute_{arch}")
+    assert len(first.image) > 0
+    second = cuda.compile_kernels(arch)
+    assert hashlib.sha256(second.image).digest() == hashlib.sha256(first.image).digest()
+
+
+@nvrtc
+def test_nvrtc_errors_are_reported_clearly(tmp_path):
+    with pytest.raises(cuda.CudaUnavailableError, match=r"cannot compile for compute capability 1\.0"):
+        cuda.compile_kernels(10)
+    with pytest.raises(cuda.CudaUnavailableError, match="cannot load NVRTC"):
+        cuda.compile_kernels(86, nvrtc=tmp_path / "missing-nvrtc")
+
+
+def test_compile_without_nvrtc_is_reported_clearly(monkeypatch):
+    monkeypatch.setattr(cuda, "find_nvrtc", lambda: None)
+    with pytest.raises(cuda.CudaUnavailableError, match="NVRTC not found"):
+        cuda.compile_kernels(86)
 
 
 # -- kernels -----------------------------------------------------------------------------------------------------

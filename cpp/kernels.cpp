@@ -307,6 +307,22 @@ NB_MODULE(_kernels, m) {
         nb::arg("nvrtc_path"), nb::arg("device") = 0,
         "Loads the driver and NVRTC and compiles the kernels for `device` (only the first call does work).");
     m.def(
+        "cuda_compile",
+        [](const std::string& nvrtc_path, int arch) {
+            dllm::cuda::CompiledKernels kernels;
+            {
+                nb::gil_scoped_release release;
+                dllm::cuda::Compiler compiler;
+                compiler.open(nvrtc_path);
+                kernels = compiler.compile(arch);
+            }
+            return std::make_tuple(kernels.compiler, kernels.architecture,
+                                   nb::bytes(kernels.image.data(), kernels.image.size()));
+        },
+        nb::arg("nvrtc_path"), nb::arg("arch"),
+        "Compiles the GPU kernels with NVRTC for compute capability `arch` (e.g. 86) without a GPU; returns "
+        "(compiler, architecture, image).");
+    m.def(
         "cuda_info",
         []() -> std::optional<std::tuple<int, std::string, std::string, std::string>> {
             const auto& runtime = dllm::cuda::Runtime::instance();

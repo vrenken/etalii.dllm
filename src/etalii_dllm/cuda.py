@@ -31,6 +31,11 @@ from etalii_dllm import _kernels
 NVRTC_ENVIRONMENT_VARIABLE = "DLLM_NVRTC"
 DEVICE_ENVIRONMENT_VARIABLE = "DLLM_CUDA_DEVICE"
 
+NVRTC_MISSING = (
+    'NVRTC not found: pip install "etalii-dllm[cuda]", install the CUDA toolkit, or set '
+    f"{NVRTC_ENVIRONMENT_VARIABLE} to the nvrtc library"
+)
+
 DEVICES = ("cpu", "cuda")
 """Devices a model can run on."""
 
@@ -123,10 +128,7 @@ def initialize(device: int | None = None) -> DeviceInfo:
             raise CudaUnavailableError("no CUDA device found (is the NVIDIA driver installed?)")
         nvrtc = find_nvrtc()
         if nvrtc is None:
-            raise CudaUnavailableError(
-                'NVRTC not found: pip install "etalii-dllm[cuda]", install the CUDA toolkit, or set '
-                f"{NVRTC_ENVIRONMENT_VARIABLE} to the nvrtc library"
-            )
+            raise CudaUnavailableError(NVRTC_MISSING)
         _preload_builtins(nvrtc)
         try:
             _kernels.cuda_initialize(str(nvrtc), device)
@@ -135,6 +137,30 @@ def initialize(device: int | None = None) -> DeviceInfo:
         result = info()
         assert result is not None
         return result
+
+
+@dataclass(frozen=True)
+class CompiledKernels:
+    compiler: str
+    """NVRTC's version, e.g. ``NVRTC 12.9``."""
+    architecture: str
+    """``sm_XX`` for a cubin, ``compute_XX`` for PTX the driver finishes compiling."""
+    image: bytes
+
+
+def compile_kernels(arch: int, nvrtc: Path | str | None = None) -> CompiledKernels:
+    """Compiles the GPU kernels exactly as :func:`initialize` would for compute capability ``arch`` (e.g. 86 for
+    8.6), without a GPU or driver. Checks the ``[cuda]`` install and the embedded kernel sources on any machine.
+    Raises :class:`CudaUnavailableError` when NVRTC is missing or cannot compile them."""
+    path = Path(nvrtc) if nvrtc is not None else find_nvrtc()
+    if path is None:
+        raise CudaUnavailableError(NVRTC_MISSING)
+    _preload_builtins(path)
+    try:
+        compiler, architecture, image = _kernels.cuda_compile(str(path), arch)
+    except RuntimeError as error:
+        raise CudaUnavailableError(str(error)) from error
+    return CompiledKernels(compiler, architecture, image)
 
 
 def info() -> DeviceInfo | None:

@@ -168,6 +168,10 @@ How it works:
   logits waits), and callers on several threads take turns queueing, which cannot change any result.
 - **No CUDA at build time.** The extension loads the NVIDIA driver and NVRTC dynamically, so the same wheel builds
   and runs everywhere; without a GPU `--device cuda` fails with a message saying what is missing.
+- **Checked in CI without a GPU.** Compiling needs no GPU, so the `cuda extra` CI job installs `.[dev,cuda]` on
+  Linux and Windows and compiles the embedded kernels with NVRTC for every architecture from sm_50 to sm_90
+  (`cuda.compile_kernels`, `tests/test_cuda.py`); on macOS the extra installs nothing. Bit-exactness itself is
+  only checked where a GPU is present.
 
 Double precision is slow on consumer GPUs (1/64 of float32 on the RTX 40 series), and the fixed per-output order
 leaves a GPU partly idle when a layer has few outputs, so this is far from the speed of a float32 GPU engine. It is

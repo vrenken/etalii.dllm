@@ -28,7 +28,8 @@ dev = [
   "openai>=1.60", "anthropic>=0.60", "jsonschema>=4.20",
 ]
 # NVRTC, the CUDA runtime compiler the GPU backend needs (--device cuda); the NVIDIA driver provides the rest.
-cuda = ["nvidia-cuda-nvrtc-cu12>=12.1"]
+# There is no CUDA on macOS, so there the extra installs nothing.
+cuda = ["nvidia-cuda-nvrtc-cu12>=12.1; sys_platform != 'darwin'"]
 # Hugging Face transformers as the reference the imported models are compared with (tests/test_reference_models.py).
 reference = ["torch>=2.4", "transformers>=4.50"]
 
