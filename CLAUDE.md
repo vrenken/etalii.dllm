@@ -44,7 +44,8 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
   `training` (gradients, AdamW, data order, checkpoints and `dllm finetune`, `docs/training.md`), `grammar`
   (JSON-schema constrained decoding over a token trie), `tools` (tool calling in the Hermes `<tool_call>` format).
   Tests compare against the reference packages `gguf`, `safetensors` and `tokenizers` (dev dependencies).
-- `src/etalii_dllm/server/` (OpenAI `app.py`, Anthropic `anthropic_api.py`; `docs/api.md`), `mcp_server.py`,
+- `src/etalii_dllm/server/` (OpenAI `app.py`, Anthropic `anthropic_api.py`, the browser chat page `static/chat.html`
+  served at `/`; `docs/api.md`), `mcp_server.py`,
   `cli.py`: thin front ends over `DllmEngine.chat_stream`. Keep logic out of them so all stay output-identical;
   non-streamed responses are assembled from the same event stream as streamed ones. `mcp_host.py` is the MCP client
   host (the model calls external MCP tools in a loop over `chat_stream`); both MCP directions: `docs/mcp.md`.

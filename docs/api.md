@@ -11,6 +11,7 @@ what the CLI and the MCP server use, so all front ends give the same answer for 
 | `POST /v1/embeddings` | OpenAI Embeddings | Mean-pooled final hidden states, L2-normalised |
 | `POST /v1/messages` | Anthropic Messages | Streaming, tools, structured output (`output_config.format`), stop sequences |
 | `POST /v1/messages/count_tokens` | Anthropic | Input tokens of a request, tools included |
+| `GET /` | Browser | A chat page over the streamed `/v1/chat/completions`, with temperature, seed and system prompt; it marks a regenerated answer that is identical to the earlier one. Self-contained, nothing loaded from elsewhere |
 
 ## Determinism guarantees
 

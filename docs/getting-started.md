@@ -152,6 +152,10 @@ NVRTC is found automatically in the `nvidia-cuda-nvrtc` wheel, PyTorch, `$CUDA_P
 dllm-server --model smollm2-135m.dllm        # http://127.0.0.1:5080, --host/--port to change
 ```
 
+Open <http://127.0.0.1:5080> in a browser for a chat page. Set the temperature and seed under *Settings*, ask
+something, then press *Regenerate*: the answer comes back identical, with the same id and `system_fingerprint`, and
+the page says so.
+
 ```bash
 curl http://127.0.0.1:5080/v1/chat/completions -H "Content-Type: application/json" -d '{
   "model": "dllm",

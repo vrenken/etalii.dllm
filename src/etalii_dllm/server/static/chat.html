@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EtAlii.Dllm chat</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --border: #deded8;
+    --accent: #2f5d8a; --accent-text: #ffffff; --user: #e8eef5; --ok: #2e7d4f; --bad: #b3261e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161615; --panel: #1f1f1d; --text: #ecece8; --muted: #9a9a93; --border: #34342f;
+      --accent: #7fa8d1; --accent-text: #0f1a25; --user: #243140; --ok: #6cc28f; --bad: #f08a80;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; min-height: 100vh; gap: 12px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; }
+  h1 { font-size: 18px; margin: 0; }
+  .muted { color: var(--muted); font-size: 13px; }
+  details, .composer { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+  summary { cursor: pointer; color: var(--muted); }
+  .settings { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 10px; }
+  label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+  input, textarea { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; width: 100%; }
+  textarea { resize: vertical; }
+  #messages { flex: 1; display: flex; flex-direction: column; gap: 10px; }
+  .message { padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--panel); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .message.user { background: var(--user); align-self: flex-end; max-width: 85%; }
+  .message .meta { margin-top: 8px; font-size: 12px; color: var(--muted); white-space: normal; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .same { color: var(--ok); } .different { color: var(--bad); } .error { color: var(--bad); }
+  .composer { display: flex; gap: 8px; align-items: flex-end; }
+  .composer textarea { flex: 1; min-height: 44px; }
+  button { font: inherit; border: 1px solid var(--accent); background: var(--accent); color: var(--accent-text); border-radius: 6px; padding: 7px 14px; cursor: pointer; }
+  button.secondary { background: transparent; color: var(--accent); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .buttons { display: flex; flex-direction: column; gap: 6px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>EtAlii.Dllm</h1>
+    <span class="muted" id="model">loading model…</span>
+  </header>
+  <p class="muted" style="margin:0">Same model, conversation, settings and seed: the same answer, bit for bit, every time.
+    Press <em>Regenerate</em> to see it.</p>
+
+  <details>
+    <summary>Settings</summary>
+    <div class="settings">
+      <label>Temperature <input id="temperature" type="number" min="0" max="2" step="0.1" value="0.7"></label>
+      <label>Seed <input id="seed" type="number" step="1" value="7"></label>
+      <label>Max tokens <input id="max_tokens" type="number" min="1" max="4096" step="1" value="256"></label>
+      <label>Top p <input id="top_p" type="number" min="0" max="1" step="0.05" value="1"></label>
+    </div>
+    <label style="margin-top:10px">System prompt <textarea id="system" rows="2" placeholder="Optional"></textarea></label>
+  </details>
+
+  <div id="messages" aria-live="polite"></div>
+
+  <form class="composer" id="composer">
+    <textarea id="prompt" rows="2" placeholder="Message (Enter to send, Shift+Enter for a new line)" required></textarea>
+    <div class="buttons">
+      <button type="submit" id="send">Send</button>
+      <button type="button" class="secondary" id="regenerate" disabled>Regenerate</button>
+      <button type="button" class="secondary" id="clear">Clear</button>
+    </div>
+  </form>
+</main>
+<script>
+"use strict";
+// Talks to this server's own /v1/chat/completions (streamed). Everything is rendered as text, never as HTML.
+const $ = (id) => document.getElementById(id);
+const history = [];            // the conversation sent to the model: {role, content}
+const answers = new Map();     // response id -> content, to show that a repeated request gives the same answer
+let busy = false;
+
+fetch("v1/models").then((r) => r.json()).then((body) => {
+  $("model").textContent = body.data.map((m) => m.id).join(", ");
+}).catch(() => { $("model").textContent = "model unavailable"; });
+
+function number(id, parse) {
+  const value = parse($(id).value);
+  return Number.isFinite(value) ? value : undefined;
+}
+
+function bubble(role, text) {
+  const div = document.createElement("div");
+  div.className = "message " + role;
+  const body = document.createElement("div");
+  body.textContent = text;
+  div.appendChild(body);
+  $("messages").appendChild(div);
+  div.scrollIntoView({ block: "end" });
+  return { div, body };
+}
+
+function setBusy(value) {
+  busy = value;
+  $("send").disabled = value;
+  $("regenerate").disabled = value || history.length === 0 || history[history.length - 1].role !== "assistant";
+}
+
+async function complete() {
+  const messages = [];
+  const system = $("system").value.trim();
+  if (system) messages.push({ role: "system", content: system });
+  messages.push(...history);
+  const request = {
+    messages,
+    stream: true,
+    temperature: number("temperature", parseFloat),
+    top_p: number("top_p", parseFloat),
+    seed: number("seed", (v) => parseInt(v, 10)),
+    max_tokens: number("max_tokens", (v) => parseInt(v, 10)),
+  };
+  const { div, body } = bubble("assistant", "");
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  div.appendChild(meta);
+  setBusy(true);
+  let content = "", id = "", fingerprint = "", finish = "";
+  try {
+    const response = await fetch("v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error((error.error && error.error.message) || response.statusText);
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let end;
+      while ((end = buffer.indexOf("\n\n")) >= 0) {
+        const event = buffer.slice(0, end);
+        buffer = buffer.slice(end + 2);
+        if (!event.startsWith("data: ")) continue;
+        const data = event.slice(6);
+        if (data === "[DONE]") continue;
+        const chunk = JSON.parse(data);
+        id = chunk.id; fingerprint = chunk.system_fingerprint;
+        for (const choice of chunk.choices) {
+          if (choice.delta && choice.delta.content) {
+            content += choice.delta.content;
+            body.textContent = content;
+          }
+          if (choice.finish_reason) finish = choice.finish_reason;
+        }
+        div.scrollIntoView({ block: "end" });
+      }
+    }
+    history.push({ role: "assistant", content });
+    meta.textContent = `${id} · ${fingerprint} · finish: ${finish}`;
+    if (answers.has(id)) {
+      const same = answers.get(id) === content;
+      const note = document.createElement("span");
+      note.className = same ? "same" : "different";
+      note.textContent = same ? " · identical to the earlier answer to this request" : " · differs from the earlier answer!";
+      meta.appendChild(note);
+    } else {
+      answers.set(id, content);
+    }
+  } catch (error) {
+    div.remove();
+    history.pop();  // the user message that failed; it stays visible with the error below it
+    const failed = bubble("assistant", "Error: " + error.message);
+    failed.body.className = "error";
+  } finally {
+    setBusy(false);
+  }
+}
+
+$("composer").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const text = $("prompt").value.trim();
+  if (!text || busy) return;
+  $("prompt").value = "";
+  history.push({ role: "user", content: text });
+  bubble("user", text);
+  complete();
+});
+
+$("prompt").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    $("composer").requestSubmit();
+  }
+});
+
+$("regenerate").addEventListener("click", () => {
+  if (busy || history.length === 0 || history[history.length - 1].role !== "assistant") return;
+  history.pop();
+  complete();
+});
+
+$("clear").addEventListener("click", () => {
+  if (busy) return;
+  history.length = 0;
+  $("messages").replaceChildren();
+  setBusy(false);
+});
+</script>
+</body>
+</html>

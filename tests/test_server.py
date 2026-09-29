@@ -175,3 +175,16 @@ def test_invalid_requests_are_400(client, body):
     response = client.post("/v1/chat/completions", json=body)
     assert response.status_code == 400
     assert response.json()["error"]["type"] == "invalid_request_error"
+
+
+def test_serves_the_chat_page(client):
+    response = client.get("/")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    page = response.text
+    assert "<title>EtAlii.Dllm chat</title>" in page
+    # Relative URLs (works behind a path prefix) to this server's own API, and nothing loaded from elsewhere.
+    assert 'fetch("v1/chat/completions"' in page and 'fetch("v1/models")' in page
+    assert "http://" not in page and "https://" not in page
+    # Model output is only ever inserted as text.
+    assert "innerHTML" not in page

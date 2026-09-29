@@ -96,7 +96,7 @@ to Python through [nanobind](https://github.com/wjakob/nanobind). Python orchest
 | `cpp/` | C++ kernels: `include/dllm/random.hpp` (RNG), `include/dllm/math.hpp` (exp, log, sin, cos, tanh, erf, sum, dot, softmax, log-softmax), `include/dllm/nn.hpp` (linear/matmul, RMSNorm, SiLU/GELU, RoPE, attention), `include/dllm/grad.hpp` (their gradients, cross-entropy, AdamW), `kernels.cpp` (Python bindings). Evaluation orders: [docs/kernels.md](docs/kernels.md) |
 | `src/etalii_dllm/` | Python package: `tensor` (aligned float32 `Tensor`), `numerics`, `sampling`, `tokenization`, `models`, `generation` (streaming, stop sequences, logprobs), `grammar` (constrained decoding), `tools` (tool calling), `chat`, `engine` (shared facade) |
 | `src/etalii_dllm/training/` | Fine-tuning: decoder gradients, AdamW, fixed data order, checkpoints. See [docs/training.md](docs/training.md) |
-| `src/etalii_dllm/server/` | HTTP API, FastAPI: OpenAI (`/v1/models`, `/v1/chat/completions`, `/v1/embeddings`) and Anthropic (`/v1/messages`). See [docs/api.md](docs/api.md) |
+| `src/etalii_dllm/server/` | HTTP API, FastAPI: OpenAI (`/v1/models`, `/v1/chat/completions`, `/v1/embeddings`) and Anthropic (`/v1/messages`); a chat page at `/` (`static/chat.html`). See [docs/api.md](docs/api.md) |
 | `src/etalii_dllm/mcp_server.py` | Model Context Protocol server (stdio, official `mcp` SDK): `chat`, `generate` and `model_info` tools, model card/chat template/determinism resources, prompts. See [docs/mcp.md](docs/mcp.md) |
 | `src/etalii_dllm/mcp_host.py` | MCP client host: the model calls external MCP servers' tools during a chat (`dllm chat --mcp-config`) |
 | `src/etalii_dllm/cli.py` | `dllm` command line tool |
@@ -131,7 +131,7 @@ Summarised from the [research notes](docs/research/deterministic-inference.md):
 | 4. API parity ✅ | Streaming (SSE), tool/function calling, JSON-schema structured output, logprobs, Anthropic Messages endpoint, embeddings. See [HTTP API](docs/api.md) |
 | 5. MCP, both directions ✅ | Richer MCP server (prompts, resources); MCP client host so the model can call external tools during a chat. See [MCP](docs/mcp.md) |
 | 6. Performance ✅ | ✅ SIMD and multi-threading with fixed, batch-invariant reduction order; ✅ integer quantisation (Q8_0, associative int32 accumulation); ✅ batch-invariance stress tests; ✅ CUDA kernels that give the CPU's bits (`--device cuda`). See [kernels](docs/kernels.md#threads-and-simd) and [GPU](docs/kernels.md#gpu) |
-| 7. Usability and releases | Pre-built wheels for Linux, Windows and macOS and tagged GitHub releases ([releasing](docs/releasing.md)); PyPI; the CUDA install route checked in CI; a Docker image; a web chat UI; a larger verified model (Qwen2.5-1.5B) |
+| 7. Usability and releases | ✅ Pre-built wheels for Linux, Windows and macOS and tagged GitHub releases ([releasing](docs/releasing.md)); PyPI; ✅ the CUDA install route checked in CI; a Docker image; ✅ a web chat UI at `/` of `dllm-server`; a larger verified model (Qwen2.5-1.5B) |
 
 ## Working with Claude Code
 
