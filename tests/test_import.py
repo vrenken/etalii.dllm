@@ -13,6 +13,7 @@ from golden_values import TINY_IMPORT_FINGERPRINT
 from model_fixtures import (
     TINY_LLAMA_CONFIG,
     bf16_to_float32,
+    tiny_config,
     to_bf16_bits,
     write_gguf,
     write_hf_checkpoint,
@@ -162,14 +163,17 @@ def test_gguf_and_huggingface_imports_give_the_same_weights(tmp_path):
     assert model.chat_template is not None
 
 
-def test_qwen2_gguf_is_not_permuted(tmp_path):
+@pytest.mark.parametrize("family", ["qwen2", "qwen3"])
+def test_qwen_gguf_is_not_permuted(family, tmp_path):
     pytest.importorskip("gguf")
-    config = {**TINY_LLAMA_CONFIG, "model_type": "qwen2", "architectures": ["Qwen2ForCausalLM"]}
+    config = tiny_config(family)
     write_hf_checkpoint(tmp_path / "qwen", config)
     write_gguf(tmp_path / "qwen.gguf", config)
     from_hf = import_model(tmp_path / "qwen", tmp_path / "hf.dllm")
     from_gguf = import_model(tmp_path / "qwen.gguf", tmp_path / "gguf.dllm")
-    assert from_hf.config.attention_bias and from_gguf.config.attention_bias
+    assert from_hf.config.head_dim == from_gguf.config.head_dim == (8 if family == "qwen3" else 4)
+    for config in (from_hf.config, from_gguf.config):
+        assert config.attention_bias == (family == "qwen2") and config.qk_norm == (family == "qwen3")
     assert from_gguf.fingerprint == from_hf.fingerprint
 
 

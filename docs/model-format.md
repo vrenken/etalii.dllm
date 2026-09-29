@@ -30,7 +30,7 @@ same source twice gives byte-identical files (`tests/test_import.py`).
 | Key | Content |
 | --- | --- |
 | `format`, `format_version` | `"dllm"`, `1` |
-| `architecture` | `TransformerConfig` (`src/etalii_dllm/architecture.py`): family (`llama`, `qwen2`), sizes, heads and KV heads, head dim, context length, RMSNorm epsilon, RoPE theta and scaling, attention bias, tied embeddings, BOS/EOS token ids |
+| `architecture` | `TransformerConfig` (`src/etalii_dllm/architecture.py`): family (`llama`, `qwen2`, `qwen3`), sizes, heads and KV heads, head dim, context length, RMSNorm epsilon, RoPE theta and scaling, attention bias, `qk_norm` (written only when true), tied embeddings, BOS/EOS token ids |
 | `tensors` | List of `{name, shape, dtype: "F32", offset, nbytes, source_dtype}`; `source_dtype` is what the source stored (`BF16`, `F16`, `Q8_0`, ...) |
 | `fingerprint` | SHA-256 of the data section (hex) |
 | `source` | `format` (`safetensors`/`gguf`), `repository` and `revision` (the commit hash for `hf:` imports), `url` when known, and `files`: path, SHA-256 and size of every source file read |
@@ -49,6 +49,7 @@ Every import maps onto one naming scheme, and weight matrices use the `[out, in]
 | `layers.N.attention_norm.weight` | `[hidden]` |
 | `layers.N.attention.{q,k,v}.weight` | `[heads * head_dim, hidden]`, `[kv_heads * head_dim, hidden]` |
 | `layers.N.attention.{q,k,v}.bias` | Qwen2 only |
+| `layers.N.attention.{q,k}_norm.weight` | `[head_dim]`, Qwen3 only: RMSNorm over each query and key head before RoPE |
 | `layers.N.attention.o.weight` | `[hidden, heads * head_dim]` |
 | `layers.N.mlp_norm.weight` | `[hidden]` |
 | `layers.N.mlp.{gate,up}.weight`, `layers.N.mlp.down.weight` | `[intermediate, hidden]`, `[hidden, intermediate]` |
@@ -66,7 +67,7 @@ original checkpoint import to the same bytes and the same fingerprint.
 - **Quantised GGUF.** `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q8_0`, `Q4_K`, `Q5_K` and `Q6_K` are dequantised with
   elementwise float32 operations in llama.cpp's order; tests check the result is bit-identical to `gguf-py`. The
   import is deterministic, but a quantised source is of course only as precise as its quantisation.
-- **Fail loudly.** Unknown tensors, unsupported families (anything but Llama and Qwen2), non-SiLU activations,
+- **Fail loudly.** Unknown tensors, unsupported families (anything but Llama, Qwen2 and Qwen3), non-SiLU activations,
   MLP biases, sliding-window attention, partial rotary and RoPE scaling other than `linear`/`llama3` stop the import.
 - **Licences.** Apache-2.0 and MIT import directly. Anything else needs `--accept-licence` and is recorded as not
   redistributable. A source with no stated licence needs `--licence`; a licence with no text in the source and no

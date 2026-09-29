@@ -5,7 +5,7 @@ base model, data file and settings give a byte-identical fine-tuned `model.dllm`
 checkpoint and resumed ends in exactly the same bytes as one that ran straight through. The code is in
 `src/etalii_dllm/training/`; the gradient kernels are in `cpp/include/dllm/grad.hpp`.
 
-This is roadmap Phase 3. It is full-parameter fine-tuning of the Llama/Qwen2 decoder; there is no pre-training from
+This is roadmap Phase 3. It is full-parameter fine-tuning of the Llama/Qwen2/Qwen3 decoder; there is no pre-training from
 scratch (weights come from [importing open models](research/model-import.md)) and no LoRA yet.
 
 ## Usage

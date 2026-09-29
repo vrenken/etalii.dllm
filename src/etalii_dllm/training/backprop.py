@@ -82,7 +82,7 @@ class DecoderGradients:
         heads, kv_heads, head_dim = config.heads, config.kv_heads, config.head_dim
         for layer in reversed(range(config.layers)):
             p = f"layers.{layer}."
-            x_in, h1, q, k, v, attended, x_mid, h2, gate, up, gate_act, product = saved[layer]
+            x_in, h1, q_raw, k_raw, q, k, v, attended, x_mid, h2, gate, up, gate_act, product = saved[layer]
 
             # x_out = x_mid + down(silu(gate(h2)) * up(h2)),  h2 = mlp_norm(x_mid)
             dproduct, grads[p + "mlp.down.weight"], _ = linear_backward(product, weights[p + "mlp.down.weight"], dx)
@@ -101,8 +101,17 @@ class DecoderGradients:
                 attended, weights[p + "attention.o.weight"], dx_mid
             )
             dq, dk, dv = attention_backward(q, k, v, dattended.reshape(n, heads, head_dim), causal=True, q_offset=0)
-            dq = rope(dq, positions, self.inv_freq, inverse=True).reshape(n, heads * head_dim)
-            dk = rope(dk, positions, self.inv_freq, inverse=True).reshape(n, kv_heads * head_dim)
+            dq = rope(dq, positions, self.inv_freq, inverse=True).numpy().reshape(n * heads, head_dim)
+            dk = rope(dk, positions, self.inv_freq, inverse=True).numpy().reshape(n * kv_heads, head_dim)
+            if config.qk_norm:
+                dq, grads[p + "attention.q_norm.weight"] = rms_norm_backward(
+                    q_raw, weights[p + "attention.q_norm.weight"], dq, config.rms_norm_eps
+                )
+                dk, grads[p + "attention.k_norm.weight"] = rms_norm_backward(
+                    k_raw, weights[p + "attention.k_norm.weight"], dk, config.rms_norm_eps
+                )
+                dq, dk = dq.numpy(), dk.numpy()
+            dq, dk = dq.reshape(n, heads * head_dim), dk.reshape(n, kv_heads * head_dim)
             dv = dv.reshape(n, kv_heads * head_dim)
             dh1 = None
             for name, d in (("q", dq), ("k", dk), ("v", dv)):
@@ -149,6 +158,10 @@ class DecoderGradients:
             q = linear(h1, w[p + "attention.q.weight"], w.get(p + "attention.q.bias"))
             k = linear(h1, w[p + "attention.k.weight"], w.get(p + "attention.k.bias"))
             v = linear(h1, w[p + "attention.v.weight"], w.get(p + "attention.v.bias"))
+            q_raw, k_raw = q.numpy().reshape(n * heads, head_dim), k.numpy().reshape(n * kv_heads, head_dim)
+            if config.qk_norm:  # Qwen3: RMSNorm over each head's dimensions, before the rotation
+                q = rms_norm(q_raw, w[p + "attention.q_norm.weight"], config.rms_norm_eps)
+                k = rms_norm(k_raw, w[p + "attention.k_norm.weight"], config.rms_norm_eps)
             q = rope(q.reshape(n, heads, head_dim), positions, self.inv_freq).numpy()
             k = rope(k.reshape(n, kv_heads, head_dim), positions, self.inv_freq).numpy()
             v = v.reshape(n, kv_heads, head_dim).numpy()
@@ -161,7 +174,7 @@ class DecoderGradients:
             product = gate_act * up
             x_out = x_mid + linear(product, w[p + "mlp.down.weight"]).numpy()
             if keep:
-                saved.append((x, h1, q, k, v, attended, x_mid, h2, gate, up, gate_act, product))
+                saved.append((x, h1, q_raw, k_raw, q, k, v, attended, x_mid, h2, gate, up, gate_act, product))
             x = x_out
         if keep:
             saved.append(x)
