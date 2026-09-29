@@ -1,6 +1,6 @@
 """HTTP API: OpenAI-compatible ``GET /v1/models``, ``POST /v1/chat/completions`` (with streaming, tools, structured
 output and logprobs) and ``POST /v1/embeddings``; Anthropic-compatible ``POST /v1/messages`` (see
-:mod:`etalii_dllm.server.anthropic_api`).
+:mod:`etalii_dllm.server.anthropic_api`); a chat page over the streamed chat completions at ``/``.
 
 The handlers only translate between wire formats and :class:`~etalii_dllm.engine.ChatRequest`; all behaviour lives
 in the engine, so every front end gives the same output. Response ids are derived from the request (and the
@@ -12,13 +12,15 @@ from __future__ import annotations
 import argparse
 import base64
 from collections.abc import Iterator
+from importlib import resources
 from typing import Annotated
 
 import numpy as np
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
+from etalii_dllm import __version__
 from etalii_dllm.chat import ChatMessage, ToolCall
 from etalii_dllm.engine import (
     ChatRequest,
@@ -64,7 +66,7 @@ Engine = Annotated[DllmEngine, Depends(default_engine)]
 
 DEFAULT_MAX_TOKENS = 64
 
-app = FastAPI(title="EtAlii.Dllm", version="0.1.0")
+app = FastAPI(title="EtAlii.Dllm", version=__version__)
 app.include_router(anthropic_api.router)
 
 
@@ -78,6 +80,12 @@ def _validation_error(request: Request, error: RequestValidationError) -> JSONRe
     if request.url.path.startswith("/v1/messages"):
         return anthropic_api.error(message)
     return _error(message)
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+def chat_page() -> HTMLResponse:
+    """A small chat page (static/chat.html, no external resources) over the streamed /v1/chat/completions."""
+    return HTMLResponse(resources.files("etalii_dllm.server").joinpath("static/chat.html").read_text(encoding="utf-8"))
 
 
 @app.get("/v1/models")
