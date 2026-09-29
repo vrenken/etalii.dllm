@@ -38,9 +38,8 @@ without releasing anything.
 
 A release also runs `.github/workflows/docker.yml`, which builds the image, checks that it answers identical
 requests identically, and pushes it for linux/amd64 and linux/arm64 as `ghcr.io/vrenken/etalii-dllm:<version>` and
-`:latest`. Running that workflow by hand with tags (for example `edge`) publishes the current branch. A new package
-on ghcr.io starts out private: make it public once in the package settings
-(<https://github.com/users/vrenken/packages/container/etalii-dllm/settings>, Danger Zone > Change visibility).
+`:latest`. Every push to `develop` publishes `:edge`, and running the workflow by hand with tags publishes the
+current branch under them. The package is linked to this public repository, so anyone can pull it.
 
 ## PyPI
 

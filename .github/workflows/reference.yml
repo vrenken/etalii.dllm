@@ -33,3 +33,13 @@ jobs:
         run: python tests/test_reference_models.py "$DLLM_REFERENCE_MODELS"
       - name: Compare with transformers
         run: pytest tests/test_reference_models.py -v -rs
+      - name: Measure Qwen2.5-1.5B (peak memory and speed, float32 and Q8_0)
+        if: ${{ !cancelled() }}
+        run: |
+          snapshot=$(ls -d "$DLLM_REFERENCE_MODELS"/Qwen/Qwen2.5-1.5B-Instruct/*/ | head -1)
+          dllm import "$snapshot" -o qwen2.5-1.5b.dllm --repo Qwen/Qwen2.5-1.5B-Instruct --licence Apache-2.0
+          ls -l qwen2.5-1.5b.dllm
+          for quantize in none q8_0; do
+            /usr/bin/time -f "$quantize: peak RSS %M KB, %e s wall" \
+              dllm --model qwen2.5-1.5b.dllm --quantize "$quantize" generate --prompt "The capital of France is" --max-tokens 64
+          done
