@@ -107,9 +107,15 @@ REFERENCE_MODEL_FINGERPRINTS = {
     "tinyllama": {
         "import": "b02b4f3085396f3a0b20e07f5b875c9e4a0fbf996dcbc954953bc7d7346b4a4e",
         "chat": "12608d6f03ed2ea7892990ed181b39a3d0df693637f168ca34008af1403d4bc3",
+        "sampled": "12608d6f03ed2ea7892990ed181b39a3d0df693637f168ca34008af1403d4bc3",
+        "logits": "1b40cd4dc37c6179feee4abb69e05b42edc3468200e98390685965d893241a1b",
+        "logits_q8_0": "5474bab37def485b16798648b8fe338db268e03f1b6544dcb98bc861ff976f53",
     },
     "olmo2": {
         "import": "183baa6ee6dcc08d855a34f1531b7e5cd1d918c21c6e8bef4cebde7ec675d118",
         "chat": "28bbe79bdd0ca41816a367ee7bb30120cb7072991d1eefa2e0cb16a1f1ca8767",
+        "sampled": "28bbe79bdd0ca41816a367ee7bb30120cb7072991d1eefa2e0cb16a1f1ca8767",
+        "logits": "41db902b34618b95d3c185d772cf1f10fa58ee3fbd4094a6fb257252528eb5ba",
+        "logits_q8_0": "114b3719f3601bfe781d74af647bb13de3345b6fe9a43b11d49825c6ad461b74",
     },
 }
