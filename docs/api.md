@@ -23,7 +23,9 @@ what the CLI and the MCP server use, so all front ends give the same answer for 
   same ids.
 - Response ids (`chatcmpl-...`, `msg_...`), tool call ids (`call_...`, `toolu_...`) are hashes of the request and the
   model fingerprint; `created` is 0. Identical requests get byte-identical responses, and a streamed response has the
-  same id as its non-streamed twin.
+  same id as its non-streamed twin. The one exception is the prompt cache counters in `usage` (see
+  [Prompt caching](#prompt-caching)), which say how much work earlier requests saved; start the server with
+  `--prompt-cache 0` to have those always 0 as well.
 - `system_fingerprint` (OpenAI) identifies the exact weights.
 
 ## Defaults and differences
@@ -38,6 +40,24 @@ what the CLI and the MCP server use, so all front ends give the same answer for 
 - A final assistant message is a prefill: the answer continues its text (Anthropic semantics, on both endpoints).
 - Errors use each API's error shape: `{"error": {"type": "invalid_request_error", "message": ...}}` for OpenAI and
   `{"type": "error", "error": {...}}` for Anthropic, with HTTP status 400 (also for schema validation errors).
+
+## Prompt caching
+
+The server keeps the KV caches (the attention keys and values) of recent requests and reuses the longest shared
+token prefix for the next one, as OpenAI and Anthropic do with prompt caching. A multi-turn chat, a long shared
+system prompt or an MCP tool loop only computes the new tokens: with SmolLM2-135M and a 260-token system prompt,
+follow-up turns take 0.8 s instead of 3.5 s. It is automatic (no `cache_control` needed) and cannot change the
+answer: the KV cache rows are exactly what a recompute gives, so tokens, logprobs, ids and `system_fingerprint` are
+the same as without it (`tests/test_prompt_cache.py`).
+
+- OpenAI: `usage.prompt_tokens_details.cached_tokens` is the number of prompt tokens read from the cache;
+  `prompt_tokens` still counts all of them.
+- Anthropic: `usage.cache_read_input_tokens` is the number read from the cache and `input_tokens` the rest, as
+  Anthropic counts them; `cache_creation_input_tokens` is always 0 (nothing is billed).
+- `--prompt-cache N` (or `DLLM_PROMPT_CACHE=N`) sets how many KV caches are kept, 4 by default; 0 turns caching
+  off. Each cache holds one conversation and takes `2 x layers x kv_heads x head_dim x 4` bytes per token (about
+  45 KB per token for SmolLM2-135M, 56 KB for Qwen2.5-1.5B). A cache serves one request at a time; a request whose
+  prefix is cached but in use starts afresh. When the pool is full the least recently used cache goes.
 
 ## Streaming
 

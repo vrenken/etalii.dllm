@@ -28,6 +28,7 @@ from etalii_dllm.generation import Generation, GenerationResult, Generator, Toke
 from etalii_dllm.grammar import Grammar, TokenConstraint, TokenTrie
 from etalii_dllm.models import BigramModel, LanguageModel
 from etalii_dllm.numerics import QUANTIZATIONS, linear, set_threads, sum_squares
+from etalii_dllm.prompt_cache import DEFAULT_PROMPT_CACHE_SIZE
 from etalii_dllm.sampling import GREEDY, SamplingOptions
 from etalii_dllm.tokenization import ByteTokenizer, Tokenizer
 from etalii_dllm.tools import AUTO, Tool, ToolChoice
@@ -39,6 +40,8 @@ QUANTIZE_ENVIRONMENT_VARIABLE = "DLLM_QUANTIZE"
 """Weight quantisation for the served model (``q8_0``); float32 weights when unset or ``none``."""
 DEVICE_ENVIRONMENT_VARIABLE = "DLLM_DEVICE"
 """Where the served model runs: ``cpu`` (default) or ``cuda``. Never changes the output."""
+PROMPT_CACHE_ENVIRONMENT_VARIABLE = "DLLM_PROMPT_CACHE"
+"""How many KV caches the served model keeps for prompt caching (default 4, 0 disables). Never changes the output."""
 
 
 @dataclass(frozen=True)
@@ -117,14 +120,18 @@ class ChatResult:
     completion_tokens: int
     fingerprint: str
     logprobs: tuple[TokenLogprobs, ...] = ()
+    cached_tokens: int = 0
+    """Prompt tokens served from the prompt cache; depends on earlier requests, never changes the output."""
 
 
 @dataclass
 class ChatStream:
-    """A chat generation in progress: ``prompt_tokens`` is known up front; iterate for the events."""
+    """A chat generation in progress: ``prompt_tokens`` (and how many of them the prompt cache holds,
+    ``cached_tokens``) are known up front; iterate for the events."""
 
     prompt_tokens: int
     events: Iterator[ChatEvent] = field(repr=False)
+    cached_tokens: int = 0
 
     def __iter__(self) -> Iterator[ChatEvent]:
         return self.events
@@ -145,18 +152,25 @@ class DllmEngine:
         *,
         chat_template: ChatTemplate | None = None,
         stop_tokens: Iterable[int] = (),
+        prompt_cache: int = 0,
     ) -> None:
+        """``prompt_cache`` keeps that many KV caches to reuse for prompts sharing a prefix with an earlier one
+        (:mod:`etalii_dllm.prompt_cache`); it saves work and never changes the output."""
         self.model = model
         self.tokenizer = tokenizer
         self.system_fingerprint = system_fingerprint
         """Identifies the exact weights and engine; equal fingerprints plus equal requests give equal output."""
         self.chat_template = chat_template
-        self._generator = Generator(model, tokenizer, stop_tokens)
+        self._generator = Generator(model, tokenizer, stop_tokens, prompt_cache)
         self._trie: TokenTrie | None = None
 
     @staticmethod
     def from_model_file(
-        path: str | Path, verify: bool = True, quantize: str | None = None, device: str = "cpu"
+        path: str | Path,
+        verify: bool = True,
+        quantize: str | None = None,
+        device: str = "cpu",
+        prompt_cache: int = DEFAULT_PROMPT_CACHE_SIZE,
     ) -> DllmEngine:
         """An engine for an imported ``model.dllm``: its decoder, BPE tokenizer and chat template. ``quantize``
         (``"q8_0"``) runs the linear layers on quantised weights; that changes the output, and so the
@@ -188,7 +202,9 @@ class DllmEngine:
             )
         stops = [*file.config.eos_token_ids, tokenizer.end_of_sequence]
         fingerprint = "fp_" + model.weights_fingerprint[:12]
-        return DllmEngine(model, tokenizer, fingerprint, chat_template=template, stop_tokens=stops)
+        return DllmEngine(
+            model, tokenizer, fingerprint, chat_template=template, stop_tokens=stops, prompt_cache=prompt_cache
+        )
 
     @staticmethod
     def create_default() -> DllmEngine:
@@ -272,7 +288,7 @@ class DllmEngine:
             constraint=constraint,
             top_logprobs=request.top_logprobs,
         )
-        return ChatStream(generation.prompt_tokens, self._events(generation, request, tools))
+        return ChatStream(generation.prompt_tokens, self._events(generation, request, tools), generation.cached_tokens)
 
     def _events(self, generation: Generation, request: ChatRequest, tools: Sequence[Tool]) -> Iterator[ChatEvent]:
         text = ""
@@ -340,6 +356,7 @@ class DllmEngine:
             finished.completion_tokens,
             finished.fingerprint,
             tuple(logprobs),
+            stream.cached_tokens,
         )
 
     # -- embeddings ---------------------------------------------------------------------------------------------
@@ -385,24 +402,31 @@ def _answer_prefix(text: str) -> str:
 
 
 def use_model_file(
-    path: str | Path | None, quantize: str | None = None, threads: int | None = None, device: str | None = None
+    path: str | Path | None,
+    quantize: str | None = None,
+    threads: int | None = None,
+    device: str | None = None,
+    prompt_cache: int | None = None,
 ) -> None:
-    """Makes the front ends serve ``path`` (sets ``DLLM_MODEL``, and ``DLLM_QUANTIZE``/``DLLM_DEVICE`` when
-    ``quantize``/``device`` are given) and resets the default engine. ``threads`` sets the kernel thread count; it
-    and ``device`` never change the output."""
+    """Makes the front ends serve ``path`` (sets ``DLLM_MODEL``, and ``DLLM_QUANTIZE``/``DLLM_DEVICE``/
+    ``DLLM_PROMPT_CACHE`` when ``quantize``/``device``/``prompt_cache`` are given) and resets the default engine.
+    ``threads`` sets the kernel thread count; it, ``device`` and ``prompt_cache`` never change the output."""
     if path:
         os.environ[MODEL_ENVIRONMENT_VARIABLE] = str(path)
     if quantize:
         os.environ[QUANTIZE_ENVIRONMENT_VARIABLE] = quantize
     if device:
         os.environ[DEVICE_ENVIRONMENT_VARIABLE] = device
+    if prompt_cache is not None:
+        os.environ[PROMPT_CACHE_ENVIRONMENT_VARIABLE] = str(prompt_cache)
     if threads is not None:
         set_threads(threads)
     default_engine.cache_clear()
 
 
 def add_runtime_arguments(parser: argparse.ArgumentParser) -> None:
-    """The ``--model``, ``--quantize``, ``--threads`` and ``--device`` options every front end shares."""
+    """The ``--model``, ``--quantize``, ``--threads``, ``--device`` and ``--prompt-cache`` options every front end
+    shares."""
     parser.add_argument("--model", help="model.dllm file to use (default: $DLLM_MODEL, else the placeholder model)")
     parser.add_argument(
         "--quantize",
@@ -416,6 +440,13 @@ def add_runtime_arguments(parser: argparse.ArgumentParser) -> None:
         "--device",
         choices=DEVICES,
         help="run the model on the CPU or an NVIDIA GPU (default: $DLLM_DEVICE, else cpu); never changes output",
+    )
+    parser.add_argument(
+        "--prompt-cache",
+        type=int,
+        metavar="N",
+        help="KV caches kept to reuse shared prompt prefixes across requests (default: $DLLM_PROMPT_CACHE, else "
+        f"{DEFAULT_PROMPT_CACHE_SIZE}; 0 disables); never changes output",
     )
 
 
@@ -437,6 +468,16 @@ def configured_device() -> str:
     return value
 
 
+def configured_prompt_cache() -> int:
+    """``$DLLM_PROMPT_CACHE``, or the default when it is unset or empty."""
+    value = os.environ.get(PROMPT_CACHE_ENVIRONMENT_VARIABLE, "").strip()
+    if not value:
+        return DEFAULT_PROMPT_CACHE_SIZE
+    if not value.isdigit():
+        raise ValueError(f"{PROMPT_CACHE_ENVIRONMENT_VARIABLE}={value!r}; expected a non-negative integer")
+    return int(value)
+
+
 @cache
 def default_engine() -> DllmEngine:
     """Process-wide default engine: the model named by ``DLLM_MODEL``, else the placeholder. Models are immutable
@@ -444,4 +485,6 @@ def default_engine() -> DllmEngine:
     path = os.environ.get(MODEL_ENVIRONMENT_VARIABLE)
     if not path:
         return DllmEngine.create_default()
-    return DllmEngine.from_model_file(path, quantize=configured_quantization(), device=configured_device())
+    return DllmEngine.from_model_file(
+        path, quantize=configured_quantization(), device=configured_device(), prompt_cache=configured_prompt_cache()
+    )

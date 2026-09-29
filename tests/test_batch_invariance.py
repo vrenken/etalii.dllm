@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -303,6 +304,10 @@ def requests() -> list[dict]:
     return bodies
 
 
+def _uncounted(response: bytes) -> bytes:
+    return re.sub(rb'"cached_tokens":\d+', b'"cached_tokens":0', response)
+
+
 def test_concurrent_server_requests_match_lone_requests(served):
     from etalii_dllm.server.app import app
 
@@ -312,7 +317,8 @@ def test_concurrent_server_requests_match_lone_requests(served):
     load = bodies * 3  # 36 requests in flight on 12 workers, streamed and not, mixed samplers
     with ThreadPoolExecutor(max_workers=12) as pool:
         responses = list(pool.map(lambda body: client.post("/v1/chat/completions", json=body).content, load))
-    assert responses == alone * 3
+    # The prompt cache makes the cache counters in usage depend on earlier requests; every other byte may not.
+    assert [_uncounted(r) for r in responses] == [_uncounted(r) for r in alone] * 3
     fingerprints = {json.loads(response)["system_fingerprint"] for response in alone if not response.startswith(b"d")}
     assert fingerprints == {served.system_fingerprint}
 

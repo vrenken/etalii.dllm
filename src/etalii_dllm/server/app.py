@@ -57,6 +57,7 @@ from etalii_dllm.server.contracts import (
     LogprobEntry,
     ModelInfo,
     ModelList,
+    PromptTokensDetails,
     ToolCallModel,
     TopLogprob,
 )
@@ -206,6 +207,7 @@ def chat_completions(
             prompt_tokens=result.prompt_tokens,
             completion_tokens=result.completion_tokens,
             total_tokens=result.prompt_tokens + result.completion_tokens,
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=result.cached_tokens),
         ),
     )
 
@@ -243,6 +245,7 @@ def _chunks(engine: DllmEngine, chat: ChatRequest, stream, include_usage: bool, 
                     prompt_tokens=stream.prompt_tokens,
                     completion_tokens=event.completion_tokens,
                     total_tokens=stream.prompt_tokens + event.completion_tokens,
+                    prompt_tokens_details=PromptTokensDetails(cached_tokens=stream.cached_tokens),
                 )
                 final = ChatCompletionChunk(
                     id=chat.request_id,
@@ -289,5 +292,5 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=5080)
     add_runtime_arguments(parser)
     args = parser.parse_args()
-    use_model_file(args.model, args.quantize, args.threads, args.device)
+    use_model_file(args.model, args.quantize, args.threads, args.device, args.prompt_cache)
     uvicorn.run(app, host=args.host, port=args.port)
