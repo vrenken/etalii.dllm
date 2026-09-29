@@ -115,8 +115,8 @@ dllm import ./SmolLM2-360M-Instruct -o smollm2-360m.dllm --repo HuggingFaceTB/Sm
 dllm import ./qwen2.5-0.5b-instruct-q8_0.gguf -o qwen2.5-0.5b.dllm
 ```
 
-Supported today: Llama-style models (SmolLM2, TinyLlama, Llama), Mistral, OLMo 2, Granite 3.x, Qwen2/Qwen2.5 and
-Qwen3 (dense) with
+Supported today: Llama-style models (SmolLM2, TinyLlama, Llama), Mistral, OLMo 2, Granite 3.x, Phi-3/Phi-4-mini,
+Qwen2/Qwen2.5 and Qwen3 (dense) with
 byte-level or SentencePiece-style BPE tokenizers ([full list](../README.md#which-models-can-it-run)). Anything else is refused with a message saying what is missing. Only Apache-2.0 and MIT models import
 without `--accept-licence`; see [model import](research/model-import.md) for the licence policy and candidate
 models.
@@ -336,9 +336,10 @@ gives byte-identical responses to a native install. Build it yourself with `dock
 - Six real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
   Qwen2.5-0.5B-Instruct, Qwen2.5-1.5B-Instruct, Qwen3-0.6B, TinyLlama-1.1B-Chat and OLMo-2-1B-Instruct (tokenizer, chat template, logits within 1e-3 and the
   same greedy answer; see `tests/test_reference_models.py`). Other Llama/Qwen2/Qwen3 models should work but are not
-  checked. Mistral and Granite are checked against `transformers` only on tiny synthetic models (their real
+  checked. Mistral, Granite and Phi-3 are checked against `transformers` only on tiny synthetic models (their real
   checkpoints are gated or too large for a CI runner in float32). Fine-tuning works for Llama, Mistral, Qwen2 and
-  Qwen3, not yet for OLMo 2 or Granite; if one misbehaves,
+  Qwen3, not yet for OLMo 2, Granite or Phi models that use LongRoPE; Phi-3/Phi-4-mini with LongRoPE run up to their
+  original context (4096 tokens) rather than the advertised 128k. If one misbehaves,
   please open an issue with the `dllm inspect` output.
 - Speed: on a 4-core cloud VM, SmolLM2-135M reads a prompt at about 150 tokens per second and generates about 20
   tokens per second (about 35 with `--quantize q8_0`); Qwen2.5-0.5B is roughly four times slower. On an RTX 4080,
