@@ -5,6 +5,7 @@ import pytest
 from golden_values import RANDOM_FIRST, RANDOM_SECOND
 
 from etalii_dllm import numerics
+from etalii_dllm.tensor import Tensor
 
 MASK = (1 << 64) - 1
 
@@ -88,3 +89,129 @@ def test_argmax_breaks_ties_towards_lowest_index():
 def test_dot_rejects_mismatched_lengths():
     with pytest.raises(ValueError):
         numerics.dot([1.0, 2.0], [1.0])
+
+
+def gaussian(seed: int, *shape: int) -> np.ndarray:
+    return numerics.fill_gaussian(seed, math.prod(shape)).reshape(shape)
+
+
+def test_packed_weight_keeps_its_shape_and_rejects_other_ranks():
+    w = gaussian(1, 20, 12)
+    packed = numerics.PackedWeight(Tensor(w))
+    assert packed.shape == (20, 12)
+    x = gaussian(2, 3, 12)
+    reference = x.astype(np.float64) @ w.astype(np.float64).T
+    np.testing.assert_allclose(numerics.linear(x, packed).numpy(), reference, rtol=1e-6, atol=1e-6)
+    with pytest.raises(ValueError, match=r"weight must be \[out_features, in_features\]"):
+        numerics.PackedWeight(gaussian(3, 2, 3, 4))
+
+
+def reference_q8_0(w: np.ndarray) -> np.ndarray:
+    """The documented Q8_0 round trip in float32: ``d = amax / 127``, ``q = rint(x * (1 / d))``, ``q * d``."""
+    blocks = w.reshape(w.shape[0], -1, 32)
+    d = (np.abs(blocks).max(axis=2, keepdims=True) / np.float32(127)).astype(np.float32)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        q = np.where(d == 0, 0, np.clip(np.rint(blocks * (np.float32(1) / d)), -127, 127))
+    return (q.astype(np.float32) * d).reshape(w.shape)
+
+
+def test_quantized_weight_dequantizes_to_the_documented_round_trip():
+    w = gaussian(4, 6, 64)
+    w[2, 32:] = 0  # an all-zero block has scale 0
+    quantized = numerics.QuantizedWeight(w)
+    assert quantized.shape == (6, 64) and quantized.kind == "q8_0"
+    dequantized = quantized.dequantize()
+    assert dequantized.dtype == np.float32 and dequantized.shape == (6, 64)
+    np.testing.assert_array_equal(dequantized, reference_q8_0(w))
+    assert not dequantized[2, 32:].any()
+    assert np.abs(dequantized - w).max() <= np.abs(w).max() / 127 / 2 * 1.0001
+
+
+def test_quantized_weight_support_check():
+    assert numerics.QuantizedWeight.supports(Tensor(gaussian(5, 2, 64)))
+    assert not numerics.QuantizedWeight.supports(gaussian(5, 2, 48))
+    assert not numerics.QuantizedWeight.supports(gaussian(5, 64))
+
+
+def test_thread_count_is_validated_and_reported():
+    before = numerics.threads()
+    try:
+        numerics.set_threads(3)
+        assert numerics.threads() == 3
+        with pytest.raises(ValueError, match="thread count must not be negative"):
+            numerics.set_threads(-1)
+        assert numerics.threads() == 3
+    finally:
+        numerics.set_threads(before)
+    assert numerics.instruction_set() in ("avx2", "sse2", "neon", "portable")
+
+
+def test_matmul_matches_float64():
+    a, b = gaussian(6, 5, 70), gaussian(7, 70, 9)
+    np.testing.assert_allclose(numerics.matmul(a, b).numpy(), a.astype(np.float64) @ b, rtol=1e-6, atol=1e-6)
+    assert numerics.matmul(a, b).numpy()[2, 3] == np.float32(numerics.dot(a[2], np.ascontiguousarray(b[:, 3])))
+
+
+def test_rope_inv_freq_rejects_bad_rotary_dims_and_scalings():
+    for head_dim, rotary_dim in ((8, 0), (8, 3), (8, 10), (7, None)):
+        with pytest.raises(ValueError, match="rotary_dim must be even, positive and at most head_dim"):
+            numerics.rope_inv_freq(head_dim, rotary_dim=rotary_dim)
+    with pytest.raises(ValueError, match="unsupported rope scaling 'yarn'"):
+        numerics.rope_inv_freq(8, scaling={"rope_type": "yarn", "factor": 2.0})
+    freqs = numerics.rope_inv_freq(16, 10000.0, rotary_dim=8)
+    np.testing.assert_allclose(freqs, 10000.0 ** (-np.arange(0, 8, 2) / 8), rtol=1e-14)
+    assert np.array_equal(numerics.rope_inv_freq(8, scaling={"rope_type": "default"}), numerics.rope_inv_freq(8))
+
+
+def test_unknown_devices_and_approximations_are_rejected():
+    x = gaussian(8, 2, 4)
+    with pytest.raises(ValueError, match="unknown device 'gpu'; supported: cpu, cuda"):
+        numerics.silu(x, device="gpu")
+    with pytest.raises(ValueError, match="unknown GELU approximation 'erf'"):
+        numerics.gelu(x, approximate="erf")
+
+
+def test_attention_validates_its_arguments():
+    q = gaussian(9, 2, 2, 4)
+    with pytest.raises(ValueError, match=r"q must be \[length, heads, head_dim\]"):
+        numerics.attention(q[0], q, q)
+    with pytest.raises(ValueError, match="q_offset must be non-negative"):
+        numerics.attention(q, q, q, q_offset=-1)
+    dout = gaussian(10, 2, 2, 4)
+    with pytest.raises(ValueError, match=r"q must be \[length, heads, head_dim\]"):
+        numerics.attention_backward(q[0], q, q, dout)
+    with pytest.raises(ValueError, match="q_offset must be non-negative"):
+        numerics.attention_backward(q, q, q, dout, q_offset=-2)
+
+
+def test_gpu_shape_checks_run_before_any_device_work():
+    """The GPU paths validate shapes themselves (the CPU kernels do it in C++), so a bad call fails the same way
+    with or without a GPU."""
+    q, k = gaussian(11, 3, 2, 4), gaussian(12, 5, 2, 4)
+    freqs = numerics.rope_inv_freq(4)
+    rope_message = r"rope needs x\[tokens, heads, head_dim\], one position per token, 2 \* len\(inv_freq\) <= head_dim"
+    for x, positions, inv_freq in ((q[0], np.arange(2), freqs), (q, np.arange(2), freqs), (q, np.arange(3), [1.0] * 3)):
+        with pytest.raises(ValueError, match=rope_message):
+            numerics.rope(x, positions, inv_freq, device="cuda")
+    attention_message = r"q, k and v must be \[length, heads, dim\] with matching lengths and head_dim"
+    for keys, values in ((k[0], k), (k, k[:4]), (gaussian(13, 5, 2, 6), gaussian(13, 5, 2, 6))):
+        with pytest.raises(ValueError, match=attention_message):
+            numerics.attention(q, keys, values, device="cuda")
+    with pytest.raises(ValueError, match="q_offset must be non-negative"):
+        numerics.attention(q, k[:2], k[:2], device="cuda")  # more queries than keys
+
+
+@pytest.mark.skipif(numerics.cuda.available(), reason="checks the failure on machines without CUDA")
+def test_gpu_kernels_fail_without_cuda_instead_of_falling_back():
+    x, q = gaussian(14, 2, 4), gaussian(15, 3, 2, 4)
+    calls = [
+        lambda: numerics.rms_norm(x, np.ones(4, np.float32), device="cuda"),
+        lambda: numerics.silu(x, device="cuda"),
+        lambda: numerics.gelu(x, device="cuda"),
+        lambda: numerics.gelu(x, approximate="tanh", device="cuda"),
+        lambda: numerics.rope(q, np.arange(3), numerics.rope_inv_freq(4), device="cuda"),
+        lambda: numerics.attention(q, q, q, device="cuda"),
+    ]
+    for call in calls:
+        with pytest.raises(RuntimeError, match="CUDA"):
+            call()

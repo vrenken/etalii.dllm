@@ -104,6 +104,8 @@ class SafetensorsFile:
 
         entries: list[tuple[int, int, SafetensorsTensor]] = []
         for name, info in header.items():
+            if not isinstance(info, dict):
+                raise SafetensorsError(f"{self.path}: tensor {name!r} is not described by a JSON object")
             dtype = info.get("dtype")
             shape = tuple(info.get("shape", ()))
             begin, end = info.get("data_offsets", (None, None))
