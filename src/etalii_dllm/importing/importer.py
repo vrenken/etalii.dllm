@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -18,13 +19,14 @@ from typing import Any
 
 import numpy as np
 
-from etalii_dllm.architecture import TransformerConfig
+from etalii_dllm.architecture import FAMILIES, TransformerConfig
 from etalii_dllm.importing import hub
 from etalii_dllm.importing.gguf import GgufFile
 from etalii_dllm.importing.licences import PERMISSIVE, STANDARD_TEXTS
 from etalii_dllm.importing.safetensors import open_checkpoint
 from etalii_dllm.lora import ADAPTER_CONFIG, AdapterError, adapter_files, apply_adapter
 from etalii_dllm.modelfile import ModelFile, TensorSource, write_model_file
+from etalii_dllm.numerics import log
 
 
 class ModelImportError(ValueError):
@@ -100,29 +102,66 @@ def _rope_from_hf(config: dict[str, Any]) -> tuple[float, dict[str, Any] | None]
     parameters = config.get("rope_parameters")
     if isinstance(parameters, dict):  # transformers v5 layout
         theta = parameters.get("rope_theta", config.get("rope_theta", 10000.0))
-        scaling: dict[str, Any] | None = {k: v for k, v in parameters.items() if k != "rope_theta"}
+        scaling: dict[str, Any] | None = {
+            k: v for k, v in parameters.items() if k not in ("rope_theta", "partial_rotary_factor")
+        }
     else:
         theta = config.get("rope_theta", 10000.0)
         scaling = config.get("rope_scaling")
     if scaling:
         scaling = dict(scaling)
         kind = scaling.pop("rope_type", None) or scaling.pop("type", None) or "default"
+        if config.get("model_type") == "phi3" and kind in ("su", "yarn"):  # what transformers' Phi3Config does
+            kind = "longrope"
         if kind == "default":
             scaling = None
         elif kind in ("linear", "llama3"):
             scaling = {"rope_type": kind, **scaling}
+        elif kind == "longrope":
+            scaling = _longrope_from_hf(config, scaling)
         else:
             raise ModelImportError(f"RoPE scaling {kind!r} is not supported yet")
     return float(theta), scaling or None
 
 
+def _longrope_from_hf(config: dict[str, Any], scaling: dict[str, Any]) -> dict[str, Any]:
+    """LongRoPE with its ``attention_factor`` worked out as transformers does (from ``factor``, or else from the ratio
+    of ``max_position_embeddings`` to ``original_max_position_embeddings``), in dllm's portable ``log``."""
+    original = scaling.get("original_max_position_embeddings", config.get("original_max_position_embeddings"))
+    if original is None or "short_factor" not in scaling or "long_factor" not in scaling:
+        raise ModelImportError("LongRoPE needs short_factor, long_factor and original_max_position_embeddings")
+    original = int(original)
+    factor = scaling.get("factor")
+    if factor is None:
+        factor = int(config.get("max_position_embeddings", original)) / original
+    attention = scaling.get("attention_factor")
+    if attention is None:
+        attention = 1.0 if factor <= 1.0 else math.sqrt(1 + log(float(factor)) / log(float(original)))
+    return {
+        "rope_type": "longrope",
+        "short_factor": [float(f) for f in scaling["short_factor"]],
+        "long_factor": [float(f) for f in scaling["long_factor"]],
+        "original_max_position_embeddings": original,
+        "attention_factor": float(attention),
+    }
+
+
+def _rotary_dim(config: dict[str, Any], head_dim: int) -> int | None:
+    parameters = config.get("rope_parameters")
+    factor = config.get("partial_rotary_factor")
+    if isinstance(parameters, dict) and "partial_rotary_factor" in parameters:
+        factor = parameters["partial_rotary_factor"]
+    if factor is None or float(factor) == 1.0:
+        return None
+    return int(head_dim * float(factor))
+
+
 def hf_config(config: dict[str, Any], generation: dict[str, Any] | None = None) -> TransformerConfig:
-    """Maps a Hugging Face ``config.json`` (Granite, Llama, Mistral, OLMo 2, Qwen2 or Qwen3) to our description."""
+    """Maps a Hugging Face ``config.json`` (Granite, Llama, Mistral, OLMo 2, Phi-3, Qwen2 or Qwen3) to our
+    description."""
     family = config.get("model_type")
-    if family not in ("granite", "llama", "mistral", "olmo2", "qwen2", "qwen3"):
-        raise ModelImportError(
-            f"model_type {family!r} is not supported (supported: granite, llama, mistral, olmo2, qwen2, qwen3)"
-        )
+    if family not in FAMILIES:
+        raise ModelImportError(f"model_type {family!r} is not supported (supported: {', '.join(FAMILIES)})")
     if config.get("hidden_act", "silu") != "silu":
         raise ModelImportError(f"activation {config.get('hidden_act')!r} is not supported")
     if config.get("mlp_bias"):
@@ -130,36 +169,48 @@ def hf_config(config: dict[str, Any], generation: dict[str, Any] | None = None) 
     window, window_layers = _sliding_window_from_hf(config, family)
     heads = int(config["num_attention_heads"])
     hidden = int(config["hidden_size"])
+    head_dim = int(config.get("head_dim") or hidden // heads)
     theta, scaling = _rope_from_hf(config)
+    context = int(config.get("max_position_embeddings", 2048))
+    if scaling and scaling["rope_type"] == "longrope":
+        # transformers switches to the long factors once a sequence outgrows the original context, which would make
+        # a token's output depend on how long the sequence gets; dllm keeps the short factors and that context.
+        context = min(context, scaling["original_max_position_embeddings"])
+    if window is not None and window >= context:  # the window never binds
+        window, window_layers = None, None
     eos = _ids(config.get("eos_token_id"))
     for token in _ids((generation or {}).get("eos_token_id")):
         if token not in eos:
             eos.append(token)
     bos = config.get("bos_token_id")
-    return TransformerConfig(
-        family=family,
-        vocabulary_size=int(config["vocab_size"]),
-        hidden_size=hidden,
-        intermediate_size=int(config["intermediate_size"]),
-        layers=int(config["num_hidden_layers"]),
-        heads=heads,
-        kv_heads=int(config.get("num_key_value_heads") or heads),
-        head_dim=int(config.get("head_dim") or hidden // heads),
-        context_length=int(config.get("max_position_embeddings", 2048)),
-        rms_norm_eps=float(config.get("rms_norm_eps", 1e-6)),
-        rope_theta=theta,
-        rope_scaling=scaling,
-        attention_bias=family == "qwen2" or bool(config.get("attention_bias", False)),
-        qk_norm=family in ("olmo2", "qwen3"),
-        qk_norm_scope="all" if family == "olmo2" else "head",
-        norm_placement="post" if family == "olmo2" else "pre",
-        tie_word_embeddings=bool(config.get("tie_word_embeddings", False)),
-        bos_token_id=None if bos is None else int(bos),
-        eos_token_ids=tuple(eos),
-        sliding_window=window,
-        sliding_window_layers=window_layers,
-        **_granite_multipliers(config, family),
-    )
+    try:  # a config the decoder rejects (e.g. LongRoPE factors that do not fit the heads) is an import error
+        return TransformerConfig(
+            family=family,
+            vocabulary_size=int(config["vocab_size"]),
+            hidden_size=hidden,
+            intermediate_size=int(config["intermediate_size"]),
+            layers=int(config["num_hidden_layers"]),
+            heads=heads,
+            kv_heads=int(config.get("num_key_value_heads") or heads),
+            head_dim=head_dim,
+            context_length=context,
+            rms_norm_eps=float(config.get("rms_norm_eps", 1e-6)),
+            rope_theta=theta,
+            rope_scaling=scaling,
+            attention_bias=family == "qwen2" or bool(config.get("attention_bias", False)),
+            qk_norm=family in ("olmo2", "qwen3"),
+            qk_norm_scope="all" if family == "olmo2" else "head",
+            norm_placement="post" if family == "olmo2" else "pre",
+            tie_word_embeddings=bool(config.get("tie_word_embeddings", False)),
+            bos_token_id=None if bos is None else int(bos),
+            eos_token_ids=tuple(eos),
+            sliding_window=window,
+            sliding_window_layers=window_layers,
+            rotary_dim=_rotary_dim(config, head_dim),
+            **_granite_multipliers(config, family),
+        )
+    except ValueError as error:
+        raise ModelImportError(str(error)) from error
 
 
 def _granite_multipliers(config: dict[str, Any], family: str) -> dict[str, Any]:
@@ -194,6 +245,34 @@ def _sliding_window_from_hf(config: dict[str, Any], family: str) -> tuple[int | 
     if not sliding:
         return None, None
     return int(window), None if len(sliding) == layers else sliding
+
+
+def _split_fused(tensor: Any, config: TransformerConfig) -> dict[str, TensorSource] | None:
+    """Phi-3 fuses the q/k/v projections into ``qkv_proj`` and the gate/up projections into ``gate_up_proj`` (rows
+    stacked in that order); returns our separate tensors, each loading its own rows, or None for any other tensor."""
+    match = _HF_LAYER.match(tensor.name)
+    if not match or match.group(2) not in ("self_attn.qkv_proj.weight", "mlp.gate_up_proj.weight"):
+        return None
+    if tensor.dtype not in ("F32", "F16", "BF16"):
+        raise ModelImportError(f"tensor {tensor.name!r} has dtype {tensor.dtype}; only F32, F16 and BF16 import")
+    p = f"layers.{int(match.group(1))}."
+    if match.group(2) == "self_attn.qkv_proj.weight":
+        q, kv = config.heads * config.head_dim, config.kv_heads * config.head_dim
+        parts = [("attention.q.weight", q), ("attention.k.weight", kv), ("attention.v.weight", kv)]
+    else:
+        parts = [("mlp.gate.weight", config.intermediate_size), ("mlp.up.weight", config.intermediate_size)]
+    if len(tensor.shape) != 2 or tensor.shape[0] != sum(rows for _, rows in parts):
+        raise ModelImportError(f"tensor {tensor.name!r} has shape {tensor.shape}, which does not split as expected")
+    split: dict[str, TensorSource] = {}
+    start = 0
+    for name, rows in parts:
+
+        def load(start: int = start, rows: int = rows) -> np.ndarray:
+            return np.ascontiguousarray(tensor.to_float32()[start : start + rows])
+
+        split[p + name] = TensorSource((rows, tensor.shape[1]), load, tensor.dtype)
+        start += rows
+    return split
 
 
 def _hf_name(name: str, config: TransformerConfig) -> str | None:
@@ -258,6 +337,10 @@ def _convert_huggingface(directory: Path) -> _Converted:
 
     tensors: dict[str, TensorSource] = {}
     for tensor in checkpoint.values():
+        fused = _split_fused(tensor, config)
+        if fused is not None:
+            tensors.update(fused)
+            continue
         name = _hf_name(tensor.name, config)
         if name is None:
             continue

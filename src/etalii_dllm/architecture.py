@@ -13,8 +13,9 @@ from typing import Any
 # Families the decoder implements. "qwen2" is "llama" with biases on the q/k/v projections; "qwen3" is "llama" with
 # an RMSNorm over each query and key head before the rotary embedding (QK-norm); "mistral" is "llama", usually with
 # sliding-window attention; "olmo2" moves the norms after attention and the MLP and normalises the whole query and
-# key projections; "granite" is "llama" with four scalar multipliers.
-FAMILIES = ("granite", "llama", "mistral", "olmo2", "qwen2", "qwen3")
+# key projections; "granite" is "llama" with four scalar multipliers; "phi3" is "llama" whose checkpoints fuse the
+# q/k/v and gate/up projections (imports split them), often with partial rotary embeddings and LongRoPE.
+FAMILIES = ("granite", "llama", "mistral", "olmo2", "phi3", "qwen2", "qwen3")
 NORM_PLACEMENTS = ("pre", "post")
 QK_NORM_SCOPES = ("head", "all")
 
@@ -59,6 +60,9 @@ class TransformerConfig:
     """Sliding-window attention (Mistral): each query sees only the last ``sliding_window`` keys, itself included."""
     sliding_window_layers: tuple[int, ...] | None = None
     """The layers that use the sliding window; ``None`` means all of them."""
+    rotary_dim: int | None = None
+    """Partial rotary embeddings (Phi-4-mini): only the first ``rotary_dim`` dimensions of each head rotate; ``None``
+    means all ``head_dim``."""
 
     def __post_init__(self) -> None:
         if self.family not in FAMILIES:
@@ -82,10 +86,27 @@ class TransformerConfig:
             not 0 <= layer < self.layers for layer in self.sliding_window_layers
         ):
             raise ValueError("sliding_window_layers must be layer indices")
+        if self.rotary_dim is not None and not (0 < self.rotary_dim <= self.head_dim and self.rotary_dim % 2 == 0):
+            raise ValueError("rotary_dim must be even, positive and at most head_dim")
+        if self.rope_scaling and self.rope_scaling.get("rope_type") == "longrope":
+            pairs = self.rotary_dimension // 2
+            if len(self.rope_scaling.get("short_factor", ())) != pairs:
+                raise ValueError(f"longrope short_factor needs {pairs} values")
 
     @property
     def attention_scale(self) -> float:
         return 1.0 / math.sqrt(self.head_dim) if self.attention_multiplier is None else self.attention_multiplier
+
+    @property
+    def rotary_dimension(self) -> int:
+        return self.head_dim if self.rotary_dim is None else self.rotary_dim
+
+    @property
+    def rope_attention_factor(self) -> float:
+        """LongRoPE's ``attention_factor``, which scales the rotated query and key dimensions (1 otherwise)."""
+        if not self.rope_scaling or self.rope_scaling.get("rope_type") != "longrope":
+            return 1.0
+        return float(self.rope_scaling.get("attention_factor", 1.0))
 
     @property
     def has_multipliers(self) -> bool:
@@ -106,7 +127,7 @@ class TransformerConfig:
         values["eos_token_ids"] = list(self.eos_token_ids)
         if not self.qk_norm:  # model files written before QK-norm existed stay byte-identical
             del values["qk_norm"]
-        for name in ("sliding_window", "sliding_window_layers"):  # likewise
+        for name in ("sliding_window", "sliding_window_layers", "rotary_dim"):  # likewise
             if values[name] is None:
                 del values[name]
         defaults = (

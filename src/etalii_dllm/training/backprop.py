@@ -44,10 +44,17 @@ class DecoderGradients:
     def __init__(self, config: TransformerConfig) -> None:
         if config.rope_interleaved:
             raise ValueError("training expects the Hugging Face rotary layout (imports convert to it)")
-        if config.norm_placement != "pre" or config.qk_norm_scope != "head" or config.has_multipliers:
+        if (
+            config.norm_placement != "pre"
+            or config.qk_norm_scope != "head"
+            or config.has_multipliers
+            or config.rope_attention_factor != 1.0
+        ):
             raise ValueError(f"fine-tuning is not supported for the {config.family} architecture yet")
         self.config = config
-        self.inv_freq = rope_inv_freq(config.head_dim, config.rope_theta, scaling=config.rope_scaling)
+        self.inv_freq = rope_inv_freq(
+            config.head_dim, config.rope_theta, rotary_dim=config.rotary_dimension, scaling=config.rope_scaling
+        )
 
     def logits(self, weights: Mapping[str, npt.ArrayLike], tokens: Sequence[int]) -> FloatArray:
         """Logits ``[len(tokens), vocab]`` for every position (forward pass only)."""

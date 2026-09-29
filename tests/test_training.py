@@ -433,3 +433,5 @@ def test_architectures_without_a_backward_pass_are_refused():
         DecoderGradients(hf_config(tiny_config("olmo2")))
     with pytest.raises(ValueError, match="granite"):
         DecoderGradients(hf_config(tiny_config("granite")))
+    with pytest.raises(ValueError, match="phi3"):  # the LongRoPE attention factor
+        DecoderGradients(hf_config(tiny_config("phi3")))
