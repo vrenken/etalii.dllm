@@ -91,8 +91,8 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "import": "b02b4f3085396f3a0b20e07f5b875c9e4a0fbf996dcbc954953bc7d7346b4a4e",
         "chat": "12608d6f03ed2ea7892990ed181b39a3d0df693637f168ca34008af1403d4bc3",
     },
-    "olmo2": {  # values from the Reference models workflow
-        "import": "",
-        "chat": "",
+    "olmo2": {
+        "import": "183baa6ee6dcc08d855a34f1531b7e5cd1d918c21c6e8bef4cebde7ec675d118",
+        "chat": "28bbe79bdd0ca41816a367ee7bb30120cb7072991d1eefa2e0cb16a1f1ca8767",
     },
 }
