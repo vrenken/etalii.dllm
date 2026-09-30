@@ -16,8 +16,9 @@ from typing import Any
 # key projections; "granite" is "llama" with four scalar multipliers; "phi3" is "llama" whose checkpoints fuse the
 # q/k/v and gate/up projections (imports split them), often with partial rotary embeddings and LongRoPE; "gemma3"
 # normalises both the inputs and the outputs of attention and the MLP with (1 + weight) RMSNorms, gates with GELU
-# (tanh), scales the embeddings and gives its sliding-window layers a RoPE base of their own.
-FAMILIES = ("gemma3", "granite", "llama", "mistral", "olmo2", "phi3", "qwen2", "qwen3")
+# (tanh), scales the embeddings and gives its sliding-window layers a RoPE base of their own; "gemma2" is the same
+# without QK-norm or the second RoPE base, and soft-caps the attention scores and the logits.
+FAMILIES = ("gemma2", "gemma3", "granite", "llama", "mistral", "olmo2", "phi3", "qwen2", "qwen3")
 NORM_PLACEMENTS = ("pre", "post", "sandwich")
 ACTIVATIONS = ("silu", "gelu_tanh")
 QK_NORM_SCOPES = ("head", "all")
@@ -68,6 +69,10 @@ class TransformerConfig:
     """The layers that use the sliding window; ``None`` means all of them."""
     local_rope_theta: float | None = None
     """Gemma 3: the RoPE base of the sliding-window layers, which use no RoPE scaling; ``None`` means ``rope_theta``."""
+    attention_softcap: float | None = None
+    """Gemma 2: each scaled attention score ``s`` becomes ``cap * tanh(s / cap)`` before the softmax."""
+    logits_softcap: float | None = None
+    """Gemma 2: the logits become ``cap * tanh(logits / cap)``."""
     rotary_dim: int | None = None
     """Partial rotary embeddings (Phi-4-mini): only the first ``rotary_dim`` dimensions of each head rotate; ``None``
     means all ``head_dim``."""
@@ -94,6 +99,10 @@ class TransformerConfig:
             not 0 <= layer < self.layers for layer in self.sliding_window_layers
         ):
             raise ValueError("sliding_window_layers must be layer indices")
+        for name in ("attention_softcap", "logits_softcap"):
+            cap = getattr(self, name)
+            if cap is not None and not cap > 0:
+                raise ValueError(f"{name} must be positive")
         if self.rotary_dim is not None and not (0 < self.rotary_dim <= self.head_dim and self.rotary_dim % 2 == 0):
             raise ValueError("rotary_dim must be even, positive and at most head_dim")
         if self.rope_scaling and self.rope_scaling.get("rope_type") == "longrope":
@@ -147,7 +156,8 @@ class TransformerConfig:
         values["eos_token_ids"] = list(self.eos_token_ids)
         if not self.qk_norm:  # model files written before QK-norm existed stay byte-identical
             del values["qk_norm"]
-        for name in ("sliding_window", "sliding_window_layers", "rotary_dim", "local_rope_theta"):  # likewise
+        optional = ("sliding_window", "sliding_window_layers", "rotary_dim", "local_rope_theta")
+        for name in (*optional, "attention_softcap", "logits_softcap"):  # likewise
             if values[name] is None:
                 del values[name]
         defaults = (

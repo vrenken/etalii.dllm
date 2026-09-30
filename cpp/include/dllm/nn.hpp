@@ -345,6 +345,13 @@ inline void rms_norm(const float* x, const float* weight, float* out, std::size_
     }
 }
 
+// Logit soft-capping (Gemma 2): cap * tanh(x / cap), in double, rounded once.
+inline void softcap(const float* x, float* out, std::size_t n, double cap) {
+    for (std::size_t i = 0; i < n; ++i) {
+        out[i] = static_cast<float>(cap * dllm::tanh(static_cast<double>(x[i]) / cap));
+    }
+}
+
 // SiLU (swish): x * sigmoid(x), in double, rounded once.
 inline float silu(float x) {
     const double d = x;
@@ -405,10 +412,11 @@ inline void rope(const float* x, const std::int64_t* positions, const double* in
 }
 
 // One (query, head) row of attention(): writes oh[value_dim]. Four keys are scored at a time, each with its own
-// accumulator, so the order inside every dot product is unchanged.
+// accumulator, so the order inside every dot product is unchanged. A positive softcap (Gemma 2) maps each scaled
+// score s to softcap * tanh(s / softcap), in double.
 DLLM_ALWAYS_INLINE void attention_row(const float* qh, const float* k, const float* v, float* oh, double* scores,
                                       double* acc, std::size_t visible, std::size_t kv_heads, std::size_t kvh,
-                                      std::size_t head_dim, std::size_t value_dim, double scale) {
+                                      std::size_t head_dim, std::size_t value_dim, double scale, double softcap) {
     if (visible == 0) {
         for (std::size_t i = 0; i < value_dim; ++i) {
             oh[i] = 0.0f;
@@ -446,6 +454,11 @@ DLLM_ALWAYS_INLINE void attention_row(const float* qh, const float* k, const flo
         }
         scores[j] = dotp * scale;
     }
+    if (softcap > 0.0) {
+        for (j = 0; j < visible; ++j) {
+            scores[j] = softcap * dllm::tanh(scores[j] / softcap);
+        }
+    }
     double max = scores[0];
     for (j = 1; j < visible; ++j) {
         if (scores[j] > max) {
@@ -474,20 +487,20 @@ DLLM_ALWAYS_INLINE void attention_row(const float* qh, const float* k, const flo
 }
 
 using AttentionRowFn = void (*)(const float*, const float*, const float*, float*, double*, double*, std::size_t,
-                                std::size_t, std::size_t, std::size_t, std::size_t, double);
+                                std::size_t, std::size_t, std::size_t, std::size_t, double, double);
 
 inline void attention_row_portable(const float* qh, const float* k, const float* v, float* oh, double* scores,
                                    double* acc, std::size_t visible, std::size_t kv_heads, std::size_t kvh,
-                                   std::size_t head_dim, std::size_t value_dim, double scale) {
-    attention_row(qh, k, v, oh, scores, acc, visible, kv_heads, kvh, head_dim, value_dim, scale);
+                                   std::size_t head_dim, std::size_t value_dim, double scale, double softcap) {
+    attention_row(qh, k, v, oh, scores, acc, visible, kv_heads, kvh, head_dim, value_dim, scale, softcap);
 }
 
 #ifdef DLLM_X86_DISPATCH
 DLLM_TARGET_AVX2 inline void attention_row_avx2(const float* qh, const float* k, const float* v, float* oh,
                                                 double* scores, double* acc, std::size_t visible,
                                                 std::size_t kv_heads, std::size_t kvh, std::size_t head_dim,
-                                                std::size_t value_dim, double scale) {
-    attention_row(qh, k, v, oh, scores, acc, visible, kv_heads, kvh, head_dim, value_dim, scale);
+                                                std::size_t value_dim, double scale, double softcap) {
+    attention_row(qh, k, v, oh, scores, acc, visible, kv_heads, kvh, head_dim, value_dim, scale, softcap);
 }
 
 #endif
@@ -527,13 +540,13 @@ inline AttentionSpan attention_span(std::size_t t, std::size_t kv_len, bool caus
 // Query head h reads key/value head h / (q_heads / kv_heads). With causal masking, query t sits at absolute
 // position q_offset + t and sees keys 0 .. q_offset + t; a non-zero window (sliding-window attention) limits that
 // to the last `window` of them, q_offset + t - window + 1 .. q_offset + t. Each (query, head) row is computed on its own:
-// scores in double (dot over head_dim ascending, times scale), softmax with the maximum subtracted and the sum
+// scores in double (dot over head_dim ascending, times scale, then soft-capped when softcap > 0), softmax with the maximum subtracted and the sum
 // over keys ascending, then the value sum over keys ascending. A row's bits therefore do not depend on q_len,
 // so a prefill and token-by-token decoding against a KV cache give identical outputs.
 inline void attention(const float* q, const float* k, const float* v, float* out, std::size_t q_len,
                       std::size_t kv_len, std::size_t q_heads, std::size_t kv_heads, std::size_t head_dim,
                       std::size_t value_dim, double scale, bool causal, std::size_t q_offset,
-                      std::size_t window = 0) {
+                      std::size_t window = 0, double softcap = 0.0) {
     if (kv_heads == 0 || q_heads % kv_heads != 0) {
         throw std::invalid_argument("q_heads must be a multiple of kv_heads");
     }
@@ -550,7 +563,7 @@ inline void attention(const float* q, const float* k, const float* v, float* out
         acc.resize(value_dim > 0 ? value_dim : 1);
         kernel(q + (t * q_heads + h) * head_dim, k + span.first * kv_heads * head_dim,
                v + span.first * kv_heads * value_dim, out + (t * q_heads + h) * value_dim, scores.data(), acc.data(),
-               span.count, kv_heads, h / group, head_dim, value_dim, scale);
+               span.count, kv_heads, h / group, head_dim, value_dim, scale, softcap);
     });
 }
 

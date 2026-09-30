@@ -254,3 +254,38 @@ def test_gpu_kernels_fail_without_cuda_instead_of_falling_back():
     for call in calls:
         with pytest.raises(RuntimeError, match="CUDA"):
             call()
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"qk_norm_scope": "row"}, "unsupported qk_norm_scope"),
+        ({"norm_placement": "middle"}, "unsupported norm_placement"),
+        ({"sliding_window": 0}, "sliding_window must be positive"),
+        ({"sliding_window": 4, "sliding_window_layers": (1,)}, "sliding_window_layers must be layer indices"),
+        ({"attention_softcap": 0.0}, "attention_softcap must be positive"),
+        ({"logits_softcap": -1.0}, "logits_softcap must be positive"),
+    ],
+)
+def test_config_rejects_bad_layouts_and_softcaps(change, message):
+    from dataclasses import replace
+
+    from etalii_dllm.architecture import TransformerConfig
+
+    base = TransformerConfig.from_dict(
+        {
+            "family": "gemma2",
+            "vocabulary_size": 8,
+            "hidden_size": 8,
+            "intermediate_size": 8,
+            "layers": 1,
+            "heads": 1,
+            "kv_heads": 1,
+            "head_dim": 8,
+            "context_length": 16,
+            "rms_norm_eps": 1e-5,
+            "rope_theta": 1e4,
+        }
+    )
+    with pytest.raises(ValueError, match=message):
+        replace(base, **change)

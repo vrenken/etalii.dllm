@@ -40,9 +40,23 @@ def tiny_config(family: str) -> dict:
     slides a window of 3 tokens (shorter than the test prompts, so the window matters); OLMo 2 normalises outputs
     instead of inputs and the whole query and key projections; Granite adds its four multipliers; Phi-3 fuses its
     projections, rotates half of each (wider) head and uses LongRoPE with a window of 3; Gemma 3 alternates a window of
-    3 (with its own RoPE base) and full attention (with linear RoPE scaling)."""
+    3 (with its own RoPE base) and full attention (with linear RoPE scaling); Gemma 2 does so with one RoPE base and
+    soft-caps attention scores and logits at about their size, so the caps bend them."""
     config = {**TINY_LLAMA_CONFIG, "model_type": family}
-    if family == "gemma3":
+    if family == "gemma2":
+        del config["hidden_act"]
+        config.update(
+            architectures=["Gemma2ForCausalLM"],
+            hidden_activation="gelu_pytorch_tanh",
+            pad_token_id=0,
+            head_dim=8,
+            query_pre_attn_scalar=12,
+            sliding_window=3,
+            attention_bias=False,
+            attn_logit_softcapping=0.02,
+            final_logit_softcapping=0.05,
+        )
+    elif family == "gemma3":
         del config["hidden_act"]
         config.update(
             architectures=["Gemma3ForCausalLM"],
@@ -120,7 +134,7 @@ def hf_weights(config: dict, seed: int = 11) -> dict[str, np.ndarray]:
     ours = TransformerConfig.from_dict(
         {
             "family": family
-            if family in ("gemma3", "granite", "mistral", "olmo2", "phi3", "qwen2", "qwen3")
+            if family in ("gemma2", "gemma3", "granite", "mistral", "olmo2", "phi3", "qwen2", "qwen3")
             else "llama",
             "vocabulary_size": config["vocab_size"],
             "hidden_size": config["hidden_size"],
@@ -135,7 +149,7 @@ def hf_weights(config: dict, seed: int = 11) -> dict[str, np.ndarray]:
             "attention_bias": family == "qwen2",
             "qk_norm": family in ("gemma3", "olmo2", "qwen3"),
             "qk_norm_scope": "all" if family == "olmo2" else "head",
-            "norm_placement": {"olmo2": "post", "gemma3": "sandwich"}.get(family, "pre"),
+            "norm_placement": {"olmo2": "post", "gemma2": "sandwich", "gemma3": "sandwich"}.get(family, "pre"),
             "tie_word_embeddings": config["tie_word_embeddings"],
         }
     )
@@ -153,7 +167,7 @@ def hf_weights(config: dict, seed: int = 11) -> dict[str, np.ndarray]:
         "attention_post_norm.weight": "post_attention_layernorm.weight",
         "mlp_post_norm.weight": "post_feedforward_layernorm.weight",
     }
-    if family == "gemma3":
+    if family in ("gemma2", "gemma3"):
         layer_names["mlp_norm.weight"] = "pre_feedforward_layernorm.weight"
     weights = {}
     for index, (name, shape) in enumerate(sorted(ours.tensor_shapes().items())):

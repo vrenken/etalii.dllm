@@ -37,6 +37,7 @@ from etalii_dllm.numerics import (
     rope,
     rope_inv_freq,
     silu,
+    softcap,
 )
 from etalii_dllm.tensor import Tensor
 
@@ -288,6 +289,8 @@ class Transformer:
             logits = linear(np.ascontiguousarray(hidden[ends]), self._lm_head).numpy()
         if self.config.logits_scaling != 1.0:
             logits = logits / np.float32(self.config.logits_scaling)
+        if self.config.logits_softcap is not None:
+            logits = softcap(logits, self.config.logits_softcap).numpy()
         for tokens, _, cache in segments:
             cache.tokens.extend(tokens)
         return [row.copy() for row in logits]
@@ -331,6 +334,7 @@ class Transformer:
                         causal=True,
                         q_offset=start,
                         window=config.window(layer),
+                        softcap=config.attention_softcap,
                     ).numpy()
                 )
             a = attended[0] if len(attended) == 1 else np.concatenate(attended)
@@ -408,6 +412,7 @@ class Transformer:
                         causal=True,
                         q_offset=start,
                         window=config.window(layer),
+                        softcap=config.attention_softcap,
                     )
                 )
             if len(parts) == 1:

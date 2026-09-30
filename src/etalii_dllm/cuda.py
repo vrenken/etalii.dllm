@@ -332,9 +332,10 @@ def attention(
     causal: bool,
     q_offset: int,
     window: int | None = None,
+    softcap: float | None = None,
 ) -> CudaTensor:
     """Attention of ``q[q_len, q_heads, d]`` over the first ``kv_len`` rows of ``k`` and ``v`` (a KV cache may be
-    longer); ``window`` as in :func:`etalii_dllm.numerics.attention`."""
+    longer); ``window`` and ``softcap`` as in :func:`etalii_dllm.numerics.attention`."""
     q_len, q_heads, head_dim = q.shape
     kv_heads, value_dim = k.shape[1], v.shape[2]
     out = _kernels.cuda_attention(
@@ -351,5 +352,6 @@ def attention(
         causal,
         q_offset,
         window or 0,
+        softcap or 0.0,
     )
     return CudaTensor(out, (q_len, q_heads, value_dim))

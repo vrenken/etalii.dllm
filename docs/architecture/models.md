@@ -56,7 +56,7 @@ flowchart LR
 
 `import_model` accepts three kinds of source and turns each into the same intermediate form: a
 `TransformerConfig`, a list of named float32 tensors, the tokenizer files, the chat template and the licence it
-found. Eight decoder families are supported: Llama (SmolLM2, TinyLlama), Gemma 3 (RMSNorm before and after
+found. Nine decoder families are supported: Llama (SmolLM2, TinyLlama), Gemma 2 (Gemma 3's layout without QK-norm, one RoPE base, and soft-capped attention scores and logits), Gemma 3 (RMSNorm before and after
 attention and the MLP, scaling by `1 + weight`, GELU gating, scaled embeddings and a RoPE base of its own for the
 sliding-window layers), Granite (Llama with four scalar
 multipliers; the residual one is folded into the output projections when the model loads), Mistral (Llama with sliding-window
@@ -152,7 +152,7 @@ classDiagram
         verify()
     }
     class TransformerConfig {
-        family: gemma3, granite, llama, mistral, olmo2, phi3, qwen2 or qwen3
+        family: gemma2, gemma3, granite, llama, mistral, olmo2, phi3, qwen2 or qwen3
         vocabulary_size, hidden_size
         layers, heads, kv_heads, head_dim
         rope_theta, rope_scaling

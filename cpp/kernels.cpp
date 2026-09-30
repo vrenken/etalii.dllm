@@ -484,14 +484,14 @@ NB_MODULE(_kernels, module) {
         "cuda_attention",
         [](const Array& q, const Array& k, const Array& v, std::size_t q_len, std::size_t kv_len, std::size_t q_heads,
            std::size_t kv_heads, std::size_t head_dim, std::size_t value_dim, double scale, bool causal,
-           std::size_t q_offset, std::size_t window) {
+           std::size_t q_offset, std::size_t window, double softcap) {
             nb::gil_scoped_release release;
             return dllm::cuda::attention(q, k, v, q_len, kv_len, q_heads, kv_heads, head_dim, value_dim, scale, causal,
-                                         q_offset, window);
+                                         q_offset, window, softcap);
         },
         nb::arg("q"), nb::arg("k"), nb::arg("v"), nb::arg("q_len"), nb::arg("kv_len"), nb::arg("q_heads"),
         nb::arg("kv_heads"), nb::arg("head_dim"), nb::arg("value_dim"), nb::arg("scale"), nb::arg("causal"),
-        nb::arg("q_offset"), nb::arg("window") = 0, "attention() on the GPU (reads the first kv_len keys and values); the same bits.");
+        nb::arg("q_offset"), nb::arg("window") = 0, nb::arg("softcap") = 0.0, "attention() on the GPU (reads the first kv_len keys and values); the same bits.");
 
     m.def(
         "matmul",
@@ -523,6 +523,16 @@ NB_MODULE(_kernels, module) {
     m.def("silu", &elementwise<dllm::silu>, nb::arg("x"), "Elementwise x * sigmoid(x).");
     m.def("gelu", &elementwise<dllm::gelu>, nb::arg("x"), "Elementwise exact (erf) GELU.");
     m.def("gelu_tanh", &elementwise<dllm::gelu_tanh>, nb::arg("x"), "Elementwise tanh-approximated GELU.");
+    m.def(
+        "softcap",
+        [](FloatTensor x, double cap) {
+            require(cap > 0.0, "cap must be positive");
+            float* out;
+            auto result = make_array(shape_of(x), &out);
+            dllm::softcap(x.data(), out, x.size(), cap);
+            return result;
+        },
+        nb::arg("x"), nb::arg("cap"), "Elementwise cap * tanh(x / cap) (logit soft-capping), in double.");
 
     m.def(
         "rope",
@@ -545,7 +555,7 @@ NB_MODULE(_kernels, module) {
     m.def(
         "attention",
         [](FloatTensor q, FloatTensor k, FloatTensor v, double scale, bool causal, std::int64_t q_offset,
-           std::size_t window) {
+           std::size_t window, double softcap) {
             require(q.ndim() == 3 && k.ndim() == 3 && v.ndim() == 3, "q, k and v must be [length, heads, dim]");
             const std::size_t q_len = q.shape(0);
             const std::size_t kv_len = k.shape(0);
@@ -560,11 +570,11 @@ NB_MODULE(_kernels, module) {
             auto result = make_array({q_len, q.shape(1), v.shape(2)}, &out);
             nb::gil_scoped_release release;
             dllm::attention(q.data(), k.data(), v.data(), out, q_len, kv_len, q.shape(1), k.shape(1), q.shape(2),
-                            v.shape(2), scale, causal, static_cast<std::size_t>(q_offset), window);
+                            v.shape(2), scale, causal, static_cast<std::size_t>(q_offset), window, softcap);
             return result;
         },
         nb::arg("q"), nb::arg("k"), nb::arg("v"), nb::arg("scale"), nb::arg("causal") = true,
-        nb::arg("q_offset") = -1, nb::arg("window") = 0, "Scaled dot-product attention with grouped-query heads and a fixed order.");
+        nb::arg("q_offset") = -1, nb::arg("window") = 0, nb::arg("softcap") = 0.0, "Scaled dot-product attention with grouped-query heads and a fixed order.");
 
     m.def(
         "linear_backward",
