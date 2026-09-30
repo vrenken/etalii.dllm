@@ -159,8 +159,8 @@ def _rotary_dim(config: dict[str, Any], head_dim: int) -> int | None:
 
 
 def hf_config(config: dict[str, Any], generation: dict[str, Any] | None = None) -> TransformerConfig:
-    """Maps a Hugging Face ``config.json`` (Gemma 3, Granite, Llama, Mistral, OLMo 2, Phi-3, Qwen2 or Qwen3) to our
-    description."""
+    """Maps a Hugging Face ``config.json`` (Gemma 2, Gemma 3, Granite, Llama, Mistral, OLMo 2, Phi-3, Qwen2 or
+    Qwen3) to our description."""
     model_type = config.get("model_type")
     family = _HF_MODEL_TYPES.get(model_type)
     if family is None:
@@ -171,9 +171,6 @@ def hf_config(config: dict[str, Any], generation: dict[str, Any] | None = None) 
     activation = _HF_ACTIVATIONS.get(hf_activation)
     if activation is None:
         raise ModelImportError(f"activation {hf_activation!r} is not supported")
-    for capping in ("attn_logit_softcapping", "final_logit_softcapping"):
-        if config.get(capping) is not None:
-            raise ModelImportError(f"{capping} is not supported yet")
     if config.get("mlp_bias"):
         raise ModelImportError("MLP biases are not supported")
     window, window_layers = _sliding_window_from_hf(config, family)
@@ -213,18 +210,20 @@ def hf_config(config: dict[str, Any], generation: dict[str, Any] | None = None) 
             attention_bias=family == "qwen2" or bool(config.get("attention_bias", False)),
             qk_norm=family in ("gemma3", "olmo2", "qwen3"),
             qk_norm_scope="all" if family == "olmo2" else "head",
-            norm_placement={"olmo2": "post", "gemma3": "sandwich"}.get(family, "pre"),
-            norm_unit_offset=family == "gemma3",
+            norm_placement={"olmo2": "post", "gemma2": "sandwich", "gemma3": "sandwich"}.get(family, "pre"),
+            norm_unit_offset=family in ("gemma2", "gemma3"),
             activation=activation,
-            tie_word_embeddings=bool(config.get("tie_word_embeddings", family == "gemma3")),
+            tie_word_embeddings=bool(config.get("tie_word_embeddings", family in ("gemma2", "gemma3"))),
             bos_token_id=None if bos is None else int(bos),
             eos_token_ids=tuple(eos),
             sliding_window=window,
             sliding_window_layers=window_layers,
             rotary_dim=_rotary_dim(config, head_dim),
             local_rope_theta=local_theta,
+            attention_softcap=_optional_float(config.get("attn_logit_softcapping")),
+            logits_softcap=_optional_float(config.get("final_logit_softcapping")),
             **_granite_multipliers(config, family),
-            **_gemma3_multipliers(config, family, hidden),
+            **_gemma_multipliers(config, family, hidden),
         )
     except ValueError as error:
         raise ModelImportError(str(error)) from error
@@ -253,10 +252,14 @@ def _gemma3_rope_from_hf(config: dict[str, Any]) -> tuple[float, dict[str, Any] 
     return theta, scaling, local_theta
 
 
-def _gemma3_multipliers(config: dict[str, Any], family: str, hidden: int) -> dict[str, Any]:
+def _optional_float(value: Any) -> float | None:
+    return None if value is None else float(value)
+
+
+def _gemma_multipliers(config: dict[str, Any], family: str, hidden: int) -> dict[str, Any]:
     """Gemma scales the embedding rows by ``sqrt(hidden_size)`` and the attention scores by
     ``query_pre_attn_scalar ** -0.5``."""
-    if family != "gemma3":
+    if family not in ("gemma2", "gemma3"):
         return {}
     return {
         "embedding_multiplier": math.sqrt(hidden),
@@ -291,8 +294,8 @@ def _sliding_window_from_hf(config: dict[str, Any], family: str) -> tuple[int | 
         sliding = tuple(i for i, kind in enumerate(layer_types) if kind == "sliding_attention")
     elif family in ("qwen2", "qwen3"):
         sliding = tuple(range(int(config.get("max_window_layers", layers)), layers))
-    elif family == "gemma3":  # older configs: every sliding_window_pattern-th layer is global
-        pattern = int(config.get("sliding_window_pattern", 6))
+    elif family in ("gemma2", "gemma3"):  # without layer_types: every sliding_window_pattern-th layer is global
+        pattern = int(config.get("sliding_window_pattern", 6 if family == "gemma3" else 2))
         sliding = tuple(i for i in range(layers) if (i + 1) % pattern)
     else:
         sliding = tuple(range(layers))

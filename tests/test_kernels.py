@@ -271,6 +271,36 @@ def test_sliding_window_attention_sees_only_the_last_keys(window):
         numerics.attention(q, k, v, window=0)
 
 
+def test_attention_softcap_matches_reference_and_is_decoding_invariant():
+    """Gemma 2 caps each scaled score at cap * tanh(s / cap) before the softmax; prefill and decoding rows agree."""
+    q, k, v = gaussian(17, 10, 4, 8), gaussian(18, 10, 2, 8), gaussian(19, 10, 2, 8)
+    cap = 0.5
+    out = numerics.attention(q, k, v, softcap=cap).numpy()
+    expected = np.zeros((10, 4, 8))
+    for t in range(10):
+        for h in range(4):
+            scores = k[: t + 1, h // 2].astype(np.float64) @ q[t, h].astype(np.float64) / math.sqrt(8)
+            scores = cap * np.tanh(scores / cap)
+            p = np.exp(scores - scores.max())
+            expected[t, h] = (p / p.sum()) @ v[: t + 1, h // 2].astype(np.float64)
+    np.testing.assert_allclose(out, expected, rtol=1e-5, atol=1e-6)
+    assert not np.array_equal(out, numerics.attention(q, k, v).numpy())
+    for t in range(10):
+        step = numerics.attention(q[t : t + 1], k, v, q_offset=t, window=3, softcap=cap).numpy()
+        np.testing.assert_array_equal(step[0], numerics.attention(q, k, v, window=3, softcap=cap).numpy()[t])
+    with pytest.raises(ValueError, match="softcap must be positive"):
+        numerics.attention(q, k, v, softcap=0.0)
+
+
+def test_softcap_matches_tanh():
+    x = gaussian(20, 64) * 10
+    out = numerics.softcap(x, 3.0).numpy()
+    np.testing.assert_allclose(out, 3.0 * np.tanh(x.astype(np.float64) / 3.0), rtol=1e-6, atol=1e-6)
+    assert np.all(np.abs(out) <= 3.0)
+    with pytest.raises(ValueError):
+        numerics.softcap(x, 0.0)
+
+
 def test_attention_rejects_bad_head_counts():
     with pytest.raises(ValueError):
         numerics.attention(
