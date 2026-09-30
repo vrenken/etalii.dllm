@@ -56,8 +56,15 @@ def test_raise_exception_and_errors():
 def test_date_comes_from_the_caller_not_the_clock():
     template = ChatTemplate("Today: {{ strftime_now('%d %b %Y') }}")
     assert template.render([], date=datetime.date(2026, 9, 28)) == "Today: 28 Sep 2026"
-    with pytest.raises(ChatTemplateError, match="date"):
+    with pytest.raises(ChatTemplateError, match="strftime_now"):
         template.render([])
+    # Llama 3.x: without a date the template falls back to its own fixed default, never the clock.
+    llama = ChatTemplate(
+        '{%- if strftime_now is defined %}{%- set d = strftime_now("%d %b %Y") %}'
+        '{%- else %}{%- set d = "26 Jul 2024" %}{%- endif %}Today: {{ d }}'
+    )
+    assert llama.render([]) == "Today: 26 Jul 2024"
+    assert llama.render([], date=datetime.date(2026, 9, 28)) == "Today: 28 Sep 2026"
 
 
 def test_sandbox_blocks_attribute_escapes():

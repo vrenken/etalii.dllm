@@ -121,4 +121,19 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "logits": "41db902b34618b95d3c185d772cf1f10fa58ee3fbd4094a6fb257252528eb5ba",
         "logits_q8_0": "114b3719f3601bfe781d74af647bb13de3345b6fe9a43b11d49825c6ad461b74",
     },
+    "llama3.2": {
+        "import": "1abe366cb3879f73b5fc2c1a6ad191eab99a70b943942bcb98788eff17010f41",
+        # "The capital of France is Paris." in the Llama 3 vocabulary, which OLMo 2 shares: the same fingerprint.
+        "chat": "28bbe79bdd0ca41816a367ee7bb30120cb7072991d1eefa2e0cb16a1f1ca8767",
+        "sampled": "28bbe79bdd0ca41816a367ee7bb30120cb7072991d1eefa2e0cb16a1f1ca8767",
+        "logits": "ba7281c7d31afaeb55ed8b259592efd11f71587705584be75ac71197ad02cb73",
+        "logits_q8_0": "cea6797804d5b332e889f6d26d7611b31cfa708c296b502a04171198905214e6",
+    },
+    "gemma3": {  # the licence text is the Gemma terms link (the repository has no licence file)
+        "import": "b03e32d2236a67ff0f06e85c69285df2067ec6951bd3f52c502f13f00915e5e9",
+        "chat": "1d3dbbe6c3c890ff1f1215cbd59962f2ced76b538b394b00e1c8d1c97444907f",  # "The capital of France is Paris."
+        "sampled": "1d3dbbe6c3c890ff1f1215cbd59962f2ced76b538b394b00e1c8d1c97444907f",  # the same answer
+        "logits": "38a0996f57e80c1602e23e89b2897b0cca5422ab49b212e0ee38dfb4886d5360",
+        "logits_q8_0": "7546cc1c60e56ed7cc4efd617b81c11ac7f7ebfa8f23e843313be6f850eb864b",
+    },
 }

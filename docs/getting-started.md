@@ -101,6 +101,24 @@ dllm import hf:allenai/OLMo-2-0425-1B-Instruct -o olmo2-1b.dllm
 dllm --model olmo2-1b.dllm chat "What is the capital of France?"
 ```
 
+Llama-3.2-1B-Instruct (Llama 3.2 Community Licence) and gemma-3-270m-it (Gemma terms) are verified too. Both are
+gated: accept the licence on the model's Hugging Face page, set `HF_TOKEN` (a read token, or a fine-grained one with
+read access to public gated repositories) and pass `--accept-licence`. The Gemma repository has no licence file, so
+give the terms with `--licence-file`:
+
+```bash
+export HF_TOKEN=hf_...
+dllm import hf:meta-llama/Llama-3.2-1B-Instruct -o llama3.2-1b.dllm --accept-licence
+echo "Gemma Terms of Use: https://ai.google.dev/gemma/terms" > gemma-terms.txt
+dllm import hf:google/gemma-3-270m-it -o gemma3-270m.dllm --accept-licence --licence-file gemma-terms.txt
+dllm --model llama3.2-1b.dllm chat "What is the capital of France?"
+```
+
+Llama 3.x chat templates put a date in the system prompt; the engine never reads the clock, so they use the date the
+template itself falls back to. With `--quantize q8_0`, Gemma loses more accuracy than the other models (Q8_0
+quantises the activations too, and Gemma's are large): the 270M model still answers correctly but its top token
+sometimes differs from the float32 one.
+
 Pin a revision with `hf:HuggingFaceTB/SmolLM2-135M-Instruct@<commit or tag>`; without one the importer resolves
 `main` to its current commit and records that. Downloads are cached in `~/.cache/etalii-dllm/hub` (`--cache` to
 change it); set `HF_TOKEN` for gated repositories.
@@ -346,10 +364,11 @@ machine already shows `(as released)` or `(DIFFERS from release)`; `--json` prin
 
 ## What does not work yet
 
-- Six real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
-  Qwen2.5-0.5B-Instruct, Qwen2.5-1.5B-Instruct, Qwen3-0.6B, TinyLlama-1.1B-Chat and OLMo-2-1B-Instruct (tokenizer, chat template, logits within 1e-3 and the
+- Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
+  Qwen2.5-0.5B-Instruct, Qwen2.5-1.5B-Instruct, Qwen3-0.6B, TinyLlama-1.1B-Chat, OLMo-2-1B-Instruct,
+  Llama-3.2-1B-Instruct and gemma-3-270m-it (tokenizer, chat template, logits within 1e-3 and the
   same greedy answer; see `tests/test_reference_models.py`). Other Llama/Qwen2/Qwen3 models should work but are not
-  checked. Mistral, Granite, Phi-3, Gemma 2 and Gemma 3 are checked against `transformers` only on tiny synthetic models (their real
+  checked. Mistral, Granite, Phi-3 and Gemma 2 are checked against `transformers` only on tiny synthetic models (their real
   checkpoints are gated or too large for a CI runner in float32). Fine-tuning works for Llama, Mistral, Qwen2 and
   Qwen3, not yet for OLMo 2, Granite, Gemma or Phi models that use LongRoPE; Phi-3/Phi-4-mini with LongRoPE run up to their
   original context (4096 tokens) rather than the advertised 128k. If one misbehaves,
