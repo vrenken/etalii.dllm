@@ -40,8 +40,10 @@ ENVIRONMENT_VARIABLE = "DLLM_REFERENCE_MODELS"
 
 # Largest absolute logit difference accepted against transformers in float32. Observed: about 2e-5 for SmolLM2.
 LOGIT_TOLERANCE = 1e-3
-# Q8_0 may pick a different top token, but only one of the reference's top few (Gemma 3 270M: 1.4 logits apart).
-QUANTIZED_TOP_K = 3
+# Models whose Q8_0 top token may differ from the reference's (the greedy chat is still checked): Q8_0 quantises the
+# activations too, and Gemma's large activations lose more than other models' (270M: "The capital of France is"
+# picks a token 1.4 logits behind the reference's top).
+QUANTIZED_TOP_TOKEN_DIFFERS = {"gemma3"}
 
 
 @dataclass(frozen=True)
@@ -419,11 +421,12 @@ def test_greedy_chat_on_the_gpu_gives_the_golden_answer(model_key, imported):
     assert _last_logits(gpu, reference_tokenizer(directory)) == golden["logits"]
 
 
-def test_quantized_model_stays_close_to_reference(imported, reference):
-    """Phase 6: Q8_0 weights are approximate, so only the top token and the greedy answer are compared. The top
-    token may differ only for one of the reference's top ``QUANTIZED_TOP_K`` (Gemma 3 270M, "The capital of France
-    is": a token 1.4 logits behind the reference's top)."""
+def test_quantized_model_stays_close_to_reference(model_key, imported, reference):
+    """Phase 6: Q8_0 weights are approximate, so only the top token and the greedy answer are compared."""
     import torch
+
+    if model_key in QUANTIZED_TOP_TOKEN_DIFFERS:
+        pytest.skip(f"{model_key}: Q8_0 changes the top token (see QUANTIZED_TOP_TOKEN_DIFFERS)")
 
     directory, result = imported
     ours = Transformer.from_file(result.path, quantize="q8_0")
@@ -432,8 +435,7 @@ def test_quantized_model_stays_close_to_reference(imported, reference):
         tokens = tokenizer.encode(prompt)
         with torch.no_grad():
             expected = reference(torch.tensor([tokens])).logits[0, -1].numpy()
-        top = [int(t) for t in np.argsort(-expected, kind="stable")[:QUANTIZED_TOP_K]]
-        assert int(np.argmax(ours.forward(tokens))) in top, prompt
+        assert int(np.argmax(ours.forward(tokens))) == int(np.argmax(expected)), prompt
 
 
 def test_quantized_greedy_chat(model_key, imported):

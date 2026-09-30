@@ -115,7 +115,9 @@ dllm --model llama3.2-1b.dllm chat "What is the capital of France?"
 ```
 
 Llama 3.x chat templates put a date in the system prompt; the engine never reads the clock, so they use the date the
-template itself falls back to.
+template itself falls back to. With `--quantize q8_0`, Gemma loses more accuracy than the other models (Q8_0
+quantises the activations too, and Gemma's are large): the 270M model still answers correctly but its top token
+sometimes differs from the float32 one.
 
 Pin a revision with `hf:HuggingFaceTB/SmolLM2-135M-Instruct@<commit or tag>`; without one the importer resolves
 `main` to its current commit and records that. Downloads are cached in `~/.cache/etalii-dllm/hub` (`--cache` to
