@@ -122,5 +122,11 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "logits_q8_0": "114b3719f3601bfe781d74af647bb13de3345b6fe9a43b11d49825c6ad461b74",
     },
     "llama3.2": {"import": None, "chat": None, "sampled": None, "logits": None, "logits_q8_0": None},
-    "gemma3": {"import": None, "chat": None, "sampled": None, "logits": None, "logits_q8_0": None},
+    "gemma3": {  # the licence text is the Gemma terms link (the repository has no licence file)
+        "import": "b03e32d2236a67ff0f06e85c69285df2067ec6951bd3f52c502f13f00915e5e9",
+        "chat": "1d3dbbe6c3c890ff1f1215cbd59962f2ced76b538b394b00e1c8d1c97444907f",  # "The capital of France is Paris."
+        "sampled": "1d3dbbe6c3c890ff1f1215cbd59962f2ced76b538b394b00e1c8d1c97444907f",  # the same answer
+        "logits": "38a0996f57e80c1602e23e89b2897b0cca5422ab49b212e0ee38dfb4886d5360",
+        "logits_q8_0": "7546cc1c60e56ed7cc4efd617b81c11ac7f7ebfa8f23e843313be6f850eb864b",
+    },
 }

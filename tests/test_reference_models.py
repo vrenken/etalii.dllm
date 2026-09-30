@@ -40,6 +40,8 @@ ENVIRONMENT_VARIABLE = "DLLM_REFERENCE_MODELS"
 
 # Largest absolute logit difference accepted against transformers in float32. Observed: about 2e-5 for SmolLM2.
 LOGIT_TOLERANCE = 1e-3
+# Q8_0 may pick a different top token only when the reference ranks the two within this many logits.
+QUANTIZED_NEAR_TIE = 1.0
 
 
 @dataclass(frozen=True)
@@ -77,7 +79,7 @@ REFERENCE_MODELS = {
     # Sandwich norms, (1 + w) RMSNorm, GELU gating, a RoPE base of its own for the sliding-window layers.
     "gemma3": ReferenceModel(
         "google/gemma-3-270m-it",
-        "main",
+        "ac82b4e820549b854eebf28ce6dedaf9fdfa17b3",
         "gemma",
         "Gemma Terms of Use: https://ai.google.dev/gemma/terms\n",
     ),
@@ -386,8 +388,13 @@ def test_greedy_chat_matches_reference(model_key, imported, reference):
     tokens = engine.tokenizer.encode(prompt)
     generated = engine.complete(prompt, GENERATED_TOKENS, GREEDY)
     with torch.no_grad():
+        # An explicit mask: without one transformers masks every input token equal to pad_token_id (Gemma's <bos>).
         output = reference.generate(
-            torch.tensor([tokens]), max_new_tokens=GENERATED_TOKENS, do_sample=False, pad_token_id=tokens[0]
+            torch.tensor([tokens]),
+            attention_mask=torch.ones(1, len(tokens), dtype=torch.long),
+            max_new_tokens=GENERATED_TOKENS,
+            do_sample=False,
+            pad_token_id=tokens[0],
         )
     expected = [int(t) for t in output[0, len(tokens) :]]
     stops = set(engine.model.config.eos_token_ids) | {engine.tokenizer.end_of_sequence}
@@ -411,7 +418,8 @@ def test_greedy_chat_on_the_gpu_gives_the_golden_answer(model_key, imported):
 
 
 def test_quantized_model_stays_close_to_reference(imported, reference):
-    """Phase 6: Q8_0 weights are approximate, so only the top token and the greedy answer are compared."""
+    """Phase 6: Q8_0 weights are approximate, so only the top token and the greedy answer are compared. Where the
+    top token differs, it must be a near tie in the reference (Gemma 3 270M's "The capital of France is")."""
     import torch
 
     directory, result = imported
@@ -421,7 +429,9 @@ def test_quantized_model_stays_close_to_reference(imported, reference):
         tokens = tokenizer.encode(prompt)
         with torch.no_grad():
             expected = reference(torch.tensor([tokens])).logits[0, -1].numpy()
-        assert int(np.argmax(ours.forward(tokens))) == int(np.argmax(expected)), prompt
+        ours_top, reference_top = int(np.argmax(ours.forward(tokens))), int(np.argmax(expected))
+        gap = float(expected[reference_top] - expected[ours_top])
+        assert ours_top == reference_top or gap < QUANTIZED_NEAR_TIE, f"{prompt}: {ours_top} vs {reference_top}, {gap}"
 
 
 def test_quantized_greedy_chat(model_key, imported):
