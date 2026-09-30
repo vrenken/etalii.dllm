@@ -435,12 +435,20 @@ def main() -> None:
     """``python tests/test_reference_models.py DIR [KEY ...]`` downloads the pinned models (all, or the given keys)
     into DIR (hub cache layout)."""
     import sys
+    import urllib.error
 
     from etalii_dllm.importing import hub
 
     keys = sys.argv[2:] or list(REFERENCE_MODELS)
     for model in (REFERENCE_MODELS[key] for key in keys):
-        snapshot = hub.download(model.repository, model.revision, sys.argv[1])
+        try:
+            snapshot = hub.download(model.repository, model.revision, sys.argv[1])
+        except urllib.error.HTTPError as error:
+            if error.code not in (401, 403) or model.licence in ("Apache-2.0", "MIT"):
+                raise
+            # A gated model without access (no HF_TOKEN, or its licence not accepted/approved): its tests skip.
+            print(f"::warning::{model.repository}: HTTP {error.code}, no access to this gated model; skipped")
+            continue
         print(f"{model.repository}@{snapshot.revision}: {snapshot.directory}")
 
 
