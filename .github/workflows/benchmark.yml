@@ -1,7 +1,7 @@
 name: Benchmark
 
 # Model performance comparison (docs/benchmarks.md): EtAlii.Dllm against transformers (PyTorch) and llama.cpp on one
-# runner, for the pinned SmolLM2-135M, Qwen2.5-0.5B, Qwen3-0.6B and Qwen2.5-1.5B. Throughput, latency, perplexity and
+# runner, for the six pinned reference models (tests/test_reference_models.py). Throughput, latency, perplexity and
 # determinism; the results are the job summary and the benchmark-results artifact.
 on:
   workflow_dispatch:
