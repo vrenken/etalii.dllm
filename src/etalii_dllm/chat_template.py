@@ -5,7 +5,8 @@ extension, a ``tojson`` filter that keeps non-ASCII text, and ``raise_exception`
 tools are presented to the model, so the OpenAI and MCP tool support builds on it.
 
 Determinism: templates only see the request. ``strftime_now`` (used by some templates for the current date) is
-given the date the caller passes, never the clock; without one it fails.
+given the date the caller passes, never the clock; without one it is undefined, so templates that check for it (Llama
+3.x) use their own fixed default date and templates that do not fail.
 """
 
 from __future__ import annotations
@@ -59,19 +60,15 @@ class ChatTemplate:
     ) -> str:
         """The prompt text for ``messages`` (dicts with ``role``, ``content`` and optionally ``tool_calls``)."""
 
-        def strftime_now(format: str) -> str:
-            if date is None:
-                raise ChatTemplateError("this chat template needs the current date; pass date=")
-            return date.strftime(format)
-
         context = {
             **self._special_tokens,
             **variables,
             "messages": [dict(m) for m in messages],
             "add_generation_prompt": add_generation_prompt,
             "tools": [dict(t) for t in tools] if tools else None,
-            "strftime_now": strftime_now,
         }
+        if date is not None:
+            context["strftime_now"] = date.strftime
         try:
             return self._template.render(**context)
         except jinja2.TemplateError as error:

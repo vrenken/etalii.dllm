@@ -121,4 +121,6 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "logits": "41db902b34618b95d3c185d772cf1f10fa58ee3fbd4094a6fb257252528eb5ba",
         "logits_q8_0": "114b3719f3601bfe781d74af647bb13de3345b6fe9a43b11d49825c6ad461b74",
     },
+    "llama3.2": {"import": None, "chat": None, "sampled": None, "logits": None, "logits_q8_0": None},
+    "gemma3": {"import": None, "chat": None, "sampled": None, "logits": None, "logits_q8_0": None},
 }
