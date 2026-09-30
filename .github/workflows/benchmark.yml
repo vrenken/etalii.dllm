@@ -2,13 +2,10 @@ name: Benchmark
 
 # Model performance comparison (docs/benchmarks.md): EtAlii.Dllm against transformers (PyTorch) and llama.cpp on one
 # runner, for the six pinned reference models (tests/test_reference_models.py). Throughput, latency, perplexity and
-# determinism; the results are the job summary and the benchmark-results artifact.
+# determinism; the results are the job summary and the benchmark-results artifact. It takes about two hours, so it
+# only runs on request (Actions > Benchmark > Run workflow), never on pushes or pull requests.
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - benchmarks/**
-      - .github/workflows/benchmark.yml
 
 permissions:
   contents: read

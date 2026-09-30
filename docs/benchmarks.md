@@ -156,5 +156,5 @@ python benchmarks/benchmark.py report results.json      # the Markdown tables
 
 `--models`, `--reps`, `--pp`, `--tg`, `--ppl-chunks`, `--concurrency` and `--thread-sweep` change the run;
 `--skip-transformers` or leaving out `--llamacpp` drop an engine. `benchmark.py dllm --model m.dllm --device cuda`
-measures the GPU backend on its own. The `Benchmark` workflow runs the whole suite on a GitHub runner
-(`workflow_dispatch`, or any PR that changes `benchmarks/`).
+measures the GPU backend on its own. The `Benchmark` workflow runs the whole suite on a GitHub runner in about two
+hours; start it from the Actions tab (Benchmark > Run workflow).
