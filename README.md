@@ -60,6 +60,8 @@ serves one model, chosen at start-up with `--model`/`DLLM_MODEL`.
 
 New here? [Getting started](docs/getting-started.md) walks through installing, importing a real model and using it
 from the command line, the HTTP API and MCP.
+How it compares with transformers and llama.cpp on speed, memory, quality and determinism:
+[benchmarks](docs/benchmarks.md).
 
 Pre-built wheels for Linux, Windows and macOS are attached to every [release](https://github.com/vrenken/etalii.dllm/releases)
 (see [getting started](docs/getting-started.md#1-install)). Building from source requires Python 3.11+, CMake and
@@ -126,6 +128,7 @@ to Python through [nanobind](https://github.com/wjakob/nanobind). Python orchest
 | `src/etalii_dllm/transformer.py` | Llama/Qwen2/Qwen3 decoder with a KV cache that cannot change the logits |
 | `src/etalii_dllm/modelfile.py` | The [`model.dllm`](docs/model-format.md) container that imported models are stored in |
 | `tests/` | pytest suite, including golden-hash reproducibility tests |
+| `benchmarks/` | Performance comparison with transformers and llama.cpp (`benchmark.py`, the `Benchmark` workflow). Results: [docs/benchmarks.md](docs/benchmarks.md) |
 | `docs/research/` | Research notes: [deterministic inference](docs/research/deterministic-inference.md), [compatibility targets](docs/research/compatibility.md), [model import](docs/research/model-import.md) |
 
 ## How determinism is achieved
