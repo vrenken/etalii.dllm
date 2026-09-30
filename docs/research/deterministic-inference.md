@@ -12,11 +12,11 @@ EtAlii.Dllm adopts. References at the end are starting points for deeper reading
    how long the prompt prefix in the KV cache is.
 3. **Cross-platform bit-exactness.** Same output on x64 and Arm64, Windows, Linux and macOS, across runtime versions.
 
-EtAlii.Dllm targets **levels 1 and 2**: on the same hardware, the same prompt and context window always give the
-same output, whatever the load, the batch composition or the thread scheduling. Level 3 is explicitly *not* a
-goal. That frees kernels to use the fastest instructions each machine offers (AVX-512, NEON, FMA, GPU tensor cores),
-as long as the reduction order on that machine is fixed. The current code happens to be portable as well, because
-its portable choices cost nothing yet; that may change when performance work starts.
+EtAlii.Dllm targets **all three levels**. It started with levels 1 and 2 only, expecting that portability would have
+to be given up for speed. It did not: with double accumulators in one fixed order, its own transcendentals and SIMD
+lanes that hold different outputs, the AVX2, SSE2, NEON and CUDA paths already gave the same bits, so Phase 10
+made level 3 a guarantee (see [portable determinism](../kernels.md#portable-determinism)). What it rules out is
+reductions whose order or intermediate precision the hardware decides (tensor cores, split-K, warp shuffles).
 
 ## Where non-determinism comes from
 

@@ -10,21 +10,23 @@ BPE only) and merged with the same priority rule (lowest merge rank first, leftm
 output with the reference library.
 
 Determinism: no sets or dict iteration decide an outcome, and nothing depends on the locale or ``PYTHONHASHSEED``.
-Normalisation uses :mod:`unicodedata` and the regular expressions use the ``regex`` package, so their Unicode tables
-are fixed by the installed Python and ``regex`` versions; the same installation always tokenizes the same way.
+Normalisation, lower-casing and the Unicode classes (``\\p{L}``, ...) in the regular expressions come from
+:mod:`etalii_dllm.unicode`, pinned to one Unicode version, so the installed Python and ``regex`` versions do not
+change how text is tokenized.
 Unsupported components fail at load time instead of tokenizing differently from the reference.
 """
 
 from __future__ import annotations
 
 import heapq
-import unicodedata
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
 
 import regex
+
+from etalii_dllm import unicode
 
 GPT2_PATTERN = r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"
 
@@ -53,7 +55,7 @@ def bytes_to_unicode() -> dict[int, str]:
 def _pattern(spec: Mapping[str, Any]) -> regex.Pattern[str]:
     """A ``tokenizers`` pattern: ``{"String": ...}`` (literal) or ``{"Regex": ...}``."""
     if "Regex" in spec:
-        return regex.compile(spec["Regex"])
+        return unicode.compile(spec["Regex"])
     return regex.compile(regex.escape(spec["String"]))
 
 
@@ -63,9 +65,9 @@ def _normalizer(spec: Mapping[str, Any] | None) -> Callable[[str], str]:
     kind = spec.get("type")
     if kind in ("NFC", "NFD", "NFKC", "NFKD"):
         form = kind
-        return lambda text: unicodedata.normalize(form, text)
+        return lambda text: unicode.normalize(form, text)
     if kind == "Lowercase":
-        return str.lower
+        return unicode.lower
     if kind == "Prepend":
         prefix = spec["prepend"]
         return lambda text: prefix + text if text else text
@@ -174,7 +176,7 @@ def _pre_tokenizer(spec: Mapping[str, Any] | None) -> tuple[PreTokenizer, bool]:
         behavior, invert = spec.get("behavior", "Isolated"), bool(spec.get("invert", False))
         return (lambda pieces, _: [p for piece in pieces for p in _split_by(pattern, piece, behavior, invert)]), False
     if kind == "Digits":
-        digits = regex.compile(r"\p{Nd}" if spec.get("individual_digits") else r"\p{Nd}+")
+        digits = unicode.compile(r"\p{Nd}" if spec.get("individual_digits") else r"\p{Nd}+")
         return (lambda pieces, _: [p for piece in pieces for p in _split_by(digits, piece, "Isolated", False)]), False
     if kind == "Metaspace":
         replacement = spec.get("replacement", "▁")
@@ -194,7 +196,7 @@ def _pre_tokenizer(spec: Mapping[str, Any] | None) -> tuple[PreTokenizer, bool]:
         return metaspace, False
     if kind == "ByteLevel":
         add_prefix_space = bool(spec.get("add_prefix_space", False))
-        gpt2 = regex.compile(GPT2_PATTERN) if spec.get("use_regex", True) else None
+        gpt2 = unicode.compile(GPT2_PATTERN) if spec.get("use_regex", True) else None
 
         def byte_level(pieces: list[str], _: bool) -> list[str]:
             out = []

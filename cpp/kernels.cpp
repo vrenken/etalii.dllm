@@ -11,9 +11,11 @@
 #include <new>
 #include <optional>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include "dllm/cuda.hpp"
+#include "dllm/fpenv.hpp"
 #include "dllm/grad.hpp"
 #include "dllm/math.hpp"
 #include "dllm/nn.hpp"
@@ -95,16 +97,31 @@ OwnedFloatArray elementwise(FloatTensor x) {
     return result;
 }
 
+// Every module function runs under FpEnvGuard (fpenv.hpp): the canonical floating point environment, whatever
+// the caller's thread is set to.
+struct GuardedModule {
+    nb::module_& module;
+
+    template <typename Func, typename... Extra>
+    GuardedModule& def(const char* name, Func&& f, const Extra&... extra) {
+        module.def(name, std::forward<Func>(f), extra..., nb::call_guard<dllm::FpEnvGuard>());
+        return *this;
+    }
+    operator nb::module_&() { return module; }
+    operator nb::handle() { return module; }
+};
+
 }  // namespace
 
-NB_MODULE(_kernels, m) {
-    m.doc() = "Deterministic numeric kernels for EtAlii.Dllm.";
+NB_MODULE(_kernels, module) {
+    GuardedModule m{module};
+    module.doc() = "Deterministic numeric kernels for EtAlii.Dllm.";
 
     nb::class_<dllm::Random>(m, "Random", "xoshiro256** seeded through SplitMix64.")
         .def(nb::init<std::uint64_t>(), nb::arg("seed"))
-        .def("next_u64", &dllm::Random::next_u64)
-        .def("next_double", &dllm::Random::next_double)
-        .def("next_gaussian", &dllm::Random::next_gaussian);
+        .def("next_u64", &dllm::Random::next_u64, nb::call_guard<dllm::FpEnvGuard>())
+        .def("next_double", &dllm::Random::next_double, nb::call_guard<dllm::FpEnvGuard>())
+        .def("next_gaussian", &dllm::Random::next_gaussian, nb::call_guard<dllm::FpEnvGuard>());
 
     m.def("exp", &dllm::exp, nb::arg("x"), "Portable e^x built from basic IEEE operations.");
     m.def("log", &dllm::log, nb::arg("x"), "Portable natural logarithm built from basic IEEE operations.");
@@ -284,6 +301,16 @@ NB_MODULE(_kernels, m) {
         "set_threads", [](std::size_t n) { dllm::ThreadPool::global().set_threads(n); }, nb::arg("n"),
         "Number of kernel threads (0: DLLM_THREADS or the hardware concurrency). Never changes results.");
     m.def("threads", []() { return dllm::ThreadPool::global().threads(); }, "Current number of kernel threads.");
+    module.def(  // unguarded: it reports the caller's state
+        "fp_environment_is_canonical", []() { return dllm::fp_environment_is_canonical(); },
+        "Whether the caller's floating point environment is the IEEE default (no flush-to-zero, round to nearest).");
+    module.def(
+        "_set_flush_to_zero",
+        [](bool on) {
+            dllm::set_flush_to_zero(on);
+            return dllm::fp_environment_supported();
+        },
+        nb::arg("on"), "Turns flush-to-zero/denormals-are-zero on or off for the calling thread; for tests.");
     m.def("supported_isas", &dllm::supported_isas, "Instruction sets the dispatched kernels can use on this CPU.");
     m.def("isa", []() { return std::string(dllm::isa_name(dllm::active_isa())); },
           "Instruction set the dispatched kernels use.");

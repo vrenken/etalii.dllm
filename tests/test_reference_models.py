@@ -10,7 +10,9 @@ Two groups of tests:
   ``.github/workflows/reference.yml`` downloads the models and runs these tests.
 
 Bit equality with transformers is not expected (its reductions run in a different order); logits agree to about
-1e-5. Our own outputs are pinned exactly in ``golden_values.py``.
+1e-5. Our own outputs are pinned exactly in ``golden_values.py``: the ``*_golden`` tests need only the weights (no
+torch) and run on every release platform and SIMD path (``portable`` job of the workflow), because the same bits on
+every machine is a guarantee (issue #99).
 """
 
 from __future__ import annotations
@@ -30,7 +32,8 @@ from etalii_dllm.bpe import BpeTokenizer, special_token_text
 from etalii_dllm.chat_template import ChatTemplate
 from etalii_dllm.engine import DllmEngine
 from etalii_dllm.importing import import_model
-from etalii_dllm.sampling import GREEDY
+from etalii_dllm.numerics import fingerprint
+from etalii_dllm.sampling import GREEDY, SamplingOptions
 from etalii_dllm.transformer import Transformer
 
 ENVIRONMENT_VARIABLE = "DLLM_REFERENCE_MODELS"
@@ -115,6 +118,8 @@ PROMPTS = [
 
 CHAT = [{"role": "user", "content": "What is the capital of France?"}]
 GENERATED_TOKENS = 24
+# Sampling depends on every bit of the probabilities, so it shows differences a greedy answer can hide.
+SAMPLED = SamplingOptions(temperature=0.8, seed=7)
 
 
 def _checkpoint(key: str) -> Path | None:
@@ -286,9 +291,39 @@ def test_chat_template_matches_reference(model_key):
 # Real models: weights
 
 
-def test_import_fingerprint(model_key, imported):
+def test_import_fingerprint_golden(model_key, imported):
     _, result = imported
     assert result.fingerprint == REFERENCE_MODEL_FINGERPRINTS[model_key]["import"]
+
+
+def _last_logits(model: Transformer, tokenizer: BpeTokenizer) -> str:
+    """Fingerprint of the last-position logits of every prompt, float32 bits."""
+    return fingerprint(np.concatenate([np.asarray(model.forward(tokenizer.encode(p))) for p in PROMPTS]))
+
+
+@pytest.mark.parametrize("quantize", ["none", "q8_0"])
+def test_logits_golden(model_key, imported, quantize):
+    directory, result = imported
+    ours = Transformer.from_file(result.path, quantize=None if quantize == "none" else quantize)
+    key = "logits" if quantize == "none" else "logits_q8_0"
+    assert _last_logits(ours, reference_tokenizer(directory)) == REFERENCE_MODEL_FINGERPRINTS[model_key].get(key)
+
+
+def _chat(engine: DllmEngine, model_key: str, options: SamplingOptions):
+    prompt = engine.chat_template.render(CHAT, **CHAT_VARIABLES.get(model_key, {}))
+    return engine.complete(prompt, GENERATED_TOKENS, options)
+
+
+def test_greedy_chat_golden(model_key, imported):
+    _, result = imported
+    generated = _chat(DllmEngine.from_model_file(result.path), model_key, GREEDY)
+    assert generated.fingerprint == REFERENCE_MODEL_FINGERPRINTS[model_key]["chat"]
+
+
+def test_sampled_chat_golden(model_key, imported):
+    _, result = imported
+    generated = _chat(DllmEngine.from_model_file(result.path), model_key, SAMPLED)
+    assert generated.fingerprint == REFERENCE_MODEL_FINGERPRINTS[model_key].get("sampled")
 
 
 def test_logits_match_reference(imported, reference):
@@ -331,11 +366,13 @@ def test_greedy_chat_matches_reference(model_key, imported, reference):
 @pytest.mark.skipif(not cuda.available(), reason="needs an NVIDIA GPU and NVRTC")
 def test_greedy_chat_on_the_gpu_gives_the_golden_answer(model_key, imported):
     """Issue #31: the GPU reproduces the CPU bits, so the golden answer does not depend on the device."""
-    _, result = imported
+    directory, result = imported
     engine = DllmEngine.from_model_file(result.path, device="cuda")
-    prompt = engine.chat_template.render(CHAT, **CHAT_VARIABLES.get(model_key, {}))
-    generated = engine.complete(prompt, GENERATED_TOKENS, GREEDY)
-    assert generated.fingerprint == REFERENCE_MODEL_FINGERPRINTS[model_key]["chat"]
+    golden = REFERENCE_MODEL_FINGERPRINTS[model_key]
+    assert _chat(engine, model_key, GREEDY).fingerprint == golden["chat"]
+    assert _chat(engine, model_key, SAMPLED).fingerprint == golden["sampled"]
+    gpu = Transformer.from_file(result.path, device="cuda")
+    assert _last_logits(gpu, reference_tokenizer(directory)) == golden["logits"]
 
 
 def test_quantized_model_stays_close_to_reference(imported, reference):
@@ -360,12 +397,14 @@ def test_quantized_greedy_chat(model_key, imported):
 
 
 def main() -> None:
-    """``python tests/test_reference_models.py DIR`` downloads the pinned models into DIR (hub cache layout)."""
+    """``python tests/test_reference_models.py DIR [KEY ...]`` downloads the pinned models (all, or the given keys)
+    into DIR (hub cache layout)."""
     import sys
 
     from etalii_dllm.importing import hub
 
-    for model in REFERENCE_MODELS.values():
+    keys = sys.argv[2:] or list(REFERENCE_MODELS)
+    for model in (REFERENCE_MODELS[key] for key in keys):
         snapshot = hub.download(model.repository, model.revision, sys.argv[1])
         print(f"{model.repository}@{snapshot.revision}: {snapshot.directory}")
 
