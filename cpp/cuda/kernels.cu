@@ -150,10 +150,10 @@ extern "C" __global__ void rope(const float* x, const long long* positions, cons
 // Attention: one block per (query, head) row, rows [row0, row0 + gridDim.x). Scores are one thread per key (each its
 // own dot product over head_dim ascending); the maximum and the softmax total are taken by thread 0 over the keys
 // ascending; the output is one thread per value dimension, summing over the keys ascending. scratch holds
-// kv_len doubles per block.
+// kv_len doubles per block. A non-zero window keeps only the last `window` visible keys (sliding-window attention).
 extern "C" __global__ void attention(const float* q, const float* k, const float* v, float* out, double* scratch,
                                      u64 row0, u64 kv_len, u64 q_heads, u64 kv_heads, u64 head_dim, u64 value_dim,
-                                     double scale, int causal, u64 q_offset) {
+                                     double scale, int causal, u64 q_offset, u64 window) {
     __shared__ double max_score;
     __shared__ double inv_total;
     const u64 row = row0 + blockIdx.x;
@@ -161,11 +161,15 @@ extern "C" __global__ void attention(const float* q, const float* k, const float
     const u64 h = row % q_heads;
     const u64 kvh = h / (q_heads / kv_heads);
     float* oh = out + row * value_dim;
-    u64 visible = kv_len;
+    u64 end = kv_len;
     if (causal) {
         const u64 last = q_offset + t + 1;
-        visible = last < kv_len ? last : kv_len;
+        end = last < kv_len ? last : kv_len;
     }
+    const u64 first = window != 0 && end > window ? end - window : 0;
+    const u64 visible = end - first;
+    k += first * kv_heads * head_dim;
+    v += first * kv_heads * value_dim;
     if (visible == 0) {
         for (u64 i = threadIdx.x; i < value_dim; i += blockDim.x) {
             oh[i] = 0.0f;
@@ -251,12 +255,18 @@ extern "C" __global__ void quantize_q8(const float* x, signed char* q, float* sc
     }
 }
 
-// The decoder's float32 elementwise steps: the SwiGLU product float(silu(gate)) * up and the residual addition.
-extern "C" __global__ void swiglu(const float* gate, const float* up, float* out, u64 n) {
+// The decoder's float32 elementwise steps: the gated product float(act(gate)) * up (kind 0 silu, 2 gelu_tanh, as
+// activation above) and the residual addition.
+extern "C" __global__ void swiglu(const float* gate, const float* up, float* out, u64 n, int kind) {
     for (u64 i = thread_index(); i < n; i += thread_stride()) {
         const double d = gate[i];
-        const float s = static_cast<float>(d * dllm::sigmoid(d));
-        out[i] = s * up[i];
+        double y;
+        if (kind == 0) {
+            y = d * dllm::sigmoid(d);
+        } else {
+            y = 0.5 * d * (1.0 + dllm::tanh(7.97884560802865355879e-01 * (d + 0.044715 * d * d * d)));
+        }
+        out[i] = static_cast<float>(y) * up[i];
     }
 }
 

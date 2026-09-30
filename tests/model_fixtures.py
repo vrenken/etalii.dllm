@@ -36,9 +36,58 @@ TINY_LLAMA_CONFIG = {
 
 
 def tiny_config(family: str) -> dict:
-    """The tiny config for ``family``: Qwen2 unties the head; Qwen3 adds QK-norm and a head size of its own."""
+    """The tiny config for ``family``: Qwen2 unties the head; Qwen3 adds QK-norm and a head size of its own; Mistral
+    slides a window of 3 tokens (shorter than the test prompts, so the window matters); OLMo 2 normalises outputs
+    instead of inputs and the whole query and key projections; Granite adds its four multipliers; Phi-3 fuses its
+    projections, rotates half of each (wider) head and uses LongRoPE with a window of 3; Gemma 3 alternates a window of
+    3 (with its own RoPE base) and full attention (with linear RoPE scaling)."""
     config = {**TINY_LLAMA_CONFIG, "model_type": family}
-    if family == "qwen2":
+    if family == "gemma3":
+        del config["hidden_act"]
+        config.update(
+            architectures=["Gemma3ForCausalLM"],
+            model_type="gemma3_text",
+            hidden_activation="gelu_pytorch_tanh",
+            pad_token_id=0,
+            head_dim=8,
+            query_pre_attn_scalar=12,
+            sliding_window=3,
+            layer_types=["sliding_attention", "full_attention"],
+            rope_local_base_freq=100.0,
+            rope_scaling={"rope_type": "linear", "factor": 2.0},
+            attention_bias=False,
+            final_logit_softcapping=None,
+            attn_logit_softcapping=None,
+        )
+    elif family == "granite":
+        config.update(
+            architectures=["GraniteForCausalLM"],
+            embedding_multiplier=12.0,
+            attention_multiplier=0.125,
+            residual_multiplier=0.22,
+            logits_scaling=8.0,
+        )
+    elif family == "phi3":
+        config.update(
+            architectures=["Phi3ForCausalLM"],
+            pad_token_id=0,
+            hidden_size=32,
+            tie_word_embeddings=False,
+            sliding_window=3,
+            partial_rotary_factor=0.5,
+            original_max_position_embeddings=64,
+            rope_scaling={
+                "type": "longrope",
+                "short_factor": [4.0, 1.0],
+                "long_factor": [2.0, 4.0],
+                "attention_factor": 4.0,
+            },
+        )
+    elif family == "olmo2":
+        config.update(architectures=["Olmo2ForCausalLM"], tie_word_embeddings=False, attention_bias=False)
+    elif family == "mistral":
+        config.update(architectures=["MistralForCausalLM"], sliding_window=3, tie_word_embeddings=False)
+    elif family == "qwen2":
         config.update(architectures=["Qwen2ForCausalLM"], use_sliding_window=False, tie_word_embeddings=False)
     elif family == "qwen3":
         config.update(architectures=["Qwen3ForCausalLM"], use_sliding_window=False, head_dim=8, attention_bias=False)
@@ -67,10 +116,12 @@ def head_dim(config: dict) -> int:
 
 def hf_weights(config: dict, seed: int = 11) -> dict[str, np.ndarray]:
     """Float32 weights (already bf16-representable) for a Llama/Qwen2/Qwen3 config, keyed by Hugging Face name."""
-    family = config["model_type"]
+    family = {"gemma3_text": "gemma3"}.get(config["model_type"], config["model_type"])
     ours = TransformerConfig.from_dict(
         {
-            "family": family if family in ("qwen2", "qwen3") else "llama",
+            "family": family
+            if family in ("gemma3", "granite", "mistral", "olmo2", "phi3", "qwen2", "qwen3")
+            else "llama",
             "vocabulary_size": config["vocab_size"],
             "hidden_size": config["hidden_size"],
             "intermediate_size": config["intermediate_size"],
@@ -82,7 +133,9 @@ def hf_weights(config: dict, seed: int = 11) -> dict[str, np.ndarray]:
             "rms_norm_eps": config["rms_norm_eps"],
             "rope_theta": config["rope_theta"],
             "attention_bias": family == "qwen2",
-            "qk_norm": family == "qwen3",
+            "qk_norm": family in ("gemma3", "olmo2", "qwen3"),
+            "qk_norm_scope": "all" if family == "olmo2" else "head",
+            "norm_placement": {"olmo2": "post", "gemma3": "sandwich"}.get(family, "pre"),
             "tie_word_embeddings": config["tie_word_embeddings"],
         }
     )
@@ -97,7 +150,11 @@ def hf_weights(config: dict, seed: int = 11) -> dict[str, np.ndarray]:
         "mlp.gate.weight": "mlp.gate_proj.weight",
         "mlp.up.weight": "mlp.up_proj.weight",
         "mlp.down.weight": "mlp.down_proj.weight",
+        "attention_post_norm.weight": "post_attention_layernorm.weight",
+        "mlp_post_norm.weight": "post_feedforward_layernorm.weight",
     }
+    if family == "gemma3":
+        layer_names["mlp_norm.weight"] = "pre_feedforward_layernorm.weight"
     weights = {}
     for index, (name, shape) in enumerate(sorted(ours.tensor_shapes().items())):
         if name in to_hf:
@@ -116,6 +173,15 @@ def hf_weights(config: dict, seed: int = 11) -> dict[str, np.ndarray]:
             hf = f"model.layers.{layer}.{hf_rest}"
         values = fill_gaussian(seed * 1000 + index, int(np.prod(shape))).reshape(shape) * np.float32(0.1)
         weights[hf] = bf16_to_float32(to_bf16_bits(values))
+    if family == "phi3":  # fused projections, rows stacked q, k, v and gate, up
+        for layer in range(config["num_hidden_layers"]):
+            p = f"model.layers.{layer}."
+            weights[p + "self_attn.qkv_proj.weight"] = np.concatenate(
+                [weights.pop(p + f"self_attn.{x}_proj.weight") for x in "qkv"]
+            )
+            weights[p + "mlp.gate_up_proj.weight"] = np.concatenate(
+                [weights.pop(p + f"mlp.{x}_proj.weight") for x in ("gate", "up")]
+            )
     return weights
 
 

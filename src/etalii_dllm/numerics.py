@@ -168,6 +168,13 @@ def instruction_set() -> str:
     return str(_kernels.isa())
 
 
+def fp_environment_is_canonical() -> bool:
+    """Whether this thread's floating point environment is the IEEE default (round to nearest, subnormals kept).
+    The kernels never depend on it (each call runs in the default and restores the caller's state), but NumPy
+    elementwise operations outside them do, so ``dllm verify`` reports it."""
+    return bool(_kernels.fp_environment_is_canonical())
+
+
 def matmul(a: npt.ArrayLike | Tensor, b: npt.ArrayLike | Tensor) -> Tensor:
     """``a[m, k] @ b[k, n]``. Each output equals ``dot(a[i, :], b[:, j])`` bit for bit."""
     return Tensor(_kernels.matmul(_float32(a), _float32(b)))
@@ -225,7 +232,8 @@ def rope_inv_freq(
 
     ``scaling`` takes a Hugging Face ``rope_scaling`` dict: ``rope_type`` (or ``type``) ``"default"``, ``"linear"``
     (positions divided by ``factor``) or ``"llama3"`` (``factor``, ``low_freq_factor``, ``high_freq_factor``,
-    ``original_max_position_embeddings``).
+    ``original_max_position_embeddings``) or ``"longrope"`` (every frequency divided by its ``short_factor``; the
+    ``long_factor`` set is never used, see ``docs/model-format.md``).
     """
     dim = head_dim if rotary_dim is None else rotary_dim
     if dim <= 0 or dim % 2 or dim > head_dim:
@@ -256,6 +264,12 @@ def rope_inv_freq(
                 smooth = (original / wavelen - low) / (high - low)
                 scaled.append((1 - smooth) * f / factor + smooth * f)
         freqs = scaled
+    elif kind == "longrope":
+        assert scaling is not None
+        short = [float(f) for f in scaling["short_factor"]]
+        if len(short) != len(freqs):
+            raise ValueError(f"longrope short_factor needs {len(freqs)} values, got {len(short)}")
+        freqs = [f / s for f, s in zip(freqs, short, strict=True)]
     elif kind != "default":
         raise ValueError(f"unsupported rope scaling {kind!r}")
     return np.array(freqs, dtype=np.float64)
@@ -303,12 +317,14 @@ def attention(
     scale: float | None = None,
     causal: bool = True,
     q_offset: int | None = None,
+    window: int | None = None,
     device: str = "cpu",
 ) -> Tensor:
     """Scaled dot-product attention over ``[length, heads, dim]`` tensors with grouped-query heads.
 
     ``scale`` defaults to ``1 / sqrt(head_dim)``. With ``causal``, query ``t`` sits at position ``q_offset + t``
-    (default ``kv_len - q_len``, i.e. the queries are the last tokens of the KV cache) and sees keys up to it.
+    (default ``kv_len - q_len``, i.e. the queries are the last tokens of the KV cache) and sees keys up to it; a
+    ``window`` (sliding-window attention) limits that to the last ``window`` keys, itself included.
     Each output row is computed independently in a fixed order, so prefill and incremental decoding agree bit for bit.
     """
     qa, ka, va = _float32(q), _float32(k), _float32(v)
@@ -331,9 +347,18 @@ def attention(
             scale=s,
             causal=causal,
             q_offset=offset,
+            window=window,
         )
         return Tensor(on_gpu.numpy())
-    return Tensor(_kernels.attention(qa, ka, va, s, causal, -1 if q_offset is None else q_offset))
+    return Tensor(_kernels.attention(qa, ka, va, s, causal, -1 if q_offset is None else q_offset, _window(window)))
+
+
+def _window(window: int | None) -> int:
+    if window is None:
+        return 0
+    if window < 1:
+        raise ValueError("window must be positive")
+    return int(window)
 
 
 # Gradients. Each has the evaluation order documented in cpp/include/dllm/grad.hpp and docs/kernels.md.
@@ -370,6 +395,7 @@ def attention_backward(
     scale: float | None = None,
     causal: bool = True,
     q_offset: int | None = None,
+    window: int | None = None,
 ) -> tuple[Tensor, Tensor, Tensor]:
     """``(dq, dk, dv)`` of :func:`attention` with the same arguments."""
     qa = _float32(q)
@@ -379,7 +405,9 @@ def attention_backward(
         raise ValueError("q_offset must be non-negative")
     s = 1.0 / math.sqrt(qa.shape[2]) if scale is None else float(scale)
     offset = -1 if q_offset is None else q_offset
-    dq, dk, dv = _kernels.attention_backward(qa, _float32(k), _float32(v), _float32(dout), s, causal, offset)
+    dq, dk, dv = _kernels.attention_backward(
+        qa, _float32(k), _float32(v), _float32(dout), s, causal, offset, _window(window)
+    )
     return Tensor(dq), Tensor(dk), Tensor(dv)
 
 

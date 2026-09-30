@@ -44,8 +44,20 @@ class DecoderGradients:
     def __init__(self, config: TransformerConfig) -> None:
         if config.rope_interleaved:
             raise ValueError("training expects the Hugging Face rotary layout (imports convert to it)")
+        if (
+            config.norm_placement != "pre"
+            or config.qk_norm_scope != "head"
+            or config.has_multipliers
+            or config.rope_attention_factor != 1.0
+            or config.norm_unit_offset
+            or config.activation != "silu"
+            or config.local_rope_theta is not None
+        ):
+            raise ValueError(f"fine-tuning is not supported for the {config.family} architecture yet")
         self.config = config
-        self.inv_freq = rope_inv_freq(config.head_dim, config.rope_theta, scaling=config.rope_scaling)
+        self.inv_freq = rope_inv_freq(
+            config.head_dim, config.rope_theta, rotary_dim=config.rotary_dimension, scaling=config.rope_scaling
+        )
 
     def logits(self, weights: Mapping[str, npt.ArrayLike], tokens: Sequence[int]) -> FloatArray:
         """Logits ``[len(tokens), vocab]`` for every position (forward pass only)."""
@@ -100,7 +112,9 @@ class DecoderGradients:
             dattended, grads[p + "attention.o.weight"], _ = linear_backward(
                 attended, weights[p + "attention.o.weight"], dx_mid
             )
-            dq, dk, dv = attention_backward(q, k, v, dattended.reshape(n, heads, head_dim), causal=True, q_offset=0)
+            dq, dk, dv = attention_backward(
+                q, k, v, dattended.reshape(n, heads, head_dim), causal=True, q_offset=0, window=config.window(layer)
+            )
             dq = rope(dq, positions, self.inv_freq, inverse=True).numpy().reshape(n * heads, head_dim)
             dk = rope(dk, positions, self.inv_freq, inverse=True).numpy().reshape(n * kv_heads, head_dim)
             if config.qk_norm:
@@ -165,7 +179,8 @@ class DecoderGradients:
             q = rope(q.reshape(n, heads, head_dim), positions, self.inv_freq).numpy()
             k = rope(k.reshape(n, kv_heads, head_dim), positions, self.inv_freq).numpy()
             v = v.reshape(n, kv_heads, head_dim).numpy()
-            attended = attention(q, k, v, causal=True, q_offset=0).reshape(n, heads * head_dim).numpy()
+            attended = attention(q, k, v, causal=True, q_offset=0, window=config.window(layer))
+            attended = attended.reshape(n, heads * head_dim).numpy()
             x_mid = x + linear(attended, w[p + "attention.o.weight"]).numpy()
             h2 = rms_norm(x_mid, w[p + "mlp_norm.weight"], config.rms_norm_eps).numpy()
             gate = linear(h2, w[p + "mlp.gate.weight"]).numpy()

@@ -693,9 +693,10 @@ inline Array activation(const Array& x, int kind) {
     return out;
 }
 
-// float(silu(gate)) * up, elementwise in float32 (the SwiGLU product of the decoder).
-inline Array swiglu(const Array& gate, const Array& up) {
+// float(act(gate)) * up, elementwise in float32 (the gated product of the decoder); kind: 0 silu, 2 gelu_tanh.
+inline Array swiglu(const Array& gate, const Array& up, int kind = 0) {
     detail::require(gate.bytes() == up.bytes() && gate.bytes() % sizeof(float) == 0, "swiglu: sizes do not match");
+    detail::require(kind == 0 || kind == 2, "swiglu: kind must be silu (0) or gelu_tanh (2)");
     Runtime& runtime = Runtime::instance();
     auto lock = runtime.acquire();
     Array out(gate.bytes());
@@ -703,7 +704,7 @@ inline Array swiglu(const Array& gate, const Array& up) {
     CUdeviceptr du = up.pointer();
     CUdeviceptr dout = out.pointer();
     unsigned long long n = gate.bytes() / sizeof(float);
-    void* arguments[] = {&dg, &du, &dout, &n};
+    void* arguments[] = {&dg, &du, &dout, &n, &kind};
     runtime.launch(Runtime::kSwiglu, detail::blocks_for(n), 1, detail::kBlock, arguments);
     return out;
 }
@@ -756,7 +757,7 @@ constexpr std::size_t kAttentionScratchDoubles = std::size_t(1) << 23;  // 64 Mi
 // first kv_len keys and values are read.
 inline Array attention(const Array& q, const Array& k, const Array& v, std::size_t q_len, std::size_t kv_len,
                        std::size_t q_heads, std::size_t kv_heads, std::size_t head_dim, std::size_t value_dim,
-                       double scale, bool causal, std::size_t q_offset) {
+                       double scale, bool causal, std::size_t q_offset, std::size_t window = 0) {
     detail::require(kv_heads > 0 && q_heads % kv_heads == 0, "q_heads must be a multiple of kv_heads");
     detail::require(q.bytes() == q_len * q_heads * head_dim * sizeof(float), "attention: q does not match its shape");
     detail::require(k.bytes() >= kv_len * kv_heads * head_dim * sizeof(float), "attention: k is too short");
@@ -780,9 +781,10 @@ inline Array attention(const Array& q, const Array& k, const Array& v, std::size
     unsigned long long vd = value_dim;
     int c = causal ? 1 : 0;
     unsigned long long offset = q_offset;
+    unsigned long long w = window;
     for (std::size_t row0 = 0; row0 < rows; row0 += per_launch) {
         unsigned long long first = row0;
-        void* arguments[] = {&dq, &dk, &dv, &dout, &dscratch, &first, &kl, &qh, &kh, &hd, &vd, &scale, &c, &offset};
+        void* arguments[] = {&dq, &dk, &dv, &dout, &dscratch, &first, &kl, &qh, &kh, &hd, &vd, &scale, &c, &offset, &w};
         runtime.launch(Runtime::kAttention, static_cast<unsigned>(std::min(per_launch, rows - row0)), 1,
                        detail::kBlock, arguments);
     }

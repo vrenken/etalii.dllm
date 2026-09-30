@@ -14,7 +14,6 @@ bits, so the logits, and the ``system_fingerprint``, do not depend on the device
 from __future__ import annotations
 
 import hashlib
-import math
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -32,6 +31,7 @@ from etalii_dllm.numerics import (
     PackedWeight,
     QuantizedWeight,
     attention,
+    gelu,
     linear,
     rms_norm,
     rope,
@@ -124,6 +124,18 @@ class KVCache:
         del self.tokens[length:]
 
 
+def _rope_scaled(name: str, tensor: Tensor, config: TransformerConfig) -> Tensor:
+    """``tensor`` with the rows feeding the rotated dimensions of each query or key head multiplied (elementwise,
+    float32) by the LongRoPE attention factor; other tensors unchanged."""
+    if not name.endswith(("attention.q.weight", "attention.q.bias", "attention.k.weight", "attention.k.bias")):
+        return tensor
+    values = tensor.numpy()
+    heads = values.shape[0] // config.head_dim
+    rows = values.reshape(heads, config.head_dim, *values.shape[1:]).copy()
+    rows[:, : config.rotary_dimension] *= np.float32(config.rope_attention_factor)
+    return Tensor(rows.reshape(values.shape))
+
+
 class Transformer:
     """A decoder-only transformer with the architecture and tensor names of ``docs/model-format.md``."""
 
@@ -154,6 +166,21 @@ class Transformer:
         self.tensors: Mapping[str, Tensor] = weights
         """The float32 source tensors (usually memory-mapped from the model file)."""
         self._embedding = weights["token_embedding.weight"].numpy()
+        if config.residual_multiplier != 1.0:
+            # Granite scales the outputs of attention and the MLP before the residual add; scaling the two output
+            # projections once (elementwise, float32) is the same map and keeps CPU and GPU on one code path.
+            residual = np.float32(config.residual_multiplier)
+            scaled = ("attention.o.weight", "mlp.down.weight")
+            weights = {
+                name: Tensor(tensor.numpy() * residual) if name.endswith(scaled) else tensor
+                for name, tensor in weights.items()
+            }
+        if config.rope_attention_factor != 1.0:
+            if config.qk_norm:
+                raise ValueError("a LongRoPE attention factor together with QK-norm is not supported")
+            # LongRoPE scales the rotated query and key dimensions by its attention factor. Rotation is linear, so
+            # scaling the rows of the q/k projections that produce those dimensions is the same map.
+            weights = {name: _rope_scaled(name, tensor, config) for name, tensor in weights.items()}
         head = weights["token_embedding.weight" if config.tie_word_embeddings else "lm_head.weight"]
         # Matrices are packed (or quantised, or uploaded to the GPU) once here; norms and biases stay plain (on the
         # GPU they are uploaded too); the embedding table stays on the host, which looks up the rows.
@@ -166,9 +193,17 @@ class Transformer:
             else:
                 self._w[name] = tensor
         self._lm_head = _prepare(head, quantize, self.device)
-        self._inv_freq = rope_inv_freq(config.head_dim, config.rope_theta, scaling=config.rope_scaling)
+        self._inv_freq = rope_inv_freq(
+            config.head_dim, config.rope_theta, rotary_dim=config.rotary_dimension, scaling=config.rope_scaling
+        )
+        self._local_inv_freq = self._inv_freq
+        if config.local_rope_theta is not None:
+            self._local_inv_freq = rope_inv_freq(
+                config.head_dim, config.local_rope_theta, rotary_dim=config.rotary_dimension
+            )
         if self.device == "cuda":
             self._gpu_inv_freq = cuda.upload_raw(self._inv_freq)
+            self._gpu_local_inv_freq = cuda.upload_raw(self._local_inv_freq)
 
     @classmethod
     def from_file(
@@ -251,6 +286,8 @@ class Transformer:
         else:
             hidden = self._layers(segments).numpy()
             logits = linear(np.ascontiguousarray(hidden[ends]), self._lm_head).numpy()
+        if self.config.logits_scaling != 1.0:
+            logits = logits / np.float32(self.config.logits_scaling)
         for tokens, _, cache in segments:
             cache.tokens.extend(tokens)
         return [row.copy() for row in logits]
@@ -261,31 +298,61 @@ class Transformer:
         w = self._w
         tokens, positions, bounds = self._embed(segments)
         count = len(tokens)
-        x = np.ascontiguousarray(self._embedding[np.asarray(tokens, dtype=np.int64)])
+        x = self._embeddings(tokens)
+        unit = config.norm_unit_offset
+
+        def norm(values: npt.ArrayLike | Tensor, name: str) -> Tensor:
+            return rms_norm(values, w[name], config.rms_norm_eps, add_unit_offset=unit)
+
         for layer in range(config.layers):
             p = f"layers.{layer}."
-            h = rms_norm(x, w[p + "attention_norm.weight"], config.rms_norm_eps)
+            h = norm(x, p + "attention_norm.weight") if config.has_pre_norms else x
             q = linear(h, w[p + "attention.q.weight"], w.get(p + "attention.q.bias"))
             k = linear(h, w[p + "attention.k.weight"], w.get(p + "attention.k.bias"))
             v = linear(h, w[p + "attention.v.weight"], w.get(p + "attention.v.bias"))
+            if config.qk_norm and config.qk_norm_scope == "all":  # OLMo 2: over the whole projection
+                q, k = norm(q, p + "attention.q_norm.weight"), norm(k, p + "attention.k_norm.weight")
             q, k = q.reshape(count, config.heads, config.head_dim), k.reshape(count, config.kv_heads, config.head_dim)
-            if config.qk_norm:  # Qwen3: RMSNorm over each head's dimensions, before the rotation
-                q = rms_norm(q, w[p + "attention.q_norm.weight"], config.rms_norm_eps)
-                k = rms_norm(k, w[p + "attention.k_norm.weight"], config.rms_norm_eps)
-            q = rope(q, positions, self._inv_freq).numpy()
-            k = rope(k, positions, self._inv_freq).numpy()
+            if config.qk_norm and config.qk_norm_scope == "head":  # Qwen3: over each head, before the rotation
+                q, k = norm(q, p + "attention.q_norm.weight"), norm(k, p + "attention.k_norm.weight")
+            inv_freq = self._local_inv_freq if config.uses_local_rope(layer) else self._inv_freq
+            q = rope(q, positions, inv_freq).numpy()
+            k = rope(k, positions, inv_freq).numpy()
             v = v.numpy().reshape(count, config.kv_heads, config.head_dim)
             attended = []
             for (_, start, cache), lo, hi in zip(segments, bounds[:-1], bounds[1:], strict=True):
                 keys, values = cache.append(layer, start, k[lo:hi], v[lo:hi])
-                attended.append(attention(q[lo:hi], keys, values, causal=True, q_offset=start).numpy())
+                attended.append(
+                    attention(
+                        q[lo:hi],
+                        keys,
+                        values,
+                        scale=config.attention_scale,
+                        causal=True,
+                        q_offset=start,
+                        window=config.window(layer),
+                    ).numpy()
+                )
             a = attended[0] if len(attended) == 1 else np.concatenate(attended)
-            x = x + linear(a.reshape(count, config.heads * config.head_dim), w[p + "attention.o.weight"]).numpy()
-            h = rms_norm(x, w[p + "mlp_norm.weight"], config.rms_norm_eps)
-            gate = silu(linear(h, w[p + "mlp.gate.weight"])).numpy()
+            out = linear(a.reshape(count, config.heads * config.head_dim), w[p + "attention.o.weight"])
+            if config.has_post_norms:
+                out = norm(out, p + "attention_post_norm.weight")
+            x = x + out.numpy()
+            h = norm(x, p + "mlp_norm.weight") if config.has_pre_norms else x
+            gate = linear(h, w[p + "mlp.gate.weight"])
+            gate = (gelu(gate, approximate="tanh") if config.activation == "gelu_tanh" else silu(gate)).numpy()
             up = linear(h, w[p + "mlp.up.weight"]).numpy()
-            x = x + linear(gate * up, w[p + "mlp.down.weight"]).numpy()
-        return rms_norm(x, w["final_norm.weight"], config.rms_norm_eps)
+            out = linear(gate * up, w[p + "mlp.down.weight"])
+            if config.has_post_norms:
+                out = norm(out, p + "mlp_post_norm.weight")
+            x = x + out.numpy()
+        return norm(x, "final_norm.weight")
+
+    def _embeddings(self, tokens: list[int]) -> np.ndarray:
+        rows = self._embedding[np.asarray(tokens, dtype=np.int64)]
+        if self.config.embedding_multiplier != 1.0:
+            rows = rows * np.float32(self.config.embedding_multiplier)
+        return np.ascontiguousarray(rows, dtype=np.float32)
 
     def _embed(self, segments: list[tuple[list[int], int, KVCache]]) -> tuple[list[int], np.ndarray, np.ndarray]:
         """(token ids, absolute positions, segment bounds) of the stacked new tokens."""
@@ -304,28 +371,44 @@ class Transformer:
         w: dict = self._w
         tokens, positions, bounds = self._embed(segments)
         count = len(tokens)
-        scale = 1.0 / math.sqrt(config.head_dim)
-        x = CudaTensor.upload(self._embedding[np.asarray(tokens, dtype=np.int64)])
+        scale = config.attention_scale
+        x = CudaTensor.upload(self._embeddings(tokens))
         on_gpu_positions = cuda.upload_raw(positions)
+        unit = config.norm_unit_offset
+
+        def norm(values: CudaTensor, name: str) -> CudaTensor:
+            return cuda.rms_norm(values, w[name], config.rms_norm_eps, add_unit_offset=unit)
+
         for layer in range(config.layers):
             p = f"layers.{layer}."
-            h = cuda.rms_norm(x, w[p + "attention_norm.weight"], config.rms_norm_eps)
+            h = norm(x, p + "attention_norm.weight") if config.has_pre_norms else x
             q = cuda.linear(h, w[p + "attention.q.weight"], w.get(p + "attention.q.bias"))
             k = cuda.linear(h, w[p + "attention.k.weight"], w.get(p + "attention.k.bias"))
             v = cuda.linear(h, w[p + "attention.v.weight"], w.get(p + "attention.v.bias"))
+            if config.qk_norm and config.qk_norm_scope == "all":
+                q, k = norm(q, p + "attention.q_norm.weight"), norm(k, p + "attention.k_norm.weight")
             q, k = q.reshape(count, config.heads, config.head_dim), k.reshape(count, config.kv_heads, config.head_dim)
-            if config.qk_norm:
-                q = cuda.rms_norm(q, w[p + "attention.q_norm.weight"], config.rms_norm_eps)
-                k = cuda.rms_norm(k, w[p + "attention.k_norm.weight"], config.rms_norm_eps)
-            q = cuda.rope(q, on_gpu_positions, self._gpu_inv_freq)
-            k = cuda.rope(k, on_gpu_positions, self._gpu_inv_freq)
+            if config.qk_norm and config.qk_norm_scope == "head":
+                q, k = norm(q, p + "attention.q_norm.weight"), norm(k, p + "attention.k_norm.weight")
+            inv_freq = self._gpu_local_inv_freq if config.uses_local_rope(layer) else self._gpu_inv_freq
+            q = cuda.rope(q, on_gpu_positions, inv_freq)
+            k = cuda.rope(k, on_gpu_positions, inv_freq)
             v = v.reshape(count, config.kv_heads, config.head_dim)
             parts = []
             for (_, start, cache), lo, hi in zip(segments, bounds[:-1], bounds[1:], strict=True):
                 keys, values = cache.append(layer, start, k[lo:hi], v[lo:hi])
                 end = start + int(hi - lo)
                 parts.append(
-                    cuda.attention(q[lo:hi], keys, values, kv_len=end, scale=scale, causal=True, q_offset=start)
+                    cuda.attention(
+                        q[lo:hi],
+                        keys,
+                        values,
+                        kv_len=end,
+                        scale=scale,
+                        causal=True,
+                        q_offset=start,
+                        window=config.window(layer),
+                    )
                 )
             if len(parts) == 1:
                 attended = parts[0]
@@ -334,9 +417,15 @@ class Transformer:
                 for part, lo, hi in zip(parts, bounds[:-1], bounds[1:], strict=True):
                     part.copy_to(attended[lo:hi])
             flat = attended.reshape(count, config.heads * config.head_dim)
-            x = cuda.add(x, cuda.linear(flat, w[p + "attention.o.weight"]))
-            h = cuda.rms_norm(x, w[p + "mlp_norm.weight"], config.rms_norm_eps)
+            out = cuda.linear(flat, w[p + "attention.o.weight"])
+            if config.has_post_norms:
+                out = norm(out, p + "attention_post_norm.weight")
+            x = cuda.add(x, out)
+            h = norm(x, p + "mlp_norm.weight") if config.has_pre_norms else x
             gate = cuda.linear(h, w[p + "mlp.gate.weight"])
             up = cuda.linear(h, w[p + "mlp.up.weight"])
-            x = cuda.add(x, cuda.linear(cuda.swiglu(gate, up), w[p + "mlp.down.weight"]))
-        return cuda.rms_norm(x, w["final_norm.weight"], config.rms_norm_eps)
+            out = cuda.linear(cuda.swiglu(gate, up, config.activation), w[p + "mlp.down.weight"])
+            if config.has_post_norms:
+                out = norm(out, p + "mlp_post_norm.weight")
+            x = cuda.add(x, out)
+        return norm(x, "final_norm.weight")

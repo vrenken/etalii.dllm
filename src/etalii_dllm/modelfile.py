@@ -165,6 +165,8 @@ class ModelFile:
             except (UnicodeDecodeError, json.JSONDecodeError) as error:
                 raise ModelFileError(f"{self.path}: header is not valid JSON") from error
 
+        if not isinstance(self.header, dict) or not isinstance(self.header.get("architecture"), dict):
+            raise ModelFileError(f"{self.path}: header has no architecture")
         self.config = TransformerConfig.from_dict(self.header["architecture"])
         data_start = _PREFIX.size + header_length
         data_length = self.path.stat().st_size - data_start
@@ -175,8 +177,14 @@ class ModelFile:
             if entry["dtype"] != "F32" or begin % ALIGNMENT or begin + nbytes > data_length:
                 raise ModelFileError(f"{self.path}: tensor {entry['name']!r} has an invalid layout")
             self.tensors[entry["name"]] = self._data[begin : begin + nbytes].view(_DTYPE).reshape(entry["shape"])
-        if set(self.tensors) != set(self.config.tensor_shapes()):
+        expected = self.config.tensor_shapes()
+        if set(self.tensors) != set(expected):
             raise ModelFileError(f"{self.path}: tensors do not match the architecture")
+        for name, shape in expected.items():
+            if self.tensors[name].shape != tuple(shape):
+                raise ModelFileError(
+                    f"{self.path}: tensor {name!r} has shape {self.tensors[name].shape}, expected {shape}"
+                )
         if verify:
             self.verify()
 

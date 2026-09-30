@@ -11,9 +11,11 @@
 #include <new>
 #include <optional>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include "dllm/cuda.hpp"
+#include "dllm/fpenv.hpp"
 #include "dllm/grad.hpp"
 #include "dllm/math.hpp"
 #include "dllm/nn.hpp"
@@ -95,16 +97,31 @@ OwnedFloatArray elementwise(FloatTensor x) {
     return result;
 }
 
+// Every module function runs under FpEnvGuard (fpenv.hpp): the canonical floating point environment, whatever
+// the caller's thread is set to.
+struct GuardedModule {
+    nb::module_& module;
+
+    template <typename Func, typename... Extra>
+    GuardedModule& def(const char* name, Func&& f, const Extra&... extra) {
+        module.def(name, std::forward<Func>(f), extra..., nb::call_guard<dllm::FpEnvGuard>());
+        return *this;
+    }
+    operator nb::module_&() { return module; }
+    operator nb::handle() { return module; }
+};
+
 }  // namespace
 
-NB_MODULE(_kernels, m) {
-    m.doc() = "Deterministic numeric kernels for EtAlii.Dllm.";
+NB_MODULE(_kernels, module) {
+    GuardedModule m{module};
+    module.doc() = "Deterministic numeric kernels for EtAlii.Dllm.";
 
     nb::class_<dllm::Random>(m, "Random", "xoshiro256** seeded through SplitMix64.")
         .def(nb::init<std::uint64_t>(), nb::arg("seed"))
-        .def("next_u64", &dllm::Random::next_u64)
-        .def("next_double", &dllm::Random::next_double)
-        .def("next_gaussian", &dllm::Random::next_gaussian);
+        .def("next_u64", &dllm::Random::next_u64, nb::call_guard<dllm::FpEnvGuard>())
+        .def("next_double", &dllm::Random::next_double, nb::call_guard<dllm::FpEnvGuard>())
+        .def("next_gaussian", &dllm::Random::next_gaussian, nb::call_guard<dllm::FpEnvGuard>());
 
     m.def("exp", &dllm::exp, nb::arg("x"), "Portable e^x built from basic IEEE operations.");
     m.def("log", &dllm::log, nb::arg("x"), "Portable natural logarithm built from basic IEEE operations.");
@@ -284,6 +301,16 @@ NB_MODULE(_kernels, m) {
         "set_threads", [](std::size_t n) { dllm::ThreadPool::global().set_threads(n); }, nb::arg("n"),
         "Number of kernel threads (0: DLLM_THREADS or the hardware concurrency). Never changes results.");
     m.def("threads", []() { return dllm::ThreadPool::global().threads(); }, "Current number of kernel threads.");
+    module.def(  // unguarded: it reports the caller's state
+        "fp_environment_is_canonical", []() { return dllm::fp_environment_is_canonical(); },
+        "Whether the caller's floating point environment is the IEEE default (no flush-to-zero, round to nearest).");
+    module.def(
+        "_set_flush_to_zero",
+        [](bool on) {
+            dllm::set_flush_to_zero(on);
+            return dllm::fp_environment_supported();
+        },
+        nb::arg("on"), "Turns flush-to-zero/denormals-are-zero on or off for the calling thread; for tests.");
     m.def("supported_isas", &dllm::supported_isas, "Instruction sets the dispatched kernels can use on this CPU.");
     m.def("isa", []() { return std::string(dllm::isa_name(dllm::active_isa())); },
           "Instruction set the dispatched kernels use.");
@@ -423,11 +450,12 @@ NB_MODULE(_kernels, m) {
         nb::arg("x"), nb::arg("kind"), "silu (0), gelu (1) or gelu_tanh (2) on the GPU; the same bits.");
     m.def(
         "cuda_swiglu",
-        [](const Array& gate, const Array& up) {
+        [](const Array& gate, const Array& up, int kind) {
             nb::gil_scoped_release release;
-            return dllm::cuda::swiglu(gate, up);
+            return dllm::cuda::swiglu(gate, up, kind);
         },
-        nb::arg("gate"), nb::arg("up"), "float32 silu(gate) * up on the GPU.");
+        nb::arg("gate"), nb::arg("up"), nb::arg("kind") = 0,
+        "float32 act(gate) * up on the GPU: silu (0) or gelu_tanh (2).");
     m.def(
         "cuda_add",
         [](const Array& a, const Array& b) {
@@ -456,14 +484,14 @@ NB_MODULE(_kernels, m) {
         "cuda_attention",
         [](const Array& q, const Array& k, const Array& v, std::size_t q_len, std::size_t kv_len, std::size_t q_heads,
            std::size_t kv_heads, std::size_t head_dim, std::size_t value_dim, double scale, bool causal,
-           std::size_t q_offset) {
+           std::size_t q_offset, std::size_t window) {
             nb::gil_scoped_release release;
             return dllm::cuda::attention(q, k, v, q_len, kv_len, q_heads, kv_heads, head_dim, value_dim, scale, causal,
-                                         q_offset);
+                                         q_offset, window);
         },
         nb::arg("q"), nb::arg("k"), nb::arg("v"), nb::arg("q_len"), nb::arg("kv_len"), nb::arg("q_heads"),
         nb::arg("kv_heads"), nb::arg("head_dim"), nb::arg("value_dim"), nb::arg("scale"), nb::arg("causal"),
-        nb::arg("q_offset"), "attention() on the GPU (reads the first kv_len keys and values); the same bits.");
+        nb::arg("q_offset"), nb::arg("window") = 0, "attention() on the GPU (reads the first kv_len keys and values); the same bits.");
 
     m.def(
         "matmul",
@@ -516,7 +544,8 @@ NB_MODULE(_kernels, m) {
 
     m.def(
         "attention",
-        [](FloatTensor q, FloatTensor k, FloatTensor v, double scale, bool causal, std::int64_t q_offset) {
+        [](FloatTensor q, FloatTensor k, FloatTensor v, double scale, bool causal, std::int64_t q_offset,
+           std::size_t window) {
             require(q.ndim() == 3 && k.ndim() == 3 && v.ndim() == 3, "q, k and v must be [length, heads, dim]");
             const std::size_t q_len = q.shape(0);
             const std::size_t kv_len = k.shape(0);
@@ -531,11 +560,11 @@ NB_MODULE(_kernels, m) {
             auto result = make_array({q_len, q.shape(1), v.shape(2)}, &out);
             nb::gil_scoped_release release;
             dllm::attention(q.data(), k.data(), v.data(), out, q_len, kv_len, q.shape(1), k.shape(1), q.shape(2),
-                            v.shape(2), scale, causal, static_cast<std::size_t>(q_offset));
+                            v.shape(2), scale, causal, static_cast<std::size_t>(q_offset), window);
             return result;
         },
         nb::arg("q"), nb::arg("k"), nb::arg("v"), nb::arg("scale"), nb::arg("causal") = true,
-        nb::arg("q_offset") = -1, "Scaled dot-product attention with grouped-query heads and a fixed order.");
+        nb::arg("q_offset") = -1, nb::arg("window") = 0, "Scaled dot-product attention with grouped-query heads and a fixed order.");
 
     m.def(
         "linear_backward",
@@ -599,7 +628,7 @@ NB_MODULE(_kernels, m) {
     m.def(
         "attention_backward",
         [](FloatTensor q, FloatTensor k, FloatTensor v, FloatTensor dout, double scale, bool causal,
-           std::int64_t q_offset) {
+           std::int64_t q_offset, std::size_t window) {
             require(q.ndim() == 3 && k.ndim() == 3 && v.ndim() == 3, "q, k and v must be [length, heads, dim]");
             const std::size_t q_len = q.shape(0);
             const std::size_t kv_len = k.shape(0);
@@ -621,11 +650,11 @@ NB_MODULE(_kernels, m) {
             auto dv_array = make_array(shape_of(v), &dv);
             dllm::attention_backward(q.data(), k.data(), v.data(), dout.data(), dq, dk, dv, q_len, kv_len,
                                      q.shape(1), k.shape(1), q.shape(2), v.shape(2), scale, causal,
-                                     static_cast<std::size_t>(q_offset));
+                                     static_cast<std::size_t>(q_offset), window);
             return std::make_tuple(dq_array, dk_array, dv_array);
         },
         nb::arg("q"), nb::arg("k"), nb::arg("v"), nb::arg("dout"), nb::arg("scale"), nb::arg("causal") = true,
-        nb::arg("q_offset") = -1, "Gradients (dq, dk, dv) of attention(); fixed order, double accumulators.");
+        nb::arg("q_offset") = -1, nb::arg("window") = 0, "Gradients (dq, dk, dv) of attention(); fixed order, double accumulators.");
 
     m.def(
         "cross_entropy",

@@ -6,12 +6,21 @@ Imported models are mapped onto this one description and onto one set of tensor 
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
 # Families the decoder implements. "qwen2" is "llama" with biases on the q/k/v projections; "qwen3" is "llama" with
-# an RMSNorm over each query and key head before the rotary embedding (QK-norm).
-FAMILIES = ("llama", "qwen2", "qwen3")
+# an RMSNorm over each query and key head before the rotary embedding (QK-norm); "mistral" is "llama", usually with
+# sliding-window attention; "olmo2" moves the norms after attention and the MLP and normalises the whole query and
+# key projections; "granite" is "llama" with four scalar multipliers; "phi3" is "llama" whose checkpoints fuse the
+# q/k/v and gate/up projections (imports split them), often with partial rotary embeddings and LongRoPE; "gemma3"
+# normalises both the inputs and the outputs of attention and the MLP with (1 + weight) RMSNorms, gates with GELU
+# (tanh), scales the embeddings and gives its sliding-window layers a RoPE base of their own.
+FAMILIES = ("gemma3", "granite", "llama", "mistral", "olmo2", "phi3", "qwen2", "qwen3")
+NORM_PLACEMENTS = ("pre", "post", "sandwich")
+ACTIVATIONS = ("silu", "gelu_tanh")
+QK_NORM_SCOPES = ("head", "all")
 
 
 @dataclass(frozen=True)
@@ -30,13 +39,38 @@ class TransformerConfig:
     rope_scaling: dict[str, Any] | None = None
     attention_bias: bool = False
     qk_norm: bool = False
-    """RMSNorm (weights ``[head_dim]``, shared by the heads) on every query and key head before RoPE (Qwen3)."""
+    """RMSNorm on the queries and keys before RoPE: per head with weights ``[head_dim]`` shared by the heads (Qwen3),
+    or over the whole projection with weights ``[heads * head_dim]`` (``qk_norm_scope == "all"``, OLMo 2)."""
+    qk_norm_scope: str = "head"
+    norm_placement: str = "pre"
+    """``"pre"``: RMSNorm on the input of attention and of the MLP (Llama). ``"post"``: on their output, before it is
+    added to the residual stream (OLMo 2). ``"sandwich"``: both (Gemma)."""
+    norm_unit_offset: bool = False
+    """Gemma: every RMSNorm (the q/k norms and the final norm included) scales by ``1 + weight``."""
     tie_word_embeddings: bool = False
     activation: str = "silu"
+    """The MLP gate: ``silu`` (SwiGLU) or ``gelu_tanh`` (GeGLU with the tanh approximation, Gemma)."""
     # Rotary pairs (i, i + d/2) as in Hugging Face checkpoints. Imports convert other layouts to this one.
     rope_interleaved: bool = False
     bos_token_id: int | None = None
     eos_token_ids: tuple[int, ...] = field(default_factory=tuple)
+    embedding_multiplier: float = 1.0
+    """Granite: the embedding rows are multiplied by this before the first layer."""
+    attention_multiplier: float | None = None
+    """Granite: the attention score scale; ``None`` means ``1 / sqrt(head_dim)``."""
+    residual_multiplier: float = 1.0
+    """Granite: the outputs of attention and the MLP are scaled by this before the residual add."""
+    logits_scaling: float = 1.0
+    """Granite: the logits are divided by this."""
+    sliding_window: int | None = None
+    """Sliding-window attention (Mistral): each query sees only the last ``sliding_window`` keys, itself included."""
+    sliding_window_layers: tuple[int, ...] | None = None
+    """The layers that use the sliding window; ``None`` means all of them."""
+    local_rope_theta: float | None = None
+    """Gemma 3: the RoPE base of the sliding-window layers, which use no RoPE scaling; ``None`` means ``rope_theta``."""
+    rotary_dim: int | None = None
+    """Partial rotary embeddings (Phi-4-mini): only the first ``rotary_dim`` dimensions of each head rotate; ``None``
+    means all ``head_dim``."""
 
     def __post_init__(self) -> None:
         if self.family not in FAMILIES:
@@ -48,20 +82,96 @@ class TransformerConfig:
             raise ValueError("heads must be a multiple of kv_heads")
         if self.head_dim % 2:
             raise ValueError("head_dim must be even for rotary embeddings")
-        if self.activation != "silu":
+        if self.activation not in ACTIVATIONS:
             raise ValueError(f"unsupported activation {self.activation!r}")
+        if self.qk_norm_scope not in QK_NORM_SCOPES:
+            raise ValueError(f"unsupported qk_norm_scope {self.qk_norm_scope!r}")
+        if self.norm_placement not in NORM_PLACEMENTS:
+            raise ValueError(f"unsupported norm_placement {self.norm_placement!r}")
+        if self.sliding_window is not None and self.sliding_window < 1:
+            raise ValueError("sliding_window must be positive")
+        if self.sliding_window_layers is not None and any(
+            not 0 <= layer < self.layers for layer in self.sliding_window_layers
+        ):
+            raise ValueError("sliding_window_layers must be layer indices")
+        if self.rotary_dim is not None and not (0 < self.rotary_dim <= self.head_dim and self.rotary_dim % 2 == 0):
+            raise ValueError("rotary_dim must be even, positive and at most head_dim")
+        if self.rope_scaling and self.rope_scaling.get("rope_type") == "longrope":
+            pairs = self.rotary_dimension // 2
+            if len(self.rope_scaling.get("short_factor", ())) != pairs:
+                raise ValueError(f"longrope short_factor needs {pairs} values")
+
+    @property
+    def attention_scale(self) -> float:
+        return 1.0 / math.sqrt(self.head_dim) if self.attention_multiplier is None else self.attention_multiplier
+
+    @property
+    def has_pre_norms(self) -> bool:
+        return self.norm_placement in ("pre", "sandwich")
+
+    @property
+    def has_post_norms(self) -> bool:
+        return self.norm_placement in ("post", "sandwich")
+
+    def uses_local_rope(self, layer: int) -> bool:
+        """Whether ``layer`` rotates with ``local_rope_theta`` (a sliding-window layer of Gemma 3)."""
+        return self.local_rope_theta is not None and self.window(layer) is not None
+
+    @property
+    def rotary_dimension(self) -> int:
+        return self.head_dim if self.rotary_dim is None else self.rotary_dim
+
+    @property
+    def rope_attention_factor(self) -> float:
+        """LongRoPE's ``attention_factor``, which scales the rotated query and key dimensions (1 otherwise)."""
+        if not self.rope_scaling or self.rope_scaling.get("rope_type") != "longrope":
+            return 1.0
+        return float(self.rope_scaling.get("attention_factor", 1.0))
+
+    @property
+    def has_multipliers(self) -> bool:
+        """Whether any Granite multiplier differs from the plain Llama value."""
+        multipliers = (self.embedding_multiplier, self.attention_multiplier, self.residual_multiplier)
+        return multipliers != (1.0, None, 1.0) or self.logits_scaling != 1.0
+
+    def window(self, layer: int) -> int | None:
+        """The attention window of ``layer``: ``None`` for full causal attention."""
+        if self.sliding_window is None:
+            return None
+        if self.sliding_window_layers is not None and layer not in self.sliding_window_layers:
+            return None
+        return self.sliding_window
 
     def to_dict(self) -> dict[str, Any]:
         values = asdict(self)
         values["eos_token_ids"] = list(self.eos_token_ids)
         if not self.qk_norm:  # model files written before QK-norm existed stay byte-identical
             del values["qk_norm"]
+        for name in ("sliding_window", "sliding_window_layers", "rotary_dim", "local_rope_theta"):  # likewise
+            if values[name] is None:
+                del values[name]
+        defaults = (
+            ("qk_norm_scope", "head"),
+            ("norm_placement", "pre"),
+            ("norm_unit_offset", False),
+            ("embedding_multiplier", 1.0),
+            ("attention_multiplier", None),
+            ("residual_multiplier", 1.0),
+            ("logits_scaling", 1.0),
+        )
+        for name, default in defaults:
+            if values[name] == default:
+                del values[name]
+        if values.get("sliding_window_layers") is not None:
+            values["sliding_window_layers"] = list(values["sliding_window_layers"])
         return values
 
     @classmethod
     def from_dict(cls, values: dict[str, Any]) -> TransformerConfig:
         values = dict(values)
         values["eos_token_ids"] = tuple(values.get("eos_token_ids", ()))
+        if values.get("sliding_window_layers") is not None:
+            values["sliding_window_layers"] = tuple(values["sliding_window_layers"])
         return cls(**values)
 
     def tensor_shapes(self) -> dict[str, tuple[int, ...]]:
@@ -71,7 +181,8 @@ class TransformerConfig:
         shapes: dict[str, tuple[int, ...]] = {"token_embedding.weight": (self.vocabulary_size, self.hidden_size)}
         for i in range(self.layers):
             p = f"layers.{i}."
-            shapes[p + "attention_norm.weight"] = (self.hidden_size,)
+            if self.has_pre_norms:
+                shapes[p + "attention_norm.weight"] = (self.hidden_size,)
             shapes[p + "attention.q.weight"] = (q, self.hidden_size)
             shapes[p + "attention.k.weight"] = (kv, self.hidden_size)
             shapes[p + "attention.v.weight"] = (kv, self.hidden_size)
@@ -80,10 +191,15 @@ class TransformerConfig:
                 shapes[p + "attention.k.bias"] = (kv,)
                 shapes[p + "attention.v.bias"] = (kv,)
             if self.qk_norm:
-                shapes[p + "attention.q_norm.weight"] = (self.head_dim,)
-                shapes[p + "attention.k_norm.weight"] = (self.head_dim,)
+                whole = self.qk_norm_scope == "all"
+                shapes[p + "attention.q_norm.weight"] = (q if whole else self.head_dim,)
+                shapes[p + "attention.k_norm.weight"] = (kv if whole else self.head_dim,)
             shapes[p + "attention.o.weight"] = (self.hidden_size, q)
-            shapes[p + "mlp_norm.weight"] = (self.hidden_size,)
+            if self.has_post_norms:
+                shapes[p + "attention_post_norm.weight"] = (self.hidden_size,)
+                shapes[p + "mlp_post_norm.weight"] = (self.hidden_size,)
+            if self.has_pre_norms:
+                shapes[p + "mlp_norm.weight"] = (self.hidden_size,)
             shapes[p + "mlp.gate.weight"] = (self.intermediate_size, self.hidden_size)
             shapes[p + "mlp.up.weight"] = (self.intermediate_size, self.hidden_size)
             shapes[p + "mlp.down.weight"] = (self.hidden_size, self.intermediate_size)

@@ -38,7 +38,7 @@ cd etalii.dllm
 python -m venv .venv
 source .venv/bin/activate          # Windows (PowerShell): .venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
-pytest                              # optional: about 370 tests, ten seconds or so
+pytest                              # optional: about 1000 tests, under a minute (docs/testing.md)
 ```
 
 Check the installation with the built-in placeholder model (a tiny random bigram table, so its text is gibberish,
@@ -86,6 +86,21 @@ dllm import hf:Qwen/Qwen3-0.6B -o qwen3-0.6b.dllm
 dllm --model qwen3-0.6b.dllm chat "What is the capital of France? /no_think"
 ```
 
+TinyLlama-1.1B-Chat (Apache 2.0, about 2.2 GB download, 4.4 GB converted) is verified too; it is a Llama 2 model
+with a SentencePiece-style tokenizer:
+
+```bash
+dllm import hf:TinyLlama/TinyLlama-1.1B-Chat-v1.0 -o tinyllama-1.1b.dllm
+dllm --model tinyllama-1.1b.dllm chat "What is the capital of France?"
+```
+
+OLMo-2-1B-Instruct (Apache 2.0, fully open data and weights, about 3 GB download, 6 GB converted) is verified too:
+
+```bash
+dllm import hf:allenai/OLMo-2-0425-1B-Instruct -o olmo2-1b.dllm
+dllm --model olmo2-1b.dllm chat "What is the capital of France?"
+```
+
 Pin a revision with `hf:HuggingFaceTB/SmolLM2-135M-Instruct@<commit or tag>`; without one the importer resolves
 `main` to its current commit and records that. Downloads are cached in `~/.cache/etalii-dllm/hub` (`--cache` to
 change it); set `HF_TOKEN` for gated repositories.
@@ -100,10 +115,12 @@ dllm import ./SmolLM2-360M-Instruct -o smollm2-360m.dllm --repo HuggingFaceTB/Sm
 dllm import ./qwen2.5-0.5b-instruct-q8_0.gguf -o qwen2.5-0.5b.dllm
 ```
 
-Supported today: Llama-style models (SmolLM2, TinyLlama's architecture, Llama), Qwen2/Qwen2.5 and Qwen3 (dense) with
-byte-level BPE tokenizers. Anything else is refused with a message saying what is missing. Only Apache-2.0 and MIT models import
+Supported today: Llama-style models (SmolLM2, TinyLlama, Llama), Mistral, OLMo 2, Granite 3.x, Phi-3/Phi-4-mini,
+Qwen2/Qwen2.5, Qwen3 (dense) and Gemma 3 (text: 270M, 1B) with
+byte-level or SentencePiece-style BPE tokenizers ([full list](../README.md#which-models-can-it-run)). Anything else is refused with a message saying what is missing. Only Apache-2.0 and MIT models import
 without `--accept-licence`; see [model import](research/model-import.md) for the licence policy and candidate
-models.
+models. Gemma models are gated and use the Gemma terms: accept them on Hugging Face, set `HF_TOKEN` and pass
+`--accept-licence`.
 
 **Claude Code cloud sessions:** the default network policy blocks `huggingface.co`. Add `huggingface.co`,
 `*.huggingface.co` and `*.hf.co` to the environment's allowed domains, or copy the files in another way. On your own
@@ -130,8 +147,8 @@ dllm --model smollm2-135m.dllm chat "Invent a cat" --json-schema '{"type": "obje
   "properties": {"name": {"type": "string"}, "age": {"type": "integer"}}, "required": ["name", "age"]}'
 ```
 
-Determinism: the same model file, prompt, options and seed give the same tokens every time on the same machine,
-also under concurrent load, where `dllm-server` decodes simultaneous requests as one batch to serve them faster
+Determinism: the same model file, prompt, options and seed give the same tokens every time, on any supported
+machine, also under concurrent load, where `dllm-server` decodes simultaneous requests as one batch to serve them faster
 ([concurrent requests](api.md#concurrent-requests)). Temperature 0 (the default) is greedy decoding.
 
 Speed options (they work the same for `dllm`, `dllm-server` and `dllm-mcp`):
@@ -315,12 +332,27 @@ docker run --gpus all -p 5080:5080 -v dllm-models:/models -e DLLM_DEVICE=cuda gh
 `[cuda]` extra, so `--gpus all` (NVIDIA container toolkit) is all a GPU needs. On the same machine, the container
 gives byte-identical responses to a native install. Build it yourself with `docker build -t etalii-dllm .`.
 
+To check that two machines really give the same bits, run `dllm verify` on both (with the same `--model`,
+`--quantize` and `--device` options) and compare the last line:
+
+```bash
+dllm --model smollm2-135m.dllm verify
+```
+
+It runs a fixed workload (every kernel, the Unicode handling, the model's tokenizer, logits, a greedy and a sampled
+answer) and prints one fingerprint per part plus a combined `verify:` line, together with the environment (Python,
+instruction set, device). The kernel and Unicode parts are also compared with the values of the release, so a single
+machine already shows `(as released)` or `(DIFFERS from release)`; `--json` prints the report as JSON.
+
 ## What does not work yet
 
-- Four real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
-  Qwen2.5-0.5B-Instruct, Qwen2.5-1.5B-Instruct and Qwen3-0.6B (tokenizer, chat template, logits within 1e-3 and the
+- Six real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
+  Qwen2.5-0.5B-Instruct, Qwen2.5-1.5B-Instruct, Qwen3-0.6B, TinyLlama-1.1B-Chat and OLMo-2-1B-Instruct (tokenizer, chat template, logits within 1e-3 and the
   same greedy answer; see `tests/test_reference_models.py`). Other Llama/Qwen2/Qwen3 models should work but are not
-  checked; if one misbehaves,
+  checked. Mistral, Granite, Phi-3 and Gemma 3 are checked against `transformers` only on tiny synthetic models (their real
+  checkpoints are gated or too large for a CI runner in float32). Fine-tuning works for Llama, Mistral, Qwen2 and
+  Qwen3, not yet for OLMo 2, Granite, Gemma or Phi models that use LongRoPE; Phi-3/Phi-4-mini with LongRoPE run up to their
+  original context (4096 tokens) rather than the advertised 128k. If one misbehaves,
   please open an issue with the `dllm inspect` output.
 - Speed: on a 4-core cloud VM, SmolLM2-135M reads a prompt at about 150 tokens per second and generates about 20
   tokens per second (about 35 with `--quantize q8_0`); Qwen2.5-0.5B is roughly four times slower. On an RTX 4080,
@@ -334,6 +366,7 @@ gives byte-identical responses to a native install. Build it yourself with `dock
   refused with an error (see [HTTP API](api.md)). No images, audio or `n` > 1.
 - MCP servers' own resources and prompts are not offered to the model (only their tools), and servers that ask
   the client for sampling or elicitation are not supported.
-- Models with SentencePiece tokenizers (TinyLlama, Llama 2), sliding-window attention, YaRN RoPE scaling or
-  other architectures (including Qwen3's mixture-of-experts models) are refused at import. Qwen3's thinking
+- Models with Unigram or WordPiece tokenizers, GGUF files with a SentencePiece vocabulary (convert from the
+  Hugging Face checkpoint instead), YaRN RoPE scaling or other architectures (including
+  Qwen3's mixture-of-experts models) are refused at import; Phase 9 of the roadmap adds the mainstream ones. Qwen3's thinking
   is returned as part of the answer text, not split into a separate reasoning field.

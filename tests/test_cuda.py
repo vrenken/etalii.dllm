@@ -197,6 +197,9 @@ def test_attention_matches_cpu(q_len, kv_len, q_heads, kv_heads):
     for causal in (True, False):
         cpu = numerics.attention(q, k, v, causal=causal)
         assert same_bits(numerics.attention(q, k, v, causal=causal, device="cuda"), cpu)
+    for window in (1, 4):
+        cpu = numerics.attention(q, k, v, window=window)
+        assert same_bits(numerics.attention(q, k, v, window=window, device="cuda"), cpu)
     if kv_len >= q_len:
         offset = kv_len - q_len
         # Prefill and one-at-a-time decoding give the same rows, as on the CPU.
@@ -226,7 +229,7 @@ def test_concurrent_gpu_calls_match_serial_ones():
 PROMPT = [1, 17, 42, 5, 63, 0, 9, 9, 30]
 
 
-@pytest.fixture(scope="module", params=["llama", "qwen2", "qwen3"])
+@pytest.fixture(scope="module", params=["gemma3", "granite", "llama", "mistral", "olmo2", "phi3", "qwen2", "qwen3"])
 def tiny_model_path(request, tmp_path_factory):
     directory = tmp_path_factory.mktemp(f"cuda-{request.param}")
     config = tiny_config(request.param)

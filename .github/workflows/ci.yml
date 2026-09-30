@@ -42,7 +42,12 @@ jobs:
       - name: Build and install (compiles the C++ kernels)
         run: pip install ".[dev]"
       - name: Test
+        if: ${{ !(matrix.os == 'ubuntu-latest' && matrix.python == '3.12') }}
         run: pytest -v
+      # One job measures coverage; [tool.coverage] in pyproject.toml sets the floor (docs/testing.md).
+      - name: Test with coverage
+        if: ${{ matrix.os == 'ubuntu-latest' && matrix.python == '3.12' }}
+        run: pytest -v --cov --cov-report=term
 
   # The [cuda] install route without a GPU (runners have none): the extra installs, NVRTC is found and compiles the
   # embedded kernels for every architecture (tests/test_cuda.py). On macOS the extra installs nothing and the backend

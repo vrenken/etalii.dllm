@@ -30,7 +30,7 @@ same source twice gives byte-identical files (`tests/test_import.py`).
 | Key | Content |
 | --- | --- |
 | `format`, `format_version` | `"dllm"`, `1` |
-| `architecture` | `TransformerConfig` (`src/etalii_dllm/architecture.py`): family (`llama`, `qwen2`, `qwen3`), sizes, heads and KV heads, head dim, context length, RMSNorm epsilon, RoPE theta and scaling, attention bias, `qk_norm` (written only when true), tied embeddings, BOS/EOS token ids |
+| `architecture` | `TransformerConfig` (`src/etalii_dllm/architecture.py`): family (`gemma3`, `granite`, `llama`, `mistral`, `olmo2`, `phi3`, `qwen2`, `qwen3`), sizes, heads and KV heads, head dim, context length, RMSNorm epsilon, RoPE theta and scaling, attention bias, `qk_norm` (written only when true), `qk_norm_scope` (`head` or `all`), `norm_placement` (`pre`, `post` or `sandwich`) and `norm_unit_offset` (RMSNorms scale by `1 + weight`, Gemma), each written only when not the default, `activation` (`silu` or `gelu_tanh`), `local_rope_theta` (the RoPE base of the sliding-window layers, Gemma 3; written only when set), the Granite multipliers `embedding_multiplier`, `attention_multiplier` (the attention score scale), `residual_multiplier` and `logits_scaling` (each written only when not the plain value), tied embeddings, BOS/EOS token ids, `sliding_window` and `sliding_window_layers` (written only when set; no layer list means every layer), `rotary_dim` (partial rotary, written only when set) |
 | `tensors` | List of `{name, shape, dtype: "F32", offset, nbytes, source_dtype}`; `source_dtype` is what the source stored (`BF16`, `F16`, `Q8_0`, ...) |
 | `fingerprint` | SHA-256 of the data section (hex) |
 | `source` | `format` (`safetensors`/`gguf`), `repository` and `revision` (the commit hash for `hf:` imports), `url` when known, and `files`: path, SHA-256 and size of every source file read |
@@ -50,7 +50,8 @@ Every import maps onto one naming scheme, and weight matrices use the `[out, in]
 | `layers.N.attention_norm.weight` | `[hidden]` |
 | `layers.N.attention.{q,k,v}.weight` | `[heads * head_dim, hidden]`, `[kv_heads * head_dim, hidden]` |
 | `layers.N.attention.{q,k,v}.bias` | Qwen2 only |
-| `layers.N.attention.{q,k}_norm.weight` | `[head_dim]`, Qwen3 only: RMSNorm over each query and key head before RoPE |
+| `layers.N.attention.{q,k}_norm.weight` | `[head_dim]`, Qwen3: RMSNorm over each query and key head before RoPE; OLMo 2: `[heads * head_dim]` and `[kv_heads * head_dim]`, over the whole projection |
+| `layers.N.{attention,mlp}_post_norm.weight` | `[hidden]`, OLMo 2 only (it has no `attention_norm`/`mlp_norm`): RMSNorm on the output of attention and of the MLP, before the residual add |
 | `layers.N.attention.o.weight` | `[hidden, heads * head_dim]` |
 | `layers.N.mlp_norm.weight` | `[hidden]` |
 | `layers.N.mlp.{gate,up}.weight`, `layers.N.mlp.down.weight` | `[intermediate, hidden]`, `[hidden, intermediate]` |
@@ -68,8 +69,26 @@ original checkpoint import to the same bytes and the same fingerprint.
 - **Quantised GGUF.** `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q8_0`, `Q4_K`, `Q5_K` and `Q6_K` are dequantised with
   elementwise float32 operations in llama.cpp's order; tests check the result is bit-identical to `gguf-py`. The
   import is deterministic, but a quantised source is of course only as precise as its quantisation.
-- **Fail loudly.** Unknown tensors, unsupported families (anything but Llama, Qwen2 and Qwen3), non-SiLU activations,
-  MLP biases, sliding-window attention, partial rotary and RoPE scaling other than `linear`/`llama3` stop the import.
+- **Fail loudly.** Unknown tensors, unsupported families (anything but Gemma 3 text, Granite, Llama, Mistral, OLMo 2, Phi-3, Qwen2 and Qwen3),
+  activations other than SiLU and GELU (tanh), logit soft-capping (Gemma 2), MLP biases and RoPE scaling other than `linear`/`llama3`/`longrope` stop the import. Sliding-window
+  attention comes from `sliding_window` (Mistral: every layer; Qwen2/Qwen3 with `use_sliding_window`: the layers from
+  `max_window_layers` on; a `layer_types` list names them explicitly); a window at least as long as the context is
+  dropped.
+- **Gemma 3.** Text-only checkpoints (`model_type` `gemma3_text`) map to family `gemma3`: RMSNorm before and after
+  attention and the MLP (`sandwich`, from `input_layernorm`, `post_attention_layernorm`, `pre_feedforward_layernorm`
+  and `post_feedforward_layernorm`), every norm scaling by `1 + weight` (the stored weights are Gemma's own), GELU
+  (tanh) gating, QK-norm per head, embeddings times `sqrt(hidden_size)` and attention scores times
+  `query_pre_attn_scalar ** -0.5` (as `embedding_multiplier` and `attention_multiplier`). The sliding-window layers
+  (from `layer_types`, or every layer but each `sliding_window_pattern`-th) rotate with `rope_local_base_freq` and no
+  scaling; the full-attention layers with `rope_theta` and `rope_scaling`.
+- **Phi-3.** The fused `qkv_proj` and `gate_up_proj` are split into our q/k/v and gate/up tensors (rows stacked in
+  that order). `partial_rotary_factor` becomes `rotary_dim`. LongRoPE (`longrope`, or Phi-3's older `su`/`yarn`) is
+  stored with its `short_factor`, `long_factor`, `original_max_position_embeddings` and `attention_factor` (computed
+  as transformers does when absent). transformers switches to the long factors once a sequence outgrows the original
+  context, which would make earlier tokens' output depend on the sequence length; dllm always uses the short factors
+  and caps `context_length` at the original context, so it matches transformers everywhere it runs. The attention
+  factor scales the rotated query and key dimensions; the decoder folds it into the rows of the q/k projections when
+  the model loads.
 - **Licences.** Apache-2.0 and MIT import directly. Anything else needs `--accept-licence` and is recorded as not
   redistributable. A source with no stated licence needs `--licence`; a licence with no text in the source and no
   standard text bundled needs `--licence-file`.

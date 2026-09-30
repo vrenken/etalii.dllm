@@ -504,17 +504,36 @@ inline AttentionRowFn attention_row_kernel() {
     return attention_row_portable;
 }
 
+// The keys query t attends to: first .. first + count - 1 (see attention()).
+struct AttentionSpan {
+    std::size_t first;
+    std::size_t count;
+};
+
+inline AttentionSpan attention_span(std::size_t t, std::size_t kv_len, bool causal, std::size_t q_offset,
+                                    std::size_t window) {
+    std::size_t end = kv_len;
+    if (causal) {
+        const std::size_t last = q_offset + t + 1;
+        end = last < kv_len ? last : kv_len;
+    }
+    const std::size_t first = window != 0 && end > window ? end - window : 0;
+    return {first, end - first};
+}
+
 // Scaled dot-product attention with grouped-query heads.
 //   q   [q_len, q_heads, head_dim]      k [kv_len, kv_heads, head_dim]      v [kv_len, kv_heads, value_dim]
 //   out [q_len, q_heads, value_dim]
 // Query head h reads key/value head h / (q_heads / kv_heads). With causal masking, query t sits at absolute
-// position q_offset + t and sees keys 0 .. q_offset + t. Each (query, head) row is computed on its own:
+// position q_offset + t and sees keys 0 .. q_offset + t; a non-zero window (sliding-window attention) limits that
+// to the last `window` of them, q_offset + t - window + 1 .. q_offset + t. Each (query, head) row is computed on its own:
 // scores in double (dot over head_dim ascending, times scale), softmax with the maximum subtracted and the sum
 // over keys ascending, then the value sum over keys ascending. A row's bits therefore do not depend on q_len,
 // so a prefill and token-by-token decoding against a KV cache give identical outputs.
 inline void attention(const float* q, const float* k, const float* v, float* out, std::size_t q_len,
                       std::size_t kv_len, std::size_t q_heads, std::size_t kv_heads, std::size_t head_dim,
-                      std::size_t value_dim, double scale, bool causal, std::size_t q_offset) {
+                      std::size_t value_dim, double scale, bool causal, std::size_t q_offset,
+                      std::size_t window = 0) {
     if (kv_heads == 0 || q_heads % kv_heads != 0) {
         throw std::invalid_argument("q_heads must be a multiple of kv_heads");
     }
@@ -524,17 +543,14 @@ inline void attention(const float* q, const float* k, const float* v, float* out
     parallel_for(q_len * q_heads, [&](std::size_t task) {
         const std::size_t t = task / q_heads;
         const std::size_t h = task % q_heads;
-        std::size_t visible = kv_len;
-        if (causal) {
-            const std::size_t last = q_offset + t + 1;
-            visible = last < kv_len ? last : kv_len;
-        }
+        const AttentionSpan span = attention_span(t, kv_len, causal, q_offset, window);
         thread_local std::vector<double> scores;
         thread_local std::vector<double> acc;
         scores.resize(kv_len > 0 ? kv_len : 1);
         acc.resize(value_dim > 0 ? value_dim : 1);
-        kernel(q + (t * q_heads + h) * head_dim, k, v, out + (t * q_heads + h) * value_dim, scores.data(),
-               acc.data(), visible, kv_heads, h / group, head_dim, value_dim, scale);
+        kernel(q + (t * q_heads + h) * head_dim, k + span.first * kv_heads * head_dim,
+               v + span.first * kv_heads * value_dim, out + (t * q_heads + h) * value_dim, scores.data(), acc.data(),
+               span.count, kv_heads, h / group, head_dim, value_dim, scale);
     });
 }
 

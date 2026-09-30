@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "dllm/math.hpp"
+#include "dllm/nn.hpp"
 #include "dllm/parallel.hpp"
 
 namespace dllm {
@@ -124,7 +125,7 @@ inline float silu_backward(float x, float dy) {
 inline void attention_backward(const float* q, const float* k, const float* v, const float* dout, float* dq,
                                float* dk, float* dv, std::size_t q_len, std::size_t kv_len, std::size_t q_heads,
                                std::size_t kv_heads, std::size_t head_dim, std::size_t value_dim, double scale,
-                               bool causal, std::size_t q_offset) {
+                               bool causal, std::size_t q_offset, std::size_t window = 0) {
     if (kv_heads == 0 || q_heads % kv_heads != 0) {
         throw std::invalid_argument("q_heads must be a multiple of kv_heads");
     }
@@ -135,11 +136,13 @@ inline void attention_backward(const float* q, const float* k, const float* v, c
     std::vector<double> dk_acc(kv_len * kv_heads * head_dim, 0.0);
     std::vector<double> dv_acc(kv_len * kv_heads * value_dim, 0.0);
     for (std::size_t t = 0; t < q_len; ++t) {
-        std::size_t visible = kv_len;
-        if (causal) {
-            const std::size_t last = q_offset + t + 1;
-            visible = last < kv_len ? last : kv_len;
-        }
+        const AttentionSpan span = attention_span(t, kv_len, causal, q_offset, window);
+        const std::size_t visible = span.count;
+        // Keys first .. first + visible - 1; index j below counts from first.
+        const float* kw = k + span.first * kv_heads * head_dim;
+        const float* vw = v + span.first * kv_heads * value_dim;
+        double* dkw = dk_acc.data() + span.first * kv_heads * head_dim;
+        double* dvw = dv_acc.data() + span.first * kv_heads * value_dim;
         for (std::size_t h = 0; h < q_heads; ++h) {
             const std::size_t kvh = h / group;
             const float* qh = q + (t * q_heads + h) * head_dim;
@@ -153,7 +156,7 @@ inline void attention_backward(const float* q, const float* k, const float* v, c
             }
             double max = 0.0;
             for (std::size_t j = 0; j < visible; ++j) {
-                const float* kj = k + (j * kv_heads + kvh) * head_dim;
+                const float* kj = kw + (j * kv_heads + kvh) * head_dim;
                 double dotp = 0.0;
                 for (std::size_t i = 0; i < head_dim; ++i) {
                     dotp += static_cast<double>(qh[i]) * static_cast<double>(kj[i]);
@@ -172,7 +175,7 @@ inline void attention_backward(const float* q, const float* k, const float* v, c
             double weighted = 0.0;
             for (std::size_t j = 0; j < visible; ++j) {
                 probs[j] *= inv;
-                const float* vj = v + (j * kv_heads + kvh) * value_dim;
+                const float* vj = vw + (j * kv_heads + kvh) * value_dim;
                 double dotp = 0.0;
                 for (std::size_t i = 0; i < value_dim; ++i) {
                     dotp += static_cast<double>(doh[i]) * static_cast<double>(vj[i]);
@@ -185,9 +188,9 @@ inline void attention_backward(const float* q, const float* k, const float* v, c
             }
             for (std::size_t j = 0; j < visible; ++j) {
                 const double ds = probs[j] * (dprobs[j] - weighted) * scale;
-                const float* kj = k + (j * kv_heads + kvh) * head_dim;
-                double* dkj = dk_acc.data() + (j * kv_heads + kvh) * head_dim;
-                double* dvj = dv_acc.data() + (j * kv_heads + kvh) * value_dim;
+                const float* kj = kw + (j * kv_heads + kvh) * head_dim;
+                double* dkj = dkw + (j * kv_heads + kvh) * head_dim;
+                double* dvj = dvw + (j * kv_heads + kvh) * value_dim;
                 for (std::size_t i = 0; i < head_dim; ++i) {
                     dq_acc[i] += ds * static_cast<double>(kj[i]);
                     dkj[i] += ds * static_cast<double>(qh[i]);

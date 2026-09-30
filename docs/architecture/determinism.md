@@ -1,7 +1,7 @@
 # Determinism by design
 
-EtAlii.Dllm promises one thing above everything else: the same inputs on the same hardware give the same output
-bits, every run, whatever else the machine is doing. This page shows what "the same inputs" means, where a normal
+EtAlii.Dllm promises one thing above everything else: the same inputs give the same output bits, every run,
+whatever else the machine is doing, and on every supported machine (Phase 10). This page shows what "the same inputs" means, where a normal
 LLM stack loses determinism, and which part of this code base removes each cause. The research behind it is in
 [deterministic inference](../research/deterministic-inference.md); the exact kernel orders are in
 [kernels](../kernels.md).
@@ -73,11 +73,11 @@ flowchart TB
         f2["parallel.hpp: threads split outputs,<br/>never a sum"]
         f3["nn.hpp: one strategy for every shape<br/>(batch invariance)"]
         f4["simd.hpp: lanes hold different outputs;<br/>path fixed once per machine; no BLAS"]
-        f5["CMakeLists.txt: no fast-math,<br/>-ffp-contract=off"]
+        f5["CMakeLists.txt: no fast-math,<br/>-ffp-contract=off; fpenv.hpp:<br/>IEEE default FP state per call"]
         f6["math.hpp: exp, log, sin, cos, tanh, erf<br/>from + - * / and sqrt"]
         f7["random.hpp: xoshiro256** seeded by SplitMix64<br/>(DeterministicRandom)"]
         f8["sampling.py: total order<br/>(probability desc, token id asc)"]
-        f9["bpe.py, chat_template.py: ordinal,<br/>order-independent text handling"]
+        f9["bpe.py, chat_template.py: ordinal,<br/>order-independent text handling;<br/>unicode.py: pinned Unicode 15.1"]
         f10["engine.py derive_id: ids hashed<br/>from fingerprint + request"]
         f11["cuda.hpp, kernels.cu: CPU order per thread,<br/>--fmad=false, no atomics"]
     end
@@ -182,8 +182,9 @@ flowchart LR
 ```
 
 A golden hash that changes without an intended semantic change is treated as a determinism bug to find, never as
-a constant to update. If a future hardware-specific kernel makes platforms disagree, the golden values get keyed
-per platform instead of forcing the kernels to be portable.
+a constant to update. The golden values are the same on every platform, and the real-model ones are checked on all
+five release platforms and every SIMD path; a platform that disagrees is a bug, never a reason to key the values
+per platform.
 
 ## What this means for users
 
