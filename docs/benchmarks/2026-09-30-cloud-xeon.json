@@ -1,0 +1,544 @@
+{
+  "machine": {
+    "platform": "Linux-6.18.44-fc-v50-x86_64-with-glibc2.39",
+    "python": "3.12.3",
+    "cores": 4,
+    "cpu": "Intel(R) Xeon(R) Processor @ 2.80GHz",
+    "memory_gb": 15.7,
+    "dllm": "0.2.0",
+    "instruction_set": "avx2",
+    "commit": "459db237d23d6eb8868a94432e5108d855be4dff"
+  },
+  "settings": {
+    "command": "suite",
+    "snapshots": "/tmp/claude-0/-home-user-etalii-dllm/7de349c3-abba-5f9b-a52c-99eb8b2cb81d/scratchpad/models",
+    "models": [
+      "SmolLM2-135M"
+    ],
+    "output": "/tmp/claude-0/-home-user-etalii-dllm/7de349c3-abba-5f9b-a52c-99eb8b2cb81d/scratchpad/cloud.json",
+    "work": "/tmp/claude-0/-home-user-etalii-dllm/7de349c3-abba-5f9b-a52c-99eb8b2cb81d/scratchpad/work",
+    "kld_chunks": 4,
+    "concurrency": [
+      1,
+      4,
+      8
+    ],
+    "concurrent_tokens": 32,
+    "skip_transformers": false,
+    "llamacpp": "/tmp/claude-0/llama.cpp/build/bin",
+    "llamacpp_source": "/tmp/claude-0/llama.cpp",
+    "delete_snapshots": false,
+    "threads": 4,
+    "reps": 5,
+    "pp": 128,
+    "tg": 64,
+    "ctx": 512,
+    "ppl_chunks": 8,
+    "corpus_chars": 60000,
+    "cache": "/tmp/claude-0/-home-user-etalii-dllm/7de349c3-abba-5f9b-a52c-99eb8b2cb81d/scratchpad/cache",
+    "thread_sweep": [
+      1,
+      2,
+      4
+    ]
+  },
+  "models": {
+    "SmolLM2-135M": {
+      "repository": "HuggingFaceTB/SmolLM2-135M-Instruct",
+      "revision": "12fd25f77366fa6b3b4b768ec3050bf629380bac",
+      "runs": [
+        {
+          "engine": "dllm",
+          "quantize": "none",
+          "device": "cpu",
+          "threads": 4,
+          "load_s": 2.410946013999819,
+          "fingerprint": "fp_2e4d93db18c1",
+          "pp": {
+            "tokens": 128,
+            "mean": 97.6396598165334,
+            "stdev": 3.545579277897519,
+            "min": 93.96157315498083,
+            "max": 102.25956440417707,
+            "n": 5
+          },
+          "tg": {
+            "tokens": 64,
+            "mean": 15.811641534857916,
+            "stdev": 0.30398023956319864,
+            "min": 15.507409614766408,
+            "max": 16.284010211881135,
+            "n": 5
+          },
+          "tpot_ms": {
+            "p50": 61.55557300007786,
+            "p99": 95.69746300007864,
+            "mean": 63.26303372812206
+          },
+          "determinism": {
+            "repeat_prefill_logits_identical": true,
+            "repeat_decode_tokens_identical": true,
+            "prefill_logits_hash": "91891dfdab3a5a67",
+            "decode_tokens_hash": "5d92c3f5f9d3ef5a",
+            "threads_identical": true,
+            "batch_invariant": true,
+            "batch_max_abs_diff": 0.0,
+            "concurrent_equals_solo": true
+          },
+          "thread_sweep": [
+            {
+              "threads": 1,
+              "pp_tps": 38.18410452992626,
+              "tg_tps": 9.370529777785482,
+              "prefill_logits_hash": "91891dfdab3a5a67",
+              "decode_tokens_hash": "405cdbf7067cea04"
+            },
+            {
+              "threads": 2,
+              "pp_tps": 63.07652044402069,
+              "tg_tps": 13.196865683533524,
+              "prefill_logits_hash": "91891dfdab3a5a67",
+              "decode_tokens_hash": "405cdbf7067cea04"
+            },
+            {
+              "threads": 4,
+              "pp_tps": 102.04927069859471,
+              "tg_tps": 16.85660603429639,
+              "prefill_logits_hash": "91891dfdab3a5a67",
+              "decode_tokens_hash": "405cdbf7067cea04"
+            }
+          ],
+          "concurrency": [
+            {
+              "users": 1,
+              "elapsed_s": 2.096678462,
+              "output_tps": 15.262235283075084,
+              "ttft_ms_p50": 122.25807799995891,
+              "ttft_ms_p99": 122.25807799995891,
+              "outputs": [
+                "69c304e41d09ba3a"
+              ]
+            },
+            {
+              "users": 4,
+              "elapsed_s": 4.990046376999999,
+              "output_tps": 22.645080118059997,
+              "ttft_ms_p50": 367.67936199998985,
+              "ttft_ms_p99": 368.3500570000433,
+              "outputs": [
+                "69c304e41d09ba3a",
+                "9d6a41634b91c1ce",
+                "939a73a9dd2e1c22",
+                "caa79ccdde3b9290"
+              ]
+            },
+            {
+              "users": 8,
+              "elapsed_s": 7.345545791999939,
+              "output_tps": 32.80899838136929,
+              "ttft_ms_p50": 666.118969000081,
+              "ttft_ms_p99": 666.9125799999165,
+              "outputs": [
+                "69c304e41d09ba3a",
+                "9d6a41634b91c1ce",
+                "939a73a9dd2e1c22",
+                "caa79ccdde3b9290",
+                "b613252b938db165",
+                "692df0d0c5fa3084",
+                "169789637f43d49b",
+                "7a606d2937641139"
+              ]
+            }
+          ],
+          "perplexity": {
+            "ppl": 16.742109716606464,
+            "ppl_stderr": 1.0782717329201494,
+            "scored_tokens": 2040,
+            "ctx": 512,
+            "eval_tps": 55.82317633926981
+          },
+          "corpus_tokens": 15781,
+          "peak_rss_mb": 1335.1171875
+        },
+        {
+          "engine": "dllm",
+          "quantize": "q8_0",
+          "device": "cpu",
+          "threads": 4,
+          "load_s": 3.9151368110001386,
+          "fingerprint": "fp_e2795a090553",
+          "pp": {
+            "tokens": 128,
+            "mean": 86.52061635243622,
+            "stdev": 2.345041654160103,
+            "min": 82.66779493740356,
+            "max": 88.87796066469588,
+            "n": 5
+          },
+          "tg": {
+            "tokens": 64,
+            "mean": 22.923380796235044,
+            "stdev": 0.8708321838036156,
+            "min": 21.626610683438134,
+            "max": 23.832767363148047,
+            "n": 5
+          },
+          "tpot_ms": {
+            "p50": 42.731987000024674,
+            "p99": 60.34021699997538,
+            "mean": 43.675059012496575
+          },
+          "determinism": {
+            "repeat_prefill_logits_identical": true,
+            "repeat_decode_tokens_identical": true,
+            "prefill_logits_hash": "489cd7532470a929",
+            "decode_tokens_hash": "5b8c1261a5874a14",
+            "threads_identical": true,
+            "batch_invariant": true,
+            "batch_max_abs_diff": 0.0,
+            "concurrent_equals_solo": true
+          },
+          "thread_sweep": [
+            {
+              "threads": 1,
+              "pp_tps": 36.976696642441006,
+              "tg_tps": 20.684725953179,
+              "prefill_logits_hash": "489cd7532470a929",
+              "decode_tokens_hash": "041be97506336745"
+            },
+            {
+              "threads": 2,
+              "pp_tps": 57.65201975757032,
+              "tg_tps": 23.368371928631962,
+              "prefill_logits_hash": "489cd7532470a929",
+              "decode_tokens_hash": "041be97506336745"
+            },
+            {
+              "threads": 4,
+              "pp_tps": 82.99507733178179,
+              "tg_tps": 22.451759532040757,
+              "prefill_logits_hash": "489cd7532470a929",
+              "decode_tokens_hash": "041be97506336745"
+            }
+          ],
+          "concurrency": [
+            {
+              "users": 1,
+              "elapsed_s": 1.3545947080001497,
+              "output_tps": 23.623302092507853,
+              "ttft_ms_p50": 114.13494599992191,
+              "ttft_ms_p99": 114.13494599992191,
+              "outputs": [
+                "e4cec869c6b1e201"
+              ]
+            },
+            {
+              "users": 4,
+              "elapsed_s": 3.6357602040000074,
+              "output_tps": 31.080157562558483,
+              "ttft_ms_p50": 434.5991539998977,
+              "ttft_ms_p99": 434.70989899992674,
+              "outputs": [
+                "e4cec869c6b1e201",
+                "9d6a41634b91c1ce",
+                "939a73a9dd2e1c22",
+                "665a5f113cc63637"
+              ]
+            },
+            {
+              "users": 8,
+              "elapsed_s": 6.142875976000141,
+              "output_tps": 39.232437858353805,
+              "ttft_ms_p50": 770.0724439998794,
+              "ttft_ms_p99": 770.636143000047,
+              "outputs": [
+                "e4cec869c6b1e201",
+                "9d6a41634b91c1ce",
+                "939a73a9dd2e1c22",
+                "665a5f113cc63637",
+                "82dbd5d00d93153f",
+                "b87d8b043fec1de9",
+                "169789637f43d49b",
+                "7a606d2937641139"
+              ]
+            }
+          ],
+          "perplexity": {
+            "ppl": 16.796317917978246,
+            "ppl_stderr": 1.0791040240535075,
+            "scored_tokens": 2040,
+            "ctx": 512,
+            "eval_tps": 48.87899235366299,
+            "kld_mean": 0.0035001665624232667,
+            "kld_p99": 0.01862865500152111,
+            "top1_agreement": 0.9656862745098039
+          },
+          "corpus_tokens": 15781,
+          "peak_rss_mb": 1060.37109375
+        },
+        {
+          "engine": "transformers",
+          "version": "transformers 5.17.0, torch 2.14.0+cu130",
+          "quantize": "none",
+          "threads": 4,
+          "load_s": 3.171696380999947,
+          "pp": {
+            "tokens": 128,
+            "mean": 579.7266355651578,
+            "stdev": 77.22444848509264,
+            "min": 476.51703927389383,
+            "max": 665.4495040695379,
+            "n": 5
+          },
+          "tg": {
+            "tokens": 64,
+            "mean": 21.822968829208055,
+            "stdev": 0.8822225582723149,
+            "min": 20.910444750491926,
+            "max": 23.033047035275917,
+            "n": 5
+          },
+          "tpot_ms": {
+            "p50": 43.867201000011846,
+            "p99": 66.54335600001104,
+            "mean": 45.882376687504234
+          },
+          "determinism": {
+            "repeat_prefill_logits_identical": true,
+            "repeat_decode_tokens_identical": true,
+            "prefill_logits_hash": "69661eb9b696c801",
+            "decode_tokens_hash": "5d92c3f5f9d3ef5a",
+            "threads_identical": false,
+            "batch_invariant": false,
+            "batch_max_abs_diff": 2.765655517578125e-05,
+            "batch_same_top_token": true
+          },
+          "thread_sweep": [
+            {
+              "threads": 1,
+              "pp_tps": 231.18008780018485,
+              "tg_tps": 10.541059343793936,
+              "prefill_logits_hash": "2f43aaf93d687b8c",
+              "decode_tokens_hash": "405cdbf7067cea04"
+            },
+            {
+              "threads": 2,
+              "pp_tps": 390.6219482659281,
+              "tg_tps": 15.932909338904357,
+              "prefill_logits_hash": "cb754b73d2b7a470",
+              "decode_tokens_hash": "405cdbf7067cea04"
+            },
+            {
+              "threads": 4,
+              "pp_tps": 637.3018107130482,
+              "tg_tps": 22.619493459531554,
+              "prefill_logits_hash": "69661eb9b696c801",
+              "decode_tokens_hash": "405cdbf7067cea04"
+            }
+          ],
+          "perplexity": {
+            "ppl": 16.74210709814404,
+            "ppl_stderr": 1.078271476834217,
+            "scored_tokens": 2040,
+            "ctx": 512,
+            "eval_tps": 659.4740946731771
+          },
+          "corpus_tokens": 15781,
+          "peak_rss_mb": 1816.23828125
+        },
+        {
+          "engine": "llama.cpp",
+          "quantize": "none",
+          "threads": 4,
+          "pp": {
+            "tokens": 128,
+            "mean": 725.984748,
+            "stdev": 35.492658,
+            "n": 5
+          },
+          "version": "llama.cpp e904318 (build 1)",
+          "tg": {
+            "tokens": 64,
+            "mean": 41.46858,
+            "stdev": 1.262502,
+            "n": 5
+          },
+          "thread_sweep": [
+            {
+              "threads": 1,
+              "pp_tps": 243.53015,
+              "tg_tps": 14.508878
+            },
+            {
+              "threads": 2,
+              "pp_tps": 390.244184,
+              "tg_tps": 25.848156
+            },
+            {
+              "threads": 4,
+              "pp_tps": 729.076562,
+              "tg_tps": 37.164326
+            }
+          ],
+          "determinism": {
+            "version": "llama-cpp-python 0.3.35",
+            "repeat_prefill_logits_identical": true,
+            "repeat_decode_tokens_identical": true,
+            "threads_identical": true,
+            "threads_max_abs_diff": 0.0,
+            "batch_invariant": true,
+            "batch_max_abs_diff": 0.0,
+            "batch_same_top_token": true,
+            "concurrent_equals_solo": false,
+            "concurrent_same_text": true
+          },
+          "concurrency": [
+            {
+              "users": 1,
+              "elapsed_s": 0.838081215000102,
+              "output_tps": 38.182457054589996,
+              "ttft_ms_p50": 43.365916000084326,
+              "ttft_ms_p99": 43.365916000084326,
+              "outputs": [
+                "d63fc1e8a92a16fd"
+              ]
+            },
+            {
+              "users": 4,
+              "elapsed_s": 1.6282680379999874,
+              "output_tps": 69.39889340258662,
+              "ttft_ms_p50": 125.34935200005748,
+              "ttft_ms_p99": 220.60571099996196,
+              "outputs": [
+                "657949f0f8368744",
+                "cd87fbe1ca1652c2",
+                "9d75f4410ddac654",
+                "ab875ce26e0d2d5b"
+              ]
+            },
+            {
+              "users": 8,
+              "elapsed_s": 2.0027873630001523,
+              "output_tps": 120.33229510644844,
+              "ttft_ms_p50": 270.6820719999996,
+              "ttft_ms_p99": 275.5548130000989,
+              "outputs": [
+                "6571e516d3bf43df",
+                "ca2d11b11e090a63",
+                "282e7165a40423ac",
+                "e045f0fdc30bcf29",
+                "1a657200d4179be4",
+                "9a981642ee119ffd",
+                "33dee81d47c77465",
+                "648365ac81ef4847"
+              ]
+            }
+          ],
+          "perplexity": {
+            "ppl": 16.742,
+            "ppl_stderr": 1.07826,
+            "ctx": 512
+          }
+        },
+        {
+          "engine": "llama.cpp",
+          "quantize": "q8_0",
+          "threads": 4,
+          "pp": {
+            "tokens": 128,
+            "mean": 536.792089,
+            "stdev": 62.568222,
+            "n": 5
+          },
+          "version": "llama.cpp e904318 (build 1)",
+          "tg": {
+            "tokens": 64,
+            "mean": 83.653859,
+            "stdev": 1.971816,
+            "n": 5
+          },
+          "thread_sweep": [
+            {
+              "threads": 1,
+              "pp_tps": 201.26176,
+              "tg_tps": 36.326758
+            },
+            {
+              "threads": 2,
+              "pp_tps": 300.196094,
+              "tg_tps": 61.866108
+            },
+            {
+              "threads": 4,
+              "pp_tps": 604.309961,
+              "tg_tps": 86.927208
+            }
+          ],
+          "determinism": {
+            "version": "llama-cpp-python 0.3.35",
+            "repeat_prefill_logits_identical": true,
+            "repeat_decode_tokens_identical": true,
+            "threads_identical": true,
+            "threads_max_abs_diff": 0.0,
+            "batch_invariant": true,
+            "batch_max_abs_diff": 0.0,
+            "batch_same_top_token": true,
+            "concurrent_equals_solo": true,
+            "concurrent_same_text": true
+          },
+          "concurrency": [
+            {
+              "users": 1,
+              "elapsed_s": 0.4315721109999231,
+              "output_tps": 74.14751598720822,
+              "ttft_ms_p50": 37.519146000022374,
+              "ttft_ms_p99": 37.519146000022374,
+              "outputs": [
+                "4debb9630bd8f43b"
+              ]
+            },
+            {
+              "users": 4,
+              "elapsed_s": 1.226946732999977,
+              "output_tps": 99.43381951203442,
+              "ttft_ms_p50": 138.52374500015685,
+              "ttft_ms_p99": 139.16924500017558,
+              "outputs": [
+                "4debb9630bd8f43b",
+                "a7933bdb1346eb85",
+                "7fa0b8a2e89e5488",
+                "68988fa012a1f6da"
+              ]
+            },
+            {
+              "users": 8,
+              "elapsed_s": 1.4257757549999042,
+              "output_tps": 175.3431415307078,
+              "ttft_ms_p50": 190.9226249999847,
+              "ttft_ms_p99": 195.007951999969,
+              "outputs": [
+                "4debb9630bd8f43b",
+                "a7933bdb1346eb85",
+                "7fa0b8a2e89e5488",
+                "68988fa012a1f6da",
+                "b5d9599e543ae530",
+                "bface3962128216e",
+                "10d5660d27566760",
+                "24fddac733b81e67"
+              ]
+            }
+          ],
+          "perplexity": {
+            "ppl": 16.8147,
+            "ppl_stderr": 1.07975,
+            "ctx": 512
+          }
+        }
+      ],
+      "import_s": 4.874996828000121,
+      "dllm_file_mb": 514.4871215820312,
+      "gguf_f32_mb": 514.8369140625,
+      "gguf_q8_0_mb": 138.1025390625
+    }
+  }
+}

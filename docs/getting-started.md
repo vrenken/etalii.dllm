@@ -358,7 +358,10 @@ machine already shows `(as released)` or `(DIFFERS from release)`; `--json` prin
   tokens per second (about 35 with `--quantize q8_0`); Qwen2.5-0.5B is roughly four times slower. On an RTX 4080,
   Qwen2.5-0.5B generates about 40 tokens per second (about 110 with `--quantize q8_0`). The GPU backend computes in
   double precision to match the CPU bits, so it is far slower than float32 GPU engines. Fine-tuning runs on the CPU
-  only and costs roughly three times as much per token as reading a prompt.
+  only and costs roughly three times as much per token as reading a prompt. [Benchmarks](benchmarks.md) compares
+  six models side by side with transformers and llama.cpp: generation is faster than transformers and somewhat
+  slower than llama.cpp, prompt reading is about three times slower than both, and only EtAlii.Dllm gives the same
+  bits whatever the batch, thread count or concurrent load. `python benchmarks/benchmark.py` reproduces it.
 - Tool calling works best with models trained for it (Qwen2.5-Instruct uses the same `<tool_call>` format the
   engine asks for). SmolLM2-135M does not know tools, so expect clumsy calls from it; constrained decoding still
   guarantees that every call names a real tool with arguments that fit its schema.
