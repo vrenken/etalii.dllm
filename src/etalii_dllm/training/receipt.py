@@ -79,6 +79,8 @@ def make_receipt(tuner: FineTuner, data_file: str | Path) -> dict[str, Any]:
         "losses": [float(loss).hex() for loss in tuner.losses],
         "output": {"fingerprint": data_fingerprint(tuner.weights()), "steps": tuner.step},
     }
+    if tuner.distillation is not None:
+        body["distillation"] = tuner.distillation
     return {**body, "id": receipt_id(body)}
 
 
@@ -104,9 +106,12 @@ def verify(
     base_path: str | Path,
     data_file: str | Path | None = None,
     on_step: Callable[[StepResult], None] | None = None,
+    teacher: str | Path | None = None,
+    prompts: str | Path | None = None,
 ) -> TrainingVerification:
     """Trains again from ``base_path`` on ``data_file`` (default: the file the receipt names) with the recorded
-    settings, and compares every step's loss and the resulting weights with the receipt."""
+    settings, and compares every step's loss and the resulting weights with the receipt. A distillation receipt's
+    data are regenerated first with ``teacher`` from ``prompts`` (default: the file the receipt names)."""
     from etalii_dllm import __version__
     from etalii_dllm.engine import DllmEngine
 
@@ -126,6 +131,12 @@ def verify(
     data_file = data_file if data_file is not None else receipt["data"]["file"]
     if _file_sha256(data_file) != receipt["data"]["sha256"]:
         reasons.append(f"different training data: {data_file} is not the file the run used")
+    if receipt.get("distillation") and teacher is not None:
+        from etalii_dllm.training.distill import check_teacher_data
+
+        reasons.extend(check_teacher_data(receipt["distillation"], teacher, receipt["data"]["sha256"], prompts))
+    elif receipt.get("distillation"):
+        notes.append("the teacher's answers were not regenerated (pass --teacher to check them too)")
     run = RunConfig.from_dict(receipt["run"])
     engine = DllmEngine.from_model_file(base_path, verify=False, prompt_cache=0)
     data = load_data(engine, base, data_file, run.sequence_length)

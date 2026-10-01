@@ -46,6 +46,7 @@ FTZ/DAZ on and requires the kernels' subnormal results and golden fingerprints t
 | `exp` | `x = k ln2 + r`, two-part ln2, degree-13 Taylor, exact scaling by `2^k` | a few ulp |
 | `log` | `x = m 2^e`, `m` in `[sqrt(1/2), sqrt(2))`, `2 atanh((m-1)/(m+1))` series to `s^25` | ~1 ulp |
 | `sin`, `cos` | Cody-Waite reduction by `pi/2` (three 33-bit parts from fdlibm), Taylor to degree 15/16 on `[-pi/4, pi/4]` | ~1 ulp for `|x| < 1.6e6` |
+| `atan`, `acos` | `atan`: `pi/2 - atan(1/x)` above 1, `pi/6 + atan((sqrt3 x - 1)/(sqrt3 + x))` above `tan(pi/12)`, Taylor to `r^35`; `acos(x) = 2 atan(sqrt((1-x)/(1+x)))` (SLERP merges) | ~2 ulp |
 | `tanh` | Taylor to `x^15` below 0.125, else `1 - 2 / (e^(2x) + 1)` | < 2e-15 relative |
 | `sigmoid` | `1 / (1 + e^-x)` or `e^x / (1 + e^x)`, never exponentiating a large positive number | ~1e-15 relative |
 | `erf`, `erfc` | 60-term Maclaurin series below 2.5, Laplace continued fraction (depth 80) for erfc above | erf < 1e-14 absolute, erfc < 1e-13 relative |

@@ -486,6 +486,18 @@ Repeated requests are answered from the cache with the same bits, and identical 
 generation. Every 50th answer is re-run in the background to check it reproduces, and `dllm audit` checks that two
 servers agree. Details: [serving at scale](serving.md).
 
+## 15. Merge, export and distil models
+
+```bash
+dllm merge a.dllm b.dllm -o merged.dllm --method slerp --t 0.3
+dllm export merged.dllm --format gguf -o merged.gguf          # or --format safetensors -o merged-hf/
+dllm distill small.dllm --teacher big.dllm --prompts prompts.txt -o distilled.dllm --steps 200
+```
+
+Every result is the same file on every platform, and its lineage says how it was made. An export imports back to
+the same weights, and a distillation's training receipt replays with `--teacher`. Details:
+[building models](model-building.md).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,

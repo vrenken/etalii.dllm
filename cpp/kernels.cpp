@@ -128,6 +128,8 @@ NB_MODULE(_kernels, module) {
     m.def("log", &dllm::log, nb::arg("x"), "Portable natural logarithm built from basic IEEE operations.");
     m.def("sin", &dllm::sin, nb::arg("x"), "Portable sine built from basic IEEE operations.");
     m.def("cos", &dllm::cos, nb::arg("x"), "Portable cosine built from basic IEEE operations.");
+    m.def("atan", &dllm::atan, nb::arg("x"), "Portable arctangent built from basic IEEE operations.");
+    m.def("acos", &dllm::acos, nb::arg("x"), "Portable arccosine built on dllm atan and sqrt.");
     m.def("tanh", &dllm::tanh, nb::arg("x"), "Portable hyperbolic tangent built on dllm exp.");
     m.def("sigmoid", &dllm::sigmoid, nb::arg("x"), "Portable logistic sigmoid built on dllm exp.");
     m.def("erf", &dllm::erf, nb::arg("x"), "Portable error function built from basic IEEE operations.");

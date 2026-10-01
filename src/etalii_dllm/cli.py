@@ -87,6 +87,10 @@ def _inspect(args: argparse.Namespace) -> int:
             f"edited:             {edit['method']} at layer {edit['layer']}: {edit['prompt']!r} -> {edit['target']!r}"
             f" (from {edit['base_fingerprint'][:16]})"
         )
+    merge = model.header.get("merge")
+    if merge:
+        inputs = ", ".join(str(item["fingerprint"])[:16] for item in merge["inputs"])
+        print(f"merged:             {merge['method']} of {inputs}")
     for index, step in enumerate(model.lineage):
         details = ", ".join(f"{k} {str(v)[:16]}" for k, v in step.items() if k not in ("step", "input", "output"))
         print(f"lineage {index}:          {step['step']} ({details}) -> {str(step.get('output'))[:16]}")
@@ -123,6 +127,24 @@ def _finetune(args: argparse.Namespace) -> int:
     if not args.output and not args.adapter_output:
         print("dllm finetune: pass -o/--output, --adapter-output, or both", file=sys.stderr)
         return 1
+    distillation = None
+    if args.command == "distill" or args.teacher:
+        if not args.teacher or not args.prompts:
+            print("dllm distill: pass --teacher MODEL and --prompts FILE", file=sys.stderr)
+            return 1
+        from etalii_dllm.training.distill import write_teacher_data
+
+        args.data = args.data or f"{args.output or args.adapter_output}.distill.jsonl"
+        try:
+            distillation = write_teacher_data(args.teacher, args.prompts, args.data, args.teacher_max_tokens)
+        except (ModelFileError, OSError, ValueError) as error:
+            print(f"dllm distill: {error}", file=sys.stderr)
+            return 1
+        examples, teacher = distillation["examples"], distillation["teacher"][:16]
+        print(f"teacher:            {examples} answers from {teacher} in {args.data}")
+    elif not args.data:
+        print("dllm finetune: pass --data FILE (or --teacher and --prompts to distill)", file=sys.stderr)
+        return 1
     try:
         base = ModelFile(args.base)
         engine = DllmEngine.from_model_file(args.base, verify=False)
@@ -145,6 +167,7 @@ def _finetune(args: argparse.Namespace) -> int:
                 lora = LoraConfig(args.lora_rank, alpha, targets)
             run = RunConfig(args.steps, args.batch_size, args.sequence_length, args.seed, optimizer, lora)
             tuner = FineTuner.from_model_file(base, data, run)
+        tuner.distillation = distillation
     except (ModelFileError, TrainingDataError, CheckpointError, OSError, ValueError) as error:
         print(f"dllm finetune: {error}", file=sys.stderr)
         return 1
@@ -243,6 +266,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     replay.add_argument("--base", help="training receipts: the model.dllm the run started from (default: --model)")
     replay.add_argument("--data", help="training receipts: the training data (default: the file the receipt names)")
+    replay.add_argument("--teacher", help="distillation receipts: regenerate the data with this teacher model.dllm")
+    replay.add_argument("--prompts", help="distillation receipts: the prompts (default: the file the receipt names)")
 
     from etalii_dllm.interpret import commands as interpret_commands
 
@@ -278,9 +303,20 @@ def main(argv: list[str] | None = None) -> int:
         "--trust", action="append", default=[], metavar="KEY", help="check FILE.sig against this public key"
     )
 
-    finetune = commands.add_parser("finetune", help="fine-tune a model.dllm reproducibly (AdamW, fixed data order)")
+    finetune = commands.add_parser(
+        "finetune",
+        aliases=["distill"],
+        help="fine-tune a model.dllm reproducibly (AdamW, fixed data order); distill: on a --teacher's answers",
+    )
     finetune.add_argument("base", help="the model.dllm file to start from")
-    finetune.add_argument("--data", required=True, help=".txt file, or .jsonl with {'text'} or {'messages'} lines")
+    finetune.add_argument(
+        "--data",
+        help=".txt file, or .jsonl with {'text'} or {'messages'} lines (with --teacher: where to write its answers, "
+        "default OUTPUT.distill.jsonl)",
+    )
+    finetune.add_argument("--teacher", help="distill: train on this model.dllm's greedy answers to --prompts")
+    finetune.add_argument("--prompts", help="distill: one prompt per line (or a JSON object with 'messages')")
+    finetune.add_argument("--teacher-max-tokens", type=int, default=256, help="distill: tokens per teacher answer")
     finetune.add_argument("-o", "--output", help="the fine-tuned model.dllm file to write (LoRA: adapters merged)")
     finetune.add_argument("--steps", type=int, default=100)
     finetune.add_argument("--batch-size", type=int, default=8)
@@ -309,6 +345,20 @@ def main(argv: list[str] | None = None) -> int:
     sign.add_argument("-o", "--output", help="JSON documents: write the signed document here (default: in place)")
     sign.add_argument("--keygen", metavar="FILE", help="create a private key FILE and its public key FILE.pub")
 
+    merge = commands.add_parser("merge", help="merge models of one architecture into a new model.dllm (exact)")
+    merge.add_argument("models", nargs="+", help="the model.dllm files to merge (the first one's lineage continues)")
+    merge.add_argument("-o", "--output", required=True, help="the merged model.dllm")
+    merge.add_argument("--method", default="linear", choices=("linear", "slerp", "ties"))
+    merge.add_argument("--weights", help="comma-separated weight per model (default: equal)")
+    merge.add_argument("--t", type=float, default=0.5, help="slerp: 0 gives the first model, 1 the second")
+    merge.add_argument("--base", help="ties: the model the others were fine-tuned from")
+    merge.add_argument("--density", type=float, default=0.2, help="ties: share of each task vector to keep")
+
+    export = commands.add_parser("export", help="write a model.dllm as Hugging Face safetensors or GGUF (exact)")
+    export.add_argument("path", help="the model.dllm file")
+    export.add_argument("--format", required=True, choices=("safetensors", "gguf"))
+    export.add_argument("-o", "--output", required=True, help="a directory (safetensors) or a .gguf file")
+
     cache_command = commands.add_parser("cache", help="show or clear a response cache directory (--response-cache)")
     cache_commands = cache_command.add_subparsers(dest="cache_command", required=True)
     for name, text in (("stats", "how many responses DIR holds"), ("clear", "remove every response in DIR")):
@@ -328,9 +378,13 @@ def main(argv: list[str] | None = None) -> int:
         return _sign(args)
     if args.command == "cache":
         return _cache(args)
+    if args.command == "merge":
+        return _merge(args)
+    if args.command == "export":
+        return _export(args)
     if args.command == "audit" and not args.local:
         return _audit(None, args)
-    if args.command == "finetune":
+    if args.command in ("finetune", "distill"):
         return _finetune(args)
     if args.command == "edit":
         return interpret_commands.run_edit(args)
@@ -505,6 +559,38 @@ def _evaluate(engine: DllmEngine, args: argparse.Namespace) -> int:
     return 0
 
 
+def _merge(args: argparse.Namespace) -> int:
+    from etalii_dllm.merging import MergeError, merge_models
+    from etalii_dllm.modelfile import ModelFileError, file_sha256
+
+    try:
+        weights = [float(w) for w in args.weights.split(",")] if args.weights else None
+        fingerprint = merge_models(
+            args.models, args.output, args.method, weights, base=args.base, t=args.t, density=args.density
+        )
+    except (MergeError, ModelFileError, OSError, ValueError) as error:
+        print(f"dllm merge: {error}", file=sys.stderr)
+        return 2
+    print(f"wrote {args.output}")
+    print(f"system_fingerprint: {fingerprint}")
+    print(f"file_sha256:        {file_sha256(args.output)}")
+    return 0
+
+
+def _export(args: argparse.Namespace) -> int:
+    from etalii_dllm.exporting import ExportError, export_model
+    from etalii_dllm.modelfile import ModelFileError, file_sha256
+
+    try:
+        files = export_model(args.path, args.output, args.format)
+    except (ExportError, ModelFileError, OSError) as error:
+        print(f"dllm export: {error}", file=sys.stderr)
+        return 2
+    for path in files:
+        print(f"{file_sha256(path)}  {path}")
+    return 0
+
+
 def _cache(args: argparse.Namespace) -> int:
     from etalii_dllm.serving import ResponseCache
 
@@ -641,7 +727,7 @@ def _replay_training(args: argparse.Namespace) -> int:
         print("dllm replay: a training receipt needs the base model (--base or --model)", file=sys.stderr)
         return 2
     try:
-        outcome = verify(receipt, base, args.data)
+        outcome = verify(receipt, base, args.data, teacher=args.teacher, prompts=args.prompts)
     except (OSError, ValueError, KeyError, ModelFileError, TrainingDataError) as error:
         print(f"dllm replay: {error}", file=sys.stderr)
         return 2

@@ -41,6 +41,16 @@ def test_sin_cos_are_accurate():
     assert math.isnan(numerics.cos(math.nan))
 
 
+def test_atan_acos_are_accurate():
+    for x in [i * 0.013 - 20.0 for i in range(3077)] + [1e-300, 0.2679491924311227, 1.0, 1e8, 1e300, -1e300]:
+        assert numerics.atan(x) == pytest.approx(math.atan(x), rel=5e-16, abs=1e-300)
+    for x in [i / 997.0 - 1.0 for i in range(1995)] + [-1.0, 1.0, 1e-12, 1.0 - 1e-15, -1.0 + 1e-15]:
+        assert numerics.acos(x) == pytest.approx(math.acos(x), rel=5e-16, abs=1e-15)
+    assert numerics.acos(1.0) == 0.0 and numerics.atan(0.0) == 0.0
+    assert math.isnan(numerics.acos(1.5)) and math.isnan(numerics.acos(math.nan))
+    assert math.isnan(numerics.atan(math.nan))
+
+
 @pytest.mark.parametrize("x", [0.0, 1e-8, 0.01, 0.1249, 0.125, 0.5, -0.7, 3.0, -10.0, 21.9, 30.0])
 def test_tanh_and_sigmoid_are_accurate(x):
     assert numerics.tanh(x) == pytest.approx(math.tanh(x), rel=1e-14, abs=1e-300)

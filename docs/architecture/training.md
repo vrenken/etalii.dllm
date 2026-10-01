@@ -139,7 +139,7 @@ fingerprint, the data fingerprint, all run settings, the steps completed and the
 `system_fingerprint`; everything described in [inference pipeline](inference.md) then applies unchanged. A LoRA
 run exports the base weights with its adapters merged in, and can also write the adapters alone as a PEFT directory.
 The file's `lineage` gains a `fine_tune` step from the base model's fingerprint. `--receipt` writes a
-[training receipt](../provenance.md#training-receipts): the base and data fingerprints, the run settings, every
+[training receipt](../provenance.md#training-receipts) (a [distillation](../model-building.md#distilling) also records its teacher): the base and data fingerprints, the run settings, every
 step's loss and the resulting weights' fingerprint. `training.receipt.verify` (`dllm replay`) trains again with the
 same `load_data` and compares the losses step by step.
 
