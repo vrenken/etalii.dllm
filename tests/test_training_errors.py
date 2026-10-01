@@ -183,7 +183,7 @@ def test_run_must_fit_the_model_and_data(model_file):  # noqa: F811
     with pytest.raises(ValueError, match="windowed for a different sequence length"):
         FineTuner.from_model_file(model_file, ascii_data(4), RUN)
     too_long = model_file.config.context_length + 1
-    with pytest.raises(ValueError, match=r"exceeds the model's context length \(128\)"):
+    with pytest.raises(ValueError, match=rf"exceeds the model's context length \({too_long - 1}\)"):
         FineTuner.from_model_file(model_file, ascii_data(too_long), dataclasses.replace(RUN, sequence_length=too_long))
     tensors = dict(model_file.tensors)
     del tensors["final_norm.weight"]

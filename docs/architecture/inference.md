@@ -159,6 +159,16 @@ evicted caches are deleted. A new engine loads the stored caches whose key (form
 fingerprint) matches and whose SHA-256 checksum holds. The KV rows are the same bits on every device, so a cache
 written by a CPU run serves a GPU run too.
 
+### The context window
+
+The sequence never holds more than the model's `context_length` tokens. `Generator.stream` refuses a prompt that
+does not fit (`ContextLengthError`, the API's `context_length_exceeded`), and a full window ends the answer with
+`length`. With `overflow="roll"` the generation instead keeps the first 4 tokens and the latest half window, returns
+its cache to the prompt cache and continues on a fresh one, so the kept tokens are computed afresh and each later
+token is exactly what a new generation over them would choose (`Generation._roll`). The sampler keeps the whole
+history. `DllmEngine.fit_messages` drops the oldest turns of a chat before tokenization when `truncation="auto"`
+(`docs/specification.md#the-context-window`).
+
 ### Continuous batching
 
 When several requests decode at the same time, `Batcher` (`batching.py`) gathers their `forward_cached` calls and

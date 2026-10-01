@@ -39,8 +39,9 @@ from etalii_dllm.engine import (
     ToolCallEvent,
     default_engine,
 )
-from etalii_dllm.generation import TokenLogprobs
+from etalii_dllm.generation import ContextLengthError, TokenLogprobs
 from etalii_dllm.sampling import SamplingOptions
+from etalii_dllm.server.contracts import id_payload
 from etalii_dllm.tools import Tool, ToolChoice
 
 Engine = Annotated[DllmEngine, Depends(default_engine)]
@@ -127,6 +128,9 @@ class ResponsesRequest(BaseModel):
     metadata: dict[str, str] | None = None
     receipt: bool | None = None
     """Extension: add a ``receipt`` to the response (see docs/receipts.md)."""
+    truncation: Literal["auto", "disabled"] | None = None
+    context_overflow: Literal["stop", "roll"] | None = None
+    """Extension: ``roll`` keeps generating past a full context window (docs/api.md#long-conversations)."""
 
 
 def error(message: str, status: int = 400) -> JSONResponse:
@@ -261,7 +265,7 @@ def _prepare(request: ResponsesRequest, engine: DllmEngine) -> tuple[ChatRequest
         seed=request.seed or 0,
     )
     wants_logprobs = LOGPROBS_INCLUDE in (request.include or ()) or request.top_logprobs is not None
-    payload = request.model_dump(mode="json", exclude={"stream", "receipt"})
+    payload = id_payload(request.model_dump(mode="json", exclude={"stream", "receipt"}))
     chat = ChatRequest(
         messages=instructions + conversation,
         max_tokens=request.max_output_tokens or DEFAULT_MAX_OUTPUT_TOKENS,
@@ -273,6 +277,8 @@ def _prepare(request: ResponsesRequest, engine: DllmEngine) -> tuple[ChatRequest
         call_id_prefix="call_",
         request_id=engine.derive_id("resp_", payload),
         previous_receipt=previous_receipt,
+        truncation=request.truncation or "disabled",
+        context_overflow=request.context_overflow or "stop",
     )
     return chat, conversation
 
@@ -323,7 +329,7 @@ def _response(request: ResponsesRequest, chat: ChatRequest, engine: DllmEngine, 
         "tool_choice": choice.model_dump(exclude_none=True) if isinstance(choice, BaseModel) else (choice or "auto"),
         "tools": tools,
         "top_p": chat.options.top_p,
-        "truncation": "disabled",
+        "truncation": chat.truncation,
         "usage": None,
         "metadata": request.metadata or {},
         **fields,
@@ -456,6 +462,9 @@ def create(request: ResponsesRequest, engine: Engine) -> JSONResponse | Streamin
     try:
         chat, conversation = _prepare(request, engine)
         stream = engine.chat_stream(chat)
+    except ContextLengthError as problem:
+        body = {"message": str(problem), "type": "invalid_request_error", "param": "input"}
+        return JSONResponse(status_code=400, content={"error": {**body, "code": "context_length_exceeded"}})
     except ValueError as problem:
         return error(str(problem))
     events = _stored(_Events(request, chat, engine, stream), conversation)

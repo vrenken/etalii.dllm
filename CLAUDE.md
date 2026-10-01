@@ -39,7 +39,8 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
   (one thread per output element, no atomics, no warp reductions) so they give the CPU bits (`tests/test_cuda.py`). `CMakeLists.txt` sets the floating point flags; never add `-ffast-math`, `-O3 -march=native`
   style reassociation flags or `-ffp-contract=fast`.
 - `src/etalii_dllm/`: `tensor` (aligned float32 `Tensor`), `numerics` (thin wrappers over `_kernels`, fingerprints),
-  `sampling`, `tokenization`, `models`, `generation`, `prompt_cache` (KV caches reused across requests),
+  `sampling`, `tokenization`, `models`, `generation` (also the context window: `ContextLengthError`, rolling;
+  truncation is `engine.fit_messages`, `docs/api.md#long-conversations`), `prompt_cache` (KV caches reused across requests),
   `batching` (concurrent generations share `forward_batch` steps), `chat`, `engine` (`DllmEngine`, the facade shared by every front
   end; `DLLM_MODEL`/`--model` selects a `model.dllm`), `transformer` (Llama/Qwen2/Qwen3 decoder + KV cache), `bpe`, `unicode` (Unicode tables pinned to one version) and
   `chat_template` (the model's own tokenizer and Jinja template), `sampling` (logit bias, penalties, top-k/top-p/

@@ -109,6 +109,10 @@ class _GenerateBase(BaseModel):
     """Extension: add a ``receipt`` to the final object (see docs/receipts.md)."""
     previous_receipt: str | None = None
     """Extension: the receipt id of the conversation's previous turn, recorded as the new receipt's ``previous``."""
+    truncate: bool | None = None
+    """Drop the oldest messages that do not fit the context window (off unless asked for)."""
+    shift: bool | None = None
+    """Keep generating past a full context window on a rolled context (off unless asked for)."""
 
 
 class ChatBody(_GenerateBase):
@@ -235,6 +239,8 @@ def _chat_request(body: ChatBody, engine: DllmEngine) -> ChatRequest:
         top_logprobs=_top_logprobs(body),
         request_id=request_id,
         previous_receipt=body.previous_receipt,
+        truncation="auto" if body.truncate else "disabled",
+        context_overflow="roll" if body.shift else "stop",
     )
 
 
@@ -259,6 +265,8 @@ def _generate_request(body: GenerateBody, engine: DllmEngine) -> ChatRequest:
         request_id=request_id,
         previous_receipt=body.previous_receipt,
         prompt=(body.prompt or "") if body.raw else None,
+        truncation="auto" if body.truncate else "disabled",
+        context_overflow="roll" if body.shift else "stop",
     )
 
 

@@ -27,6 +27,8 @@ from etalii_dllm.sampling import GREEDY, SamplingOptions
 
 PROMPT = "The capital of France is"
 MAX_TOKENS = 16
+ROLLED_ROOM = 3
+"""Tokens the rolled check's context window holds beyond the prompt."""
 SAMPLED = SamplingOptions(temperature=0.8, seed=7)
 CONTROLLED = SamplingOptions(
     temperature=0.9,
@@ -185,7 +187,8 @@ class ReferenceCheck:
     """``dllm verify --reference``: the engine against the independent reference implementation (issue #162)."""
 
     results: dict[str, str]
-    """``logits``, ``greedy`` and ``sampled``: ``"equal"``, or where the two first differ."""
+    """``logits``, ``greedy``, ``sampled``, ``controlled`` and ``rolled``: ``"equal"``, or where the two first
+    differ."""
 
     @property
     def equal(self) -> bool:
@@ -215,6 +218,7 @@ def check_reference(engine: Any, max_tokens: int = MAX_TOKENS) -> ReferenceCheck
     means the kernels (a SIMD path, the thread pool, the GPU, the compiler) do not compute what the specification
     says on this machine."""
     from etalii_dllm import reference
+    from etalii_dllm.generation import Generator
     from etalii_dllm.transformer import Transformer
 
     if not isinstance(engine.model, Transformer):
@@ -235,4 +239,10 @@ def check_reference(engine: Any, max_tokens: int = MAX_TOKENS) -> ReferenceCheck
         sampler = reference.sampler(options)
         tokens, _ = twin.generate(context, max_tokens, sampler, stops)
         results[name] = _first_difference(answer.tokens, tokens)
+    # A window just past the prompt, so the answer rolls it (docs/specification.md#the-context-window) several times.
+    rolling = Generator(engine.model, engine.tokenizer, stops)
+    rolling.context_length = window = max(len(context) + ROLLED_ROOM, 2 * reference.ROLL_SINK + 4)
+    answer = rolling.generate(PROMPT, max_tokens, GREEDY, overflow="roll")
+    tokens, _ = twin.generate(context, max_tokens, reference.sampler(GREEDY), stops, overflow="roll", window=window)
+    results["rolled"] = _first_difference(answer.tokens, tokens)
     return ReferenceCheck(results)

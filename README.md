@@ -180,6 +180,7 @@ module map), with Mermaid diagrams.
 | 20. Independent verification ✅ | ✅ A second, independent implementation that gives the same bits (#161); ✅ `dllm verify --reference` to check a machine against it (#162); ✅ conformance vectors for other implementations (`dllm conformance`, #163); ✅ a written determinism specification (#164). See [specification](docs/specification.md) |
 | 21. Deterministic decoding controls ✅ | ✅ Repetition, frequency and presence penalties, min-p and logit bias with a fixed order (#166); ✅ several choices per request, each with its solo bits (`n`, #167); ✅ regex-constrained output (#168); ✅ all of them in the specification, the reference implementation and the conformance vectors (#169). See [decoding controls](docs/api.md#decoding-controls) |
 | 22. Reproducible batch jobs ✅ | ✅ `dllm batch` with byte-identical output at any concurrency (#171); ✅ exact resume of an interrupted batch (#172); ✅ the OpenAI Files and Batches API with content-derived ids (#173); ✅ a verifiable, signable digest per batch and `--verify` (#174). See [batch jobs](docs/batches.md) |
+| 23. Long conversations in a fixed window ✅ | ✅ A context window that is enforced the same way everywhere (#176); ✅ deterministic truncation of the oldest turns (`truncation`, #177); ✅ rolling generation past a full window that equals a fresh run over the kept tokens (#178); ✅ the window rules in the specification, the reference implementation and `dllm verify --reference` (#179). See [long conversations](docs/api.md#long-conversations) |
 
 ## Working with Claude Code
 

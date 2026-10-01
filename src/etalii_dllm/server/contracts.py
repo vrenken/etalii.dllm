@@ -110,6 +110,10 @@ class ChatCompletionRequest(BaseModel):
     """Extension (as in llama.cpp)."""
     guided_regex: str | None = None
     """Extension (as in vLLM): the same as ``response_format: {"type": "regex", "regex": ...}``."""
+    truncation: Literal["auto", "disabled"] | None = None
+    """Extension (as in the Responses API): ``auto`` drops the oldest messages that do not fit the context window."""
+    context_overflow: Literal["stop", "roll"] | None = None
+    """Extension: ``roll`` keeps generating past a full context window (docs/api.md#long-conversations)."""
 
 
 DECODING_CONTROLS = (
@@ -121,8 +125,12 @@ DECODING_CONTROLS = (
     "repeat_last_n",
     "repeat_penalty",
     "guided_regex",
+    "truncation",
+    "context_overflow",
+    "truncate",
+    "shift",
 )
-"""Request fields added in Phase 21: left out of the payloads ids are derived from while unset, so the ids of
+"""Request fields added since Phase 21: left out of the payloads ids are derived from while unset, so the ids of
 requests without them did not change."""
 
 

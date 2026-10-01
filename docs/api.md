@@ -240,6 +240,34 @@ curl -s localhost:5080/v1/chat/completions -H 'content-type: application/json' -
 }'
 ```
 
+## Long conversations
+
+A prompt and its answer never hold more tokens than the model's context window (`context_length` in `dllm inspect`).
+What happens at the edge is fixed by the request, never by load or timing ([specification](specification.md#the-context-window)):
+
+| Behaviour | OpenAI chat | Responses | Ollama | CLI |
+| --- | --- | --- | --- | --- |
+| A prompt that does not fit is refused | 400, `code: context_length_exceeded` | 400, `code: context_length_exceeded` | 400 | exit code 2 (`generate`), 1 (`chat`) |
+| Drop the oldest turns until it fits | `truncation: "auto"` (extension) | `truncation: "auto"` | `truncate: true` | `chat --truncate` |
+| A full window ends the answer (`finish_reason: length`) | default | default | default | default |
+| Keep going on a rolled window | `context_overflow: "roll"` (extension) | `context_overflow: "roll"` (extension) | `shift: true` | `--context-overflow roll` |
+
+- Truncation drops the earliest message that is neither a system message nor the last one, together with the tool
+  results right after it, and repeats until the prompt fits. System messages and the last message always stay.
+- Rolling keeps the first 4 tokens (attention sinks) and the latest half window, and computes them afresh. Each
+  token after a roll is exactly the token a new request over the kept tokens would give, with and without the
+  prompt cache and in a batch, so a rolled answer is as reproducible as any other. The penalties keep counting over
+  the whole history.
+- Both are off by default (unlike Ollama, where truncation and shifting are on), so a request that fits is unchanged
+  and a request that does not fit says so. Receipts record both, so `dllm replay` repeats them.
+
+```bash
+curl -s localhost:5080/v1/chat/completions -H 'content-type: application/json' -d '{
+  "messages": [{"role": "user", "content": "Tell me a long story"}],
+  "max_tokens": 100000, "truncation": "auto", "context_overflow": "roll"
+}'
+```
+
 ## Batches
 
 `POST /v1/files` and `/v1/batches` run OpenAI batch files with output that is the same bytes on every machine and at
