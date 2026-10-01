@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from golden_values import TINY_IMPORT_FINGERPRINT
+from golden_values import TINY_IMPORT_FILE_SHA256, TINY_IMPORT_FINGERPRINT
 from model_fixtures import (
     TINY_LLAMA_CONFIG,
     bf16_to_float32,
@@ -20,6 +20,7 @@ from model_fixtures import (
     write_safetensors,
 )
 
+from etalii_dllm import modelfile
 from etalii_dllm.cli import main as cli
 from etalii_dllm.importing import ModelImportError, import_model
 from etalii_dllm.importing.gguf import GgufFile
@@ -125,6 +126,7 @@ def test_import_huggingface_checkpoint(tmp_path):
     result = import_model(tmp_path / "tiny", tmp_path / "tiny.dllm", repository="example/tiny", revision="abc123")
     model = ModelFile(tmp_path / "tiny.dllm")
     assert model.fingerprint == result.fingerprint == TINY_IMPORT_FINGERPRINT
+    assert file_sha256(tmp_path / "tiny.dllm") == modelfile.file_sha256(result.path) == TINY_IMPORT_FILE_SHA256
     config = model.config
     assert (config.family, config.layers, config.heads, config.kv_heads, config.head_dim) == ("llama", 2, 4, 2, 4)
     assert config.tie_word_embeddings and "lm_head.weight" not in model.tensors

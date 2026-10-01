@@ -333,3 +333,24 @@ def test_release_with_large_pages(model_path, monkeypatch):
     model = ModelFile(model_path)
     model.release()
     assert np.array_equal(model.tensors["token_embedding.weight"], weights()["token_embedding.weight"])
+
+
+def test_lineage_of_older_files_and_its_problems():
+    from etalii_dllm import modelfile
+
+    source = {"format": "gguf", "files": []}
+    header = {
+        "source": source,
+        "adapter": {"base_fingerprint": "a"},
+        "fine_tuning": {"base_fingerprint": "b", "data_fingerprint": "d", "steps_completed": 2, "run": {}},
+        "edits": [{"base_fingerprint": "c", "method": "rome"}],
+    }
+    steps = modelfile.lineage(header)
+    assert [s["step"] for s in steps] == ["import", "adapter", "fine_tune", "edit"]
+    assert [s.get("output") for s in steps] == ["a", "b", "c", None]  # inferred from the next step's input
+    assert modelfile.lineage_problems(steps) == []
+    steps[1]["output"] = "z"
+    assert modelfile.lineage_problems(steps) == ["step 2 (fine_tune) starts from b, but step 1 gave z"]
+    assert modelfile.lineage({"lineage": steps}) == steps
+    assert modelfile.lineage_problems([]) == ["the lineage does not start with an import"]
+    assert modelfile.extend_lineage([], "x", {"step": "import"}) == [{"step": "import"}]

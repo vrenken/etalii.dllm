@@ -11,7 +11,7 @@ from model_fixtures import tiny_config, write_hf_checkpoint
 from test_engine_import import model_path  # noqa: F401 - fixture
 
 from etalii_dllm import engine as engine_module
-from etalii_dllm import numerics
+from etalii_dllm import modelfile, numerics
 from etalii_dllm.cli import main
 from etalii_dllm.engine import DllmEngine, default_engine
 from etalii_dllm.importing import import_model
@@ -248,10 +248,19 @@ def test_rome_edit(tmp_path, model_path):  # noqa: F811
     assert first.read_bytes() == second.read_bytes()
     edited = ModelFile(first)
     assert edited.edits == [record]
+    with pytest.raises(ValueError, match="other weights"):
+        write_edited_model(edited, result, tmp_path / "wrong.dllm")
+    edited_engine = DllmEngine.from_model_file(first)
+    second_request = EditRequest("the dog sat on the", "dog", " rug")
+    follow = rome(edited_engine.model, tokenizer, second_request, layer=1, corpus=corpus, steps=5)
     twice = tmp_path / "c.dllm"
-    write_edited_model(edited, result, twice)
+    write_edited_model(edited, follow, twice)
     assert len(ModelFile(twice).edits) == 2
     assert ModelFile(twice).licence == edited.licence
+    steps = ModelFile(twice).lineage
+    assert [step["step"] for step in steps] == ["import", "edit", "edit"]
+    assert steps[1]["input"] == base.fingerprint and steps[2]["input"] == edited.fingerprint
+    assert modelfile.lineage_problems(steps) == []
 
 
 def test_rome_rejects_bad_requests(model_path, tmp_path_factory):  # noqa: F811

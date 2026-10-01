@@ -138,6 +138,10 @@ The exported model is an ordinary `model.dllm` with the base model's tokenizer, 
 fingerprint, the data fingerprint, all run settings, the steps completed and the final loss. New weights mean a new
 `system_fingerprint`; everything described in [inference pipeline](inference.md) then applies unchanged. A LoRA
 run exports the base weights with its adapters merged in, and can also write the adapters alone as a PEFT directory.
+The file's `lineage` gains a `fine_tune` step from the base model's fingerprint. `--receipt` writes a
+[training receipt](../provenance.md#training-receipts): the base and data fingerprints, the run settings, every
+step's loss and the resulting weights' fingerprint. `training.receipt.verify` (`dllm replay`) trains again with the
+same `load_data` and compares the losses step by step.
 
 `tests/test_training.py` checks the gradient kernels against float64 references, the decoder's gradients against
 finite differences, byte-identical runs, bit-exact resumption, and golden hashes of the gradients and of a short

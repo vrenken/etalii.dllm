@@ -225,5 +225,6 @@ def main(argv: list[str] | None = None) -> None:
         speculate=args.speculate,
         draft_model=args.draft_model,
         prompt_cache_dir=args.prompt_cache_dir,
+        sign_key=args.sign_key,
     )
     server.run("stdio")

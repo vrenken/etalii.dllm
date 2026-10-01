@@ -227,7 +227,7 @@ def write_hf_checkpoint(
     (directory / "tokenizer.json").write_text(json.dumps(tokenizer_json or TOKENIZER_JSON), encoding="utf-8")
     (directory / "tokenizer_config.json").write_text(json.dumps(TOKENIZER_CONFIG), encoding="utf-8")
     if card:
-        (directory / "README.md").write_text(card, encoding="utf-8")
+        (directory / "README.md").write_bytes(card.encode("utf-8"))  # the same bytes on Windows
     write_safetensors(
         directory / "model.safetensors",
         {name: ("BF16", to_bf16_bits(values)) for name, values in weights.items()},

@@ -32,6 +32,7 @@ from etalii_dllm.numerics import QUANTIZATIONS, linear, set_threads, sum_squares
 from etalii_dllm.prompt_cache import DEFAULT_PROMPT_CACHE_SIZE
 from etalii_dllm.retrieval import DEFAULT_TOP, Retriever
 from etalii_dllm.sampling import GREEDY, SamplingOptions
+from etalii_dllm.signing import Signer
 from etalii_dllm.speculative import DEFAULT_DRAFT_TOKENS
 from etalii_dllm.tokenization import ByteTokenizer, Tokenizer
 from etalii_dllm.tools import AUTO, Tool, ToolChoice
@@ -62,6 +63,7 @@ EMBEDDING_MODEL_ENVIRONMENT_VARIABLE = "DLLM_EMBEDDING_MODEL"
 SPECULATE_ENVIRONMENT_VARIABLE = "DLLM_SPECULATE"
 """Tokens speculative decoding drafts per step (0 or unset: off). Never changes the output."""
 DRAFT_MODEL_ENVIRONMENT_VARIABLE = "DLLM_DRAFT_MODEL"
+SIGN_KEY_ENVIRONMENT_VARIABLE = "DLLM_SIGN_KEY"
 """A smaller ``model.dllm`` with the same tokenizer that drafts for speculative decoding. Never changes the output."""
 
 
@@ -174,6 +176,9 @@ class Embedding:
 
 
 class DllmEngine:
+    signer: Signer | None = None
+    """Signs every receipt this engine makes (``--sign-key``, :mod:`etalii_dllm.signing`)."""
+
     def __init__(
         self,
         model: LanguageModel,
@@ -449,6 +454,8 @@ class DllmEngine:
         receipt = receipts.make_receipt(
             __version__, self.model.id, self.system_fingerprint, request, output, request.previous_receipt
         )
+        if self.signer is not None:
+            receipt = self.signer.sign(receipt)
         yield Finished(finish_reason, stop_sequence, len(tokens), result.fingerprint, receipt)
 
     def chat_completion(self, request: ChatRequest) -> ChatResult:
@@ -558,6 +565,7 @@ def use_model_file(
     speculate: int | None = None,
     draft_model: str | Path | None = None,
     prompt_cache_dir: str | Path | None = None,
+    sign_key: str | Path | None = None,
 ) -> None:
     """Makes the front ends serve ``path`` (sets ``DLLM_MODEL``, and ``DLLM_QUANTIZE``/``DLLM_DEVICE``/
     ``DLLM_PROMPT_CACHE``/``DLLM_ADAPTER`` when ``quantize``/``device``/``prompt_cache``/``adapter`` are given) and
@@ -589,6 +597,8 @@ def use_model_file(
         os.environ[DRAFT_MODEL_ENVIRONMENT_VARIABLE] = str(draft_model)
     if prompt_cache_dir:
         os.environ[PROMPT_CACHE_DIR_ENVIRONMENT_VARIABLE] = str(prompt_cache_dir)
+    if sign_key:
+        os.environ[SIGN_KEY_ENVIRONMENT_VARIABLE] = str(sign_key)
     if threads is not None:
         set_threads(threads)
     default_engine.cache_clear()
@@ -641,6 +651,11 @@ def add_runtime_arguments(parser: argparse.ArgumentParser) -> None:
         metavar="N",
         help="KV caches kept to reuse shared prompt prefixes across requests (default: $DLLM_PROMPT_CACHE, else "
         f"{DEFAULT_PROMPT_CACHE_SIZE}; 0 disables); never changes output",
+    )
+    parser.add_argument(
+        "--sign-key",
+        metavar="FILE",
+        help="sign every receipt with this Ed25519 private key (dllm sign --keygen; default: $DLLM_SIGN_KEY)",
     )
     parser.add_argument(
         "--persistent-cache",
@@ -740,8 +755,14 @@ def default_engine() -> DllmEngine:
     """Process-wide default engine: the model named by ``DLLM_MODEL``, else the placeholder. Models are immutable
     and ``forward`` keeps no shared state, so sharing the engine between requests is safe."""
     path = os.environ.get(MODEL_ENVIRONMENT_VARIABLE)
-    if not path:
-        return DllmEngine.create_default()
+    engine = DllmEngine.create_default() if not path else _configured_engine(path)
+    key = os.environ.get(SIGN_KEY_ENVIRONMENT_VARIABLE)
+    if key:
+        engine.signer = Signer.load(key)
+    return engine
+
+
+def _configured_engine(path: str) -> DllmEngine:
     return DllmEngine.from_model_file(
         path,
         quantize=configured_quantization(),

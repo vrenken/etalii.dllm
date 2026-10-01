@@ -40,6 +40,7 @@ same source twice gives byte-identical files (`tests/test_import.py`).
 | `fine_tuning` | Only in models written by `dllm finetune`: base model fingerprint, data fingerprint, run settings, steps completed and final loss (see [training](training.md)) |
 | `adapter` | Only in models written by `dllm import ADAPTER --base BASE`: the base model fingerprint, the LoRA settings (`rank`, `alpha`, `targets`, `rslora`), the adapter's licence and its source files (see [training](training.md#lora-adapters)) |
 | `embedding` | Only in models imported from sentence-transformers: `pooling` (`last_token` or `mean`), `normalize`, `prompts` (name to the text put in front of the input, such as `query`) and `default_prompt_name` (see [retrieval](retrieval.md#embedding-models)) |
+| `lineage` | How the weights were made, oldest step first: `import`, then every `adapter`, `fine_tune` and `edit`, each with the weights it started from (`input`) and, except the last, those it gave (`output`); details are digests of the matching sections (see [verifiable models](provenance.md#lineage)). Files written before Phase 17 have none; readers derive it from the other sections |
 | `edits` | Only in edited models (`dllm edit`): a list, oldest first, of the edits applied to the weights: method (`rome`), layer, prompt, subject, target, contexts, base model fingerprint, covariance and optimiser settings, the norm of the value change and the target probability before and after (see [interpretability](interpretability.md#model-editing-rome)) |
 
 ## Tensor names

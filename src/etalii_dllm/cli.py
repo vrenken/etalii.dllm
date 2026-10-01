@@ -29,6 +29,7 @@ def _import(args: argparse.Namespace) -> int:
     from etalii_dllm.importing import ModelImportError, import_model
     from etalii_dllm.importing.gguf import GgufError
     from etalii_dllm.importing.safetensors import SafetensorsError
+    from etalii_dllm.modelfile import file_sha256
 
     try:
         result = import_model(
@@ -50,11 +51,12 @@ def _import(args: argparse.Namespace) -> int:
     print(f"architecture:       {config.family}, {config.layers} layers, hidden {config.hidden_size}")
     print(f"licence:            {result.licence['spdx']}")
     print(f"system_fingerprint: {result.fingerprint}")
+    print(f"file_sha256:        {file_sha256(result.path)}")
     return 0
 
 
 def _inspect(args: argparse.Namespace) -> int:
-    from etalii_dllm.modelfile import ModelFile, ModelFileError
+    from etalii_dllm.modelfile import ModelFile, ModelFileError, lineage_problems
 
     try:
         model = ModelFile(args.path, verify=not args.no_verify)
@@ -85,7 +87,22 @@ def _inspect(args: argparse.Namespace) -> int:
             f"edited:             {edit['method']} at layer {edit['layer']}: {edit['prompt']!r} -> {edit['target']!r}"
             f" (from {edit['base_fingerprint'][:16]})"
         )
+    for index, step in enumerate(model.lineage):
+        details = ", ".join(f"{k} {str(v)[:16]}" for k, v in step.items() if k not in ("step", "input", "output"))
+        print(f"lineage {index}:          {step['step']} ({details}) -> {str(step.get('output'))[:16]}")
+    for problem in lineage_problems(model.lineage):
+        print(f"lineage problem:    {problem}")
     print(f"system_fingerprint: {model.fingerprint}")
+    if args.trust:
+        from etalii_dllm import signing
+
+        try:
+            problem = signing.model_signature_problem(args.path, [signing.read_public_key(k) for k in args.trust])
+        except signing.SigningError as error:
+            print(f"dllm inspect: {error}", file=sys.stderr)
+            return 1
+        print(f"signature:          {problem or 'valid, by a trusted key'}")
+        return 1 if problem else 0
     return 0
 
 
@@ -99,10 +116,9 @@ def _finetune(args: argparse.Namespace) -> int:
         LoraConfig,
         RunConfig,
         StepResult,
-        TrainingData,
         TrainingDataError,
-        read_documents,
     )
+    from etalii_dllm.training.receipt import load_data, make_receipt
 
     if not args.output and not args.adapter_output:
         print("dllm finetune: pass -o/--output, --adapter-output, or both", file=sys.stderr)
@@ -110,13 +126,7 @@ def _finetune(args: argparse.Namespace) -> int:
     try:
         base = ModelFile(args.base)
         engine = DllmEngine.from_model_file(args.base, verify=False)
-        render = None
-        if engine.chat_template is not None:
-            template = engine.chat_template
-            render = lambda messages: template.render(messages, add_generation_prompt=False)  # noqa: E731
-        separator = base.config.eos_token_ids[0] if base.config.eos_token_ids else None
-        documents = read_documents(args.data, render)
-        data = TrainingData.from_documents(documents, engine.tokenizer.encode, args.sequence_length, separator)
+        data = load_data(engine, base, args.data, args.sequence_length)
         if args.resume:
             tuner = FineTuner.load_checkpoint(args.resume, data, base)
         else:
@@ -163,6 +173,10 @@ def _finetune(args: argparse.Namespace) -> int:
         fingerprint = tuner.export(args.output)
         print(f"wrote:              {args.output}")
         print(f"system_fingerprint: {fingerprint}")
+    if args.receipt:
+        receipt = make_receipt(tuner, args.data)
+        Path(args.receipt).write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+        print(f"receipt:            {args.receipt} ({receipt['id']})")
     return 0
 
 
@@ -220,6 +234,15 @@ def main(argv: list[str] | None = None) -> int:
         "receipt", metavar="FILE", help="a receipt, a receipt chain (JSON list) or agent transcript; - reads stdin"
     )
     replay.add_argument("--json", action="store_true", help="print the verification as JSON")
+    replay.add_argument(
+        "--trust",
+        action="append",
+        default=[],
+        metavar="KEY",
+        help="also require a valid signature by this Ed25519 public key (hex or .pub file; repeatable)",
+    )
+    replay.add_argument("--base", help="training receipts: the model.dllm the run started from (default: --model)")
+    replay.add_argument("--data", help="training receipts: the training data (default: the file the receipt names)")
 
     from etalii_dllm.interpret import commands as interpret_commands
 
@@ -251,6 +274,9 @@ def main(argv: list[str] | None = None) -> int:
     inspect = commands.add_parser("inspect", help="show a model.dllm file's architecture, source and licence")
     inspect.add_argument("path")
     inspect.add_argument("--no-verify", action="store_true", help="skip re-hashing the tensor data")
+    inspect.add_argument(
+        "--trust", action="append", default=[], metavar="KEY", help="check FILE.sig against this public key"
+    )
 
     finetune = commands.add_parser("finetune", help="fine-tune a model.dllm reproducibly (AdamW, fixed data order)")
     finetune.add_argument("base", help="the model.dllm file to start from")
@@ -275,8 +301,17 @@ def main(argv: list[str] | None = None) -> int:
         "--lora-targets", default="q,k,v,o,gate,up,down", help="linear layers to adapt (comma separated)"
     )
     finetune.add_argument("--adapter-output", help="LoRA runs: write the adapters as a PEFT directory here")
+    finetune.add_argument("--receipt", metavar="FILE", help="write a training receipt (dllm replay trains again)")
+
+    sign = commands.add_parser("sign", help="sign a receipt, chain, transcript or model file with an Ed25519 key")
+    sign.add_argument("file", nargs="?", help="the JSON document or model.dllm file to sign")
+    sign.add_argument("--key", help="the private key file")
+    sign.add_argument("-o", "--output", help="JSON documents: write the signed document here (default: in place)")
+    sign.add_argument("--keygen", metavar="FILE", help="create a private key FILE and its public key FILE.pub")
 
     args = parser.parse_args(argv)
+    if args.command == "sign":
+        return _sign(args)
     if args.command == "finetune":
         return _finetune(args)
     if args.command == "edit":
@@ -285,6 +320,17 @@ def main(argv: list[str] | None = None) -> int:
         return _import(args)
     if args.command == "inspect":
         return _inspect(args)
+    if args.command == "replay":
+        try:
+            args.loaded = _read_json(args.receipt)
+        except (OSError, ValueError) as error:
+            print(f"dllm replay: {error}", file=sys.stderr)
+            return 2
+        problems = _signature_problems(args.loaded, args.trust)
+        if problems is None:
+            return 2
+        if isinstance(args.loaded, dict) and "training_receipt" in args.loaded:
+            return _signed(_replay_training(args), problems)
     configured = args.model or os.environ.get(MODEL_ENVIRONMENT_VARIABLE)
     if args.command == "index" and args.index_command == "search" and not configured:
         args.model = _index_model(args.index_file)  # search with the model the index was built with
@@ -303,6 +349,7 @@ def main(argv: list[str] | None = None) -> int:
         speculate=args.speculate,
         draft_model=args.draft_model,
         prompt_cache_dir=args.prompt_cache_dir,
+        sign_key=args.sign_key,
     )
     try:
         engine = default_engine()
@@ -322,7 +369,7 @@ def main(argv: list[str] | None = None) -> int:
         return _verify(engine, args.json)
 
     if args.command == "replay":
-        return _replay(engine, args)
+        return _signed(_replay(engine, args), problems)
 
     if args.command == "eval":
         return _evaluate(engine, args)
@@ -435,12 +482,109 @@ def _evaluate(engine: DllmEngine, args: argparse.Namespace) -> int:
     return 0
 
 
+def _sign(args: argparse.Namespace) -> int:
+    from etalii_dllm import signing
+    from etalii_dllm.modelfile import MAGIC
+
+    try:
+        if args.keygen:
+            print(f"public key:         {signing.generate_key(args.keygen)}  ({args.keygen}.pub)")
+            return 0
+        if not args.file or not args.key:
+            print("dllm sign: pass FILE and --key KEY (or --keygen FILE)", file=sys.stderr)
+            return 2
+        signer = signing.Signer.load(args.key)
+        with Path(args.file).open("rb") as stream:
+            is_model = stream.read(len(MAGIC)) == MAGIC
+        if is_model:
+            target = Path(f"{args.file}.sig")
+            target.write_text(json.dumps(signer.sign_model(args.file), indent=2) + "\n", encoding="utf-8")
+        else:
+            document = _read_json(args.file)
+            if isinstance(document, list):  # a receipt chain: every receipt is signed
+                signed: Any = [signer.sign(item) for item in document]
+            elif isinstance(document, dict):
+                signed = signer.sign(document)
+            else:
+                raise ValueError("expected a JSON object or list")
+            target = Path(args.output or args.file)
+            target.write_text(json.dumps(signed, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    except (OSError, ValueError) as error:
+        print(f"dllm sign: {error}", file=sys.stderr)
+        return 2
+    print(f"signed:             {target} (key {signer.public_key})")
+    return 0
+
+
+def _signature_problems(document: Any, trust: list[str]) -> list[str] | None:
+    """Why ``document`` (or each receipt of a chain) lacks a valid signature by a trusted key; ``None`` when a
+    trusted key is unusable."""
+    if not trust:
+        return []
+    from etalii_dllm import signing
+
+    try:
+        keys = [signing.read_public_key(key) for key in trust]
+    except signing.SigningError as error:
+        print(f"dllm replay: {error}", file=sys.stderr)
+        return None
+    items = document if isinstance(document, list) else [document]
+    problems = []
+    for index, item in enumerate(items):
+        problem = signing.signature_problem(item, keys) if isinstance(item, dict) else "it is not a JSON object"
+        if problem is not None:
+            problems.append(f"turn {index}: {problem}" if isinstance(document, list) else problem)
+    return problems
+
+
+def _signed(code: int, problems: list[str]) -> int:
+    """The replay's exit code, failed when a required signature is missing or invalid."""
+    for problem in problems:
+        print(f"signature:          {problem}", file=sys.stderr)
+    if problems and code == 0:
+        print("NOT verified: the signature check failed", file=sys.stderr)
+        return 1
+    return code
+
+
+def _read_json(path: str) -> Any:
+    return json.loads(sys.stdin.read() if path == "-" else Path(path).read_text(encoding="utf-8"))
+
+
+def _replay_training(args: argparse.Namespace) -> int:
+    from etalii_dllm.modelfile import ModelFileError
+    from etalii_dllm.training import TrainingDataError
+    from etalii_dllm.training.receipt import verify
+
+    receipt = args.loaded
+    base = args.base or args.model or os.environ.get(MODEL_ENVIRONMENT_VARIABLE)
+    if not base:
+        print("dllm replay: a training receipt needs the base model (--base or --model)", file=sys.stderr)
+        return 2
+    try:
+        outcome = verify(receipt, base, args.data)
+    except (OSError, ValueError, KeyError, ModelFileError, TrainingDataError) as error:
+        print(f"dllm replay: {error}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(outcome.to_json(), indent=2, ensure_ascii=False))
+    else:
+        print(f"training receipt:   {receipt.get('id')}  ({receipt['output']['steps']} steps)")
+        print(f"base:               {receipt.get('base_fingerprint')}")
+        for note in outcome.notes:
+            print(f"note:               {note}")
+        for reason in outcome.reasons:
+            print(f"differs:            {reason}")
+        verdict = "verified: training again gave the same weights, bit for bit"
+        print(verdict if outcome.ok else "NOT verified")
+    return 0 if outcome.ok else 1
+
+
 def _replay(engine: DllmEngine, args: argparse.Namespace) -> int:
     from etalii_dllm import receipts
 
     try:
-        text = sys.stdin.read() if args.receipt == "-" else Path(args.receipt).read_text(encoding="utf-8")
-        receipt = json.loads(text)
+        receipt = args.loaded
         if isinstance(receipt, list):
             return _replay_chain(engine, receipt, args.json)
         if not isinstance(receipt, dict):

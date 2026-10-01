@@ -333,5 +333,6 @@ def main() -> None:
         speculate=args.speculate,
         draft_model=args.draft_model,
         prompt_cache_dir=args.prompt_cache_dir,
+        sign_key=args.sign_key,
     )
     uvicorn.run(app, host=args.host, port=args.port)
