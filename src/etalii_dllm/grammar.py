@@ -1,9 +1,9 @@
 """Constrained decoding: byte-level JSON grammars and the token masks they induce.
 
-A :class:`Grammar` describes the bytes the model may produce: literal text, JSON values of a JSON schema, or a
-sequence of those (a tool call is ``<tool_call>`` + a JSON object + ``</tool_call>``). It is recognised by a small
-nondeterministic pushdown automaton over bytes, so tokens that end mid-character (byte-level BPE) are handled
-exactly.
+A :class:`Grammar` describes the bytes the model may produce: literal text, JSON values of a JSON schema, text
+matching a regular expression (:mod:`etalii_dllm.regexp`), or a sequence of those (a tool call is ``<tool_call>``
++ a JSON object + ``</tool_call>``). It is recognised by a small nondeterministic pushdown automaton over bytes, so
+tokens that end mid-character (byte-level BPE) are handled exactly.
 
 :class:`TokenConstraint` turns a grammar into the set of tokens allowed at each step. Every token's bytes are put in
 a trie once per tokenizer; a depth-first walk over the trie, pruned as soon as the automaton rejects a prefix, finds
@@ -233,7 +233,7 @@ class _SchemaCompiler:
 # element is a tag. Consuming items (literal, alternatives, whitespace, string, number) read bytes; the others
 # expand into consuming items without reading.
 
-_LIT, _ALT, _WS, _STR, _NUM, _VALUE, _OBJ, _ARR = range(8)
+_LIT, _ALT, _WS, _STR, _NUM, _VALUE, _OBJ, _ARR, _RE = range(9)
 
 Stack = tuple[Any, Any] | None
 
@@ -339,6 +339,12 @@ def _closure(stack: Stack, out: dict[Stack, None]) -> None:
     elif tag == _ARR:
         for expanded in _array_steps(item, rest):
             _closure(expanded, out)
+    elif tag == _RE:
+        _, dfa, state = item
+        if dfa.reads(state):
+            out[stack] = None
+        if dfa.accepting(state):
+            _closure(rest, out)
     else:  # pragma: no cover
         raise TypeError(f"unknown grammar item {item!r}")
 
@@ -431,6 +437,10 @@ def _consume(stack: Stack, byte: int, out: dict[Stack, None]) -> None:
         phase = _number_step(item[1], item[2], byte)
         if phase is not None:
             out[((_NUM, item[1], phase), rest)] = None
+    elif tag == _RE:
+        state = item[1].step(item[2], byte)
+        if state >= 0:
+            out[((_RE, item[1], state), rest)] = None
 
 
 class Grammar:
@@ -452,6 +462,13 @@ class Grammar:
     def json_object(cls) -> Grammar:
         """Any JSON object (OpenAI ``response_format: {"type": "json_object"}``)."""
         return cls([_value(_FREE_OBJECT)])
+
+    @classmethod
+    def regex(cls, pattern: str) -> Grammar:
+        """Text matching ``pattern`` in full (:mod:`etalii_dllm.regexp` lists the supported syntax)."""
+        from etalii_dllm.regexp import compile_regex
+
+        return cls([(_RE, compile_regex(pattern), 0)])
 
     @classmethod
     def literal(cls, text: str) -> Grammar:

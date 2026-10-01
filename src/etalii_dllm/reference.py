@@ -554,15 +554,68 @@ def fill_gaussian(seed: int, n: int) -> np.ndarray:
 
 
 class Sampler:
-    """Greedy (temperature 0) or: logits divided by the temperature in float, softmax, candidates ordered by
-    (probability descending, id ascending), top-k, top-p (the shortest prefix reaching ``top_p``), then one
-    ``next_double()`` scaled by the kept mass picks the first candidate whose running sum exceeds it."""
+    """Logit bias and penalties first, one token at a time in float: ``x + bias``; for the repetition penalty ``r``
+    over the distinct tokens among the last ``repeat_last_n`` of prompt and output, ``x / r`` when ``x > 0`` else
+    ``x * r``; ``x - (count * frequency + presence)`` (the penalty in double, rounded to float) for the tokens the
+    output holds. Then greedy (temperature 0) or: logits divided by the temperature in float, softmax, candidates
+    ordered by (probability descending, id ascending), top-k, top-p (the shortest prefix reaching ``top_p``),
+    min-p (candidates below ``min_p`` times the first are dropped), then one ``next_double()`` scaled by the kept
+    mass picks the first candidate whose running sum exceeds it. :meth:`begin` sets the prompt, :meth:`accept`
+    records each generated token."""
 
-    def __init__(self, temperature: float = 0.0, top_k: int = 0, top_p: float = 1.0, seed: int = 0) -> None:
-        self.temperature, self.top_k, self.top_p = temperature, top_k, top_p
+    def __init__(
+        self,
+        temperature: float = 0.0,
+        top_k: int = 0,
+        top_p: float = 1.0,
+        seed: int = 0,
+        *,
+        min_p: float = 0.0,
+        repetition_penalty: float = 1.0,
+        repeat_last_n: int = 64,
+        frequency_penalty: float = 0.0,
+        presence_penalty: float = 0.0,
+        logit_bias: Mapping[int, float] | None = None,
+    ) -> None:
+        self.temperature, self.top_k, self.top_p, self.min_p = temperature, top_k, top_p, min_p
+        self.repetition_penalty, self.repeat_last_n = repetition_penalty, repeat_last_n
+        self.frequency_penalty, self.presence_penalty = frequency_penalty, presence_penalty
+        self.logit_bias = dict(logit_bias or {})
         self._random = Random(seed & _MASK)
+        self._sequence: list[int] = []
+        self._output: list[int] = []
+
+    def begin(self, prompt: Sequence[int]) -> None:
+        self._sequence, self._output = list(prompt), []
+
+    def accept(self, token: int) -> None:
+        self._sequence.append(token)
+        self._output.append(token)
+
+    def _adjusted(self, logits: npt.ArrayLike) -> np.ndarray:
+        values = np.array(logits, dtype=F32)
+        for token, bias in self.logit_bias.items():
+            if token < len(values):
+                values[token] = F32(values[token] + F32(bias))
+        if self.repetition_penalty != 1.0 and self.repeat_last_n != 0:
+            recent = self._sequence if self.repeat_last_n < 0 else self._sequence[-self.repeat_last_n :]
+            r = F32(self.repetition_penalty)
+            for token in set(recent):
+                if 0 <= token < len(values):
+                    x = values[token]
+                    values[token] = F32(x / r) if x > 0 else F32(x * r)
+        if self.frequency_penalty != 0.0 or self.presence_penalty != 0.0:
+            counts: dict[int, int] = {}
+            for token in self._output:
+                counts[token] = counts.get(token, 0) + 1
+            for token, count in counts.items():
+                if 0 <= token < len(values):
+                    penalty = F32(count * self.frequency_penalty + self.presence_penalty)
+                    values[token] = F32(values[token] - penalty)
+        return values
 
     def sample(self, logits: npt.ArrayLike) -> int:
+        logits = self._adjusted(logits)
         if self.temperature == 0:
             return argmax(logits)
         scaled = np.asarray(logits, dtype=F32) / F32(self.temperature)
@@ -578,6 +631,9 @@ class Sampler:
                 if cumulative >= self.top_p:
                     keep = i + 1
                     break
+        if self.min_p > 0:
+            floor = self.min_p * probabilities[order[0]]
+            keep = next((i for i in range(1, keep) if probabilities[order[i]] < floor), keep)
         total = 0.0
         for i in range(keep):
             total += probabilities[order[i]]
@@ -588,6 +644,22 @@ class Sampler:
             if target < running:
                 return order[i]
         return order[keep - 1]
+
+
+def sampler(options: Any) -> Sampler:
+    """A sampler with the settings of an engine ``SamplingOptions`` (only its values are read)."""
+    return Sampler(
+        options.temperature,
+        options.top_k,
+        options.top_p,
+        options.seed,
+        min_p=options.min_p,
+        repetition_penalty=options.repetition_penalty,
+        repeat_last_n=options.repeat_last_n,
+        frequency_penalty=options.frequency_penalty,
+        presence_penalty=options.presence_penalty,
+        logit_bias=dict(options.logit_bias),
+    )
 
 
 # -- the decoder --------------------------------------------------------------------------------------------------
@@ -721,6 +793,7 @@ class ReferenceTransformer:
         """Generates from ``context`` (a fresh context) until a stop token or ``max_tokens``; returns the tokens
         (without the stop token) and the logits each was chosen from."""
         self.reset()
+        sampler.begin(context)
         tokens: list[int] = []
         steps: list[np.ndarray] = []
         logits = self.forward(list(context))
@@ -729,6 +802,7 @@ class ReferenceTransformer:
             steps.append(logits)
             if token in stop_tokens:
                 break
+            sampler.accept(token)
             tokens.append(token)
             if len(tokens) == max_tokens:
                 break

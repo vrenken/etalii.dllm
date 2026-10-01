@@ -39,6 +39,8 @@ from etalii_dllm.tokenization import ByteTokenizer, Tokenizer
 from etalii_dllm.tools import AUTO, Tool, ToolChoice
 
 DEFAULT_MODEL_SEED = 42
+MAX_CHOICES = 16
+"""Most choices one request may ask for (``n``)."""
 MODEL_ENVIRONMENT_VARIABLE = "DLLM_MODEL"
 """Path of a ``model.dllm`` file for the front ends to serve; the placeholder bigram model when unset."""
 ADAPTER_ENVIRONMENT_VARIABLE = "DLLM_ADAPTER"
@@ -75,16 +77,20 @@ AUDIT_EVERY_ENVIRONMENT_VARIABLE = "DLLM_AUDIT_EVERY"
 
 @dataclass(frozen=True)
 class ResponseFormat:
-    """``text`` (free), ``json_object`` (any JSON object) or ``json_schema`` (a value valid under ``schema``)."""
+    """``text`` (free), ``json_object`` (any JSON object), ``json_schema`` (a value valid under ``schema``) or
+    ``regex`` (text matching ``pattern`` in full)."""
 
     type: str = "text"
     schema: Mapping[str, Any] | None = None
+    pattern: str | None = None
 
     def __post_init__(self) -> None:
-        if self.type not in ("text", "json_object", "json_schema"):
+        if self.type not in ("text", "json_object", "json_schema", "regex"):
             raise ValueError(f"unknown response format {self.type!r}")
         if (self.type == "json_schema") != (self.schema is not None):
             raise ValueError("a json_schema response format needs a schema")
+        if (self.type == "regex") != (self.pattern is not None):
+            raise ValueError("a regex response format needs a pattern")
 
     def grammar(self) -> Grammar | None:
         if self.type == "json_object":
@@ -92,7 +98,17 @@ class ResponseFormat:
         if self.type == "json_schema":
             assert self.schema is not None
             return Grammar.json_schema(self.schema)
+        if self.type == "regex":
+            assert self.pattern is not None
+            return Grammar.regex(self.pattern)
         return None
+
+    def record(self) -> dict[str, Any]:
+        """As JSON for receipts and cache keys; ``pattern`` only when set, so older records keep their bytes."""
+        record: dict[str, Any] = {"type": self.type, "schema": self.schema}
+        if self.pattern is not None:
+            record["pattern"] = self.pattern
+        return record
 
 
 TEXT = ResponseFormat()
@@ -356,8 +372,14 @@ class DllmEngine:
     def complete(self, prompt: str, max_tokens: int, options: SamplingOptions) -> GenerationResult:
         return self._generator.generate(prompt, max_tokens, options)
 
-    def complete_stream(self, prompt: str, max_tokens: int, options: SamplingOptions) -> Generation:
-        return self._generator.stream(prompt, max_tokens, options)
+    def complete_stream(
+        self, prompt: str, max_tokens: int, options: SamplingOptions, *, regex: str | None = None
+    ) -> Generation:
+        """Continues ``prompt``; ``regex`` restricts the continuation to text matching it in full."""
+        constraint = None
+        if regex is not None:
+            constraint = TokenConstraint(Grammar.regex(regex), self._token_trie())
+        return self._generator.stream(prompt, max_tokens, options, constraint=constraint)
 
     def count_tokens(self, text: str) -> int:
         return len(self.tokenizer.encode(text))
@@ -527,7 +549,10 @@ class DllmEngine:
         yield Finished(finish_reason, stop_sequence, len(tokens), result.fingerprint, receipt)
 
     def chat_completion(self, request: ChatRequest, *, fresh: bool = False) -> ChatResult:
-        stream = self.chat_stream(request, fresh=fresh)
+        return self._collect(self.chat_stream(request, fresh=fresh))
+
+    @staticmethod
+    def _collect(stream: ChatStream) -> ChatResult:
         content: list[str] = []
         calls: list[ToolCall] = []
         logprobs: list[TokenLogprobs] = []
@@ -553,6 +578,29 @@ class DllmEngine:
             stream.cached_tokens,
             finished.receipt,
         )
+
+    @staticmethod
+    def choice_request(request: ChatRequest, index: int) -> ChatRequest:
+        """Choice ``index`` of a request asking for several: the same request with the seed ``seed + index``
+        (:meth:`SamplingOptions.for_choice`), so each choice is exactly what a single request with that seed
+        answers."""
+        return request if index == 0 else replace(request, options=request.options.for_choice(index))
+
+    def chat_choices(self, request: ChatRequest, n: int) -> list[ChatResult]:
+        """``n`` choices (:meth:`choice_request`), in index order. They run concurrently, so a model that batches
+        decodes them in shared steps, which never changes a bit of any of them."""
+        if not 1 <= n <= MAX_CHOICES:
+            raise ValueError(f"n must be between 1 and {MAX_CHOICES}")
+        requests = [self.choice_request(request, i) for i in range(n)]
+        first = self.chat_stream(requests[0])  # raises for invalid requests before anything runs
+        if n == 1:
+            return [self._collect(first)]
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=n) as pool:
+            rest = [pool.submit(self.chat_completion, r) for r in requests[1:]]
+            results = [self._collect(first)]
+            return results + [future.result() for future in rest]
 
     # -- embeddings ---------------------------------------------------------------------------------------------
 

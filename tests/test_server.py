@@ -159,7 +159,7 @@ def test_embeddings(sdk, client):
 @pytest.mark.parametrize(
     "body",
     [
-        {"messages": [{"role": "user", "content": "x"}], "n": 2},
+        {"messages": [{"role": "user", "content": "x"}], "n": 17},
         {"messages": [{"role": "user", "content": "x"}], "tool_choice": "required"},
         {"messages": [{"role": "user", "content": "x"}], "response_format": {"type": "json_schema"}},
         {"messages": [{"role": "user", "content": "x"}], "logprobs": True, "top_logprobs": 50},

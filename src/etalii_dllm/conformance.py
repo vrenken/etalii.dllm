@@ -138,6 +138,16 @@ def cases() -> list[tuple[str, str, dict[str, Any], Arrays]]:
         "sample-top-k-top-p": {"temperature": 1.3, "top_k": 50, "top_p": 0.9, "seed": 11},
     }.items():
         items.append((name, "sample", options, {"logits": logits}))
+    history = np.array([int(np.argmax(row)) for row in logits[::3]], dtype=np.int64)
+    for name, options in {
+        "sample-penalties": {"temperature": 1.0, "top_k": 0, "top_p": 1.0, "seed": 5, "min_p": 0.05,
+                             "repetition_penalty": 1.3, "repeat_last_n": 8, "frequency_penalty": 0.5,
+                             "presence_penalty": 0.25, "logit_bias": [[3, 2.5], [200, -1.0]]},
+        "sample-penalties-greedy": {"temperature": 0.0, "top_k": 0, "top_p": 1.0, "seed": 0,
+                                    "repetition_penalty": 1.5, "repeat_last_n": -1, "frequency_penalty": 0.3,
+                                    "logit_bias": [[7, 1.0]]},
+    }.items():  # fmt: skip
+        items.append((name, "sample_controls", options, {"logits": logits, "prompt": history}))
     tokens = np.array([5, 17, 3, 90, 41, 41, 8, 12, 77], dtype=np.int64)
     for name in DECODERS:
         for quantize in (None, "q8_0"):
@@ -214,6 +224,13 @@ def _kernels(kernel: str, params: Mapping[str, Any], inputs: Arrays) -> Arrays:
     if kernel == "sample":
         sampler = Sampler(SamplingOptions(params["temperature"], params["top_k"], params["top_p"], params["seed"]))
         return {"tokens": np.array([sampler.sample(row) for row in inputs["logits"]], dtype=np.int64)}
+    if kernel == "sample_controls":
+        sampler = Sampler(SamplingOptions.from_record(params), [int(t) for t in inputs["prompt"]])
+        tokens = []
+        for row in inputs["logits"]:
+            tokens.append(sampler.sample(row))
+            sampler.accept(tokens[-1])
+        return {"tokens": np.array(tokens, dtype=np.int64)}
     if kernel == "decoder":
         from etalii_dllm.architecture import TransformerConfig
         from etalii_dllm.transformer import Transformer
@@ -279,6 +296,16 @@ def _reference(kernel: str, params: Mapping[str, Any], inputs: Arrays) -> Arrays
     if kernel == "sample":
         sampler = r.Sampler(params["temperature"], params["top_k"], params["top_p"], params["seed"])
         return {"tokens": np.array([sampler.sample(row) for row in inputs["logits"]], dtype=np.int64)}
+    if kernel == "sample_controls":
+        controls = {k: v for k, v in params.items() if k not in ("temperature", "top_k", "top_p", "seed")}
+        controls["logit_bias"] = {int(t): float(b) for t, b in controls.get("logit_bias", [])}
+        sampler = r.Sampler(params["temperature"], params["top_k"], params["top_p"], params["seed"], **controls)
+        sampler.begin([int(t) for t in inputs["prompt"]])
+        tokens = []
+        for row in inputs["logits"]:
+            tokens.append(sampler.sample(row))
+            sampler.accept(tokens[-1])
+        return {"tokens": np.array(tokens, dtype=np.int64)}
     if kernel == "decoder":
         from etalii_dllm.architecture import TransformerConfig
 

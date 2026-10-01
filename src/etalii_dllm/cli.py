@@ -12,6 +12,7 @@ from typing import Any
 from etalii_dllm import cuda
 from etalii_dllm.chat import ChatMessage
 from etalii_dllm.engine import (
+    MAX_CHOICES,
     MODEL_ENVIRONMENT_VARIABLE,
     ChatRequest,
     DllmEngine,
@@ -219,6 +220,9 @@ def main(argv: list[str] | None = None) -> int:
 
     generate = commands.add_parser("generate", help="continue a prompt")
     generate.add_argument("--prompt", default="")
+    generate.add_argument(
+        "--n", type=int, default=1, help="generate N choices; choice i samples with seed SEED+i (default 1)"
+    )
     chat = commands.add_parser("chat", help="answer a message using the model's chat template")
     chat.add_argument("message")
     chat.add_argument("--system", help="system message")
@@ -250,6 +254,17 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("--top-k", type=int, default=0)
         command.add_argument("--top-p", type=float, default=1.0)
         command.add_argument("--seed", type=int, default=0)
+        command.add_argument("--min-p", type=float, default=0.0, help="drop tokens below MIN_P times the top one")
+        command.add_argument("--repetition-penalty", type=float, default=1.0, help="penalise recent tokens (1: off)")
+        command.add_argument(
+            "--repeat-last-n", type=int, default=64, help="tokens the repetition penalty looks at (-1: all)"
+        )
+        command.add_argument("--frequency-penalty", type=float, default=0.0)
+        command.add_argument("--presence-penalty", type=float, default=0.0)
+        command.add_argument(
+            "--logit-bias", action="append", default=[], metavar="TOKEN=BIAS", help="add BIAS to a token (repeatable)"
+        )
+        command.add_argument("--regex", help="only produce text matching this regular expression in full")
 
     evaluate = commands.add_parser("eval", help="score the model on a task file: perplexity or multiple choice")
     evaluate.add_argument("task", metavar="TASK", help=".jsonl ({'context','choices','answer'} or {'text'}) or .txt")
@@ -478,19 +493,56 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "index":
         return _index(args, engine)
 
-    options = SamplingOptions(temperature=args.temperature, top_k=args.top_k, top_p=args.top_p, seed=args.seed)
+    try:
+        options = _sampling_options(args)
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
     if args.command == "chat":
         return _chat(engine, args, options)
-    generation = engine.complete_stream(args.prompt, args.max_tokens, options)
-    for step in generation:
-        _write(step.text)
-    result = generation.result()
-    _write("\n")
-    print(
-        f"fingerprint: {result.fingerprint}  tokens: {len(result.tokens)}  finish: {result.finish_reason}",
-        file=sys.stderr,
-    )
+    if not 1 <= args.n <= MAX_CHOICES:
+        print(f"error: --n must be between 1 and {MAX_CHOICES}", file=sys.stderr)
+        return 2
+    for index in range(args.n):
+        if args.n > 1:
+            print(f"--- choice {index} (seed {options.for_choice(index).seed})", file=sys.stderr)
+        try:
+            generation = engine.complete_stream(
+                args.prompt, args.max_tokens, options.for_choice(index), regex=args.regex
+            )
+        except ValueError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+        for step in generation:
+            _write(step.text)
+        result = generation.result()
+        _write("\n")
+        print(
+            f"fingerprint: {result.fingerprint}  tokens: {len(result.tokens)}  finish: {result.finish_reason}",
+            file=sys.stderr,
+        )
     return 0
+
+
+def _sampling_options(args: argparse.Namespace) -> SamplingOptions:
+    bias: dict[int, float] = {}
+    for item in args.logit_bias:
+        token, separator, value = item.partition("=")
+        if not separator:
+            raise ValueError(f"--logit-bias expects TOKEN=BIAS, not {item!r}")
+        bias[int(token)] = float(value)
+    return SamplingOptions(
+        temperature=args.temperature,
+        top_k=args.top_k,
+        top_p=args.top_p,
+        seed=args.seed,
+        min_p=args.min_p,
+        repetition_penalty=args.repetition_penalty,
+        repeat_last_n=args.repeat_last_n,
+        frequency_penalty=args.frequency_penalty,
+        presence_penalty=args.presence_penalty,
+        logit_bias=SamplingOptions.bias(bias),
+    )
 
 
 def _index_model(path: str) -> str | None:
@@ -892,6 +944,11 @@ def _chat(engine: DllmEngine, args: argparse.Namespace, options: SamplingOptions
         except (OSError, json.JSONDecodeError) as error:
             print(f"dllm chat: --json-schema: {error}", file=sys.stderr)
             return 1
+    if args.regex is not None:
+        if args.json or args.json_schema:
+            print("dllm chat: --regex cannot be combined with --json or --json-schema", file=sys.stderr)
+            return 1
+        response_format = ResponseFormat("regex", pattern=args.regex)
     messages = [ChatMessage("system", args.system)] if args.system else []
     request = ChatRequest(
         [*messages, ChatMessage("user", args.message)], args.max_tokens, options, response_format=response_format

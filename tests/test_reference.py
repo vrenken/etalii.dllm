@@ -219,7 +219,13 @@ def test_reference_generation_matches_the_engine(tmp_path):
     engine = DllmEngine.from_model_file(_import(tmp_path, tokenizer=BYTE_LEVEL_TOKENIZER, vocabulary=264))
     check = verify.check_reference(engine, max_tokens=6)
     assert check.equal, check.results
-    assert check.as_dict() == {"equal": True, "logits": "equal", "greedy": "equal", "sampled": "equal"}
+    assert check.as_dict() == {
+        "equal": True,
+        "logits": "equal",
+        "greedy": "equal",
+        "sampled": "equal",
+        "controlled": "equal",
+    }
 
 
 def test_reference_check_reports_where_the_bits_part(tmp_path, monkeypatch):

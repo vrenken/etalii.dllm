@@ -38,6 +38,7 @@ from etalii_dllm.engine import (
 )
 from etalii_dllm.generation import TokenLogprobs
 from etalii_dllm.sampling import SamplingOptions
+from etalii_dllm.server.contracts import id_payload
 from etalii_dllm.tools import Tool, ToolChoice
 
 Engine = Annotated[DllmEngine, Depends(default_engine)]
@@ -61,6 +62,11 @@ class Options(BaseModel):
     top_p: float | None = None
     num_predict: int | None = None
     stop: list[str] | None = None
+    min_p: float | None = None
+    repeat_penalty: float | None = None
+    repeat_last_n: int | None = None
+    frequency_penalty: float | None = None
+    presence_penalty: float | None = None
 
 
 class OllamaFunctionCall(BaseModel):
@@ -149,6 +155,11 @@ def _options(body: _GenerateBase, engine: DllmEngine) -> tuple[SamplingOptions, 
         top_k=options.top_k or 0,
         top_p=options.top_p if options.top_p is not None else 1.0,
         seed=options.seed or 0,
+        min_p=options.min_p or 0.0,
+        repetition_penalty=options.repeat_penalty if options.repeat_penalty is not None else 1.0,
+        repeat_last_n=options.repeat_last_n if options.repeat_last_n is not None else 64,
+        frequency_penalty=options.frequency_penalty or 0.0,
+        presence_penalty=options.presence_penalty or 0.0,
     )
     context = getattr(getattr(engine.model, "config", None), "context_length", 0) or DEFAULT_NUM_PREDICT
     limit = min(DEFAULT_NUM_PREDICT, context)
@@ -211,7 +222,7 @@ def _chat_request(body: ChatBody, engine: DllmEngine) -> ChatRequest:
         raise ValueError("'messages' must contain at least one message")
     options, max_tokens, stop = _options(body, engine)
     request_id = engine.derive_id(
-        "ollama-", body.model_dump(mode="json", exclude={"stream", "receipt", "previous_receipt"})
+        "ollama-", id_payload(body.model_dump(mode="json", exclude={"stream", "receipt", "previous_receipt"}))
     )
     return ChatRequest(
         messages=_messages(body.messages),
@@ -236,7 +247,7 @@ def _generate_request(body: GenerateBody, engine: DllmEngine) -> ChatRequest:
     messages = [ChatMessage("system", body.system)] if body.system else []
     messages.append(ChatMessage("user", body.prompt or ""))
     request_id = engine.derive_id(
-        "ollama-", body.model_dump(mode="json", exclude={"stream", "receipt", "previous_receipt"})
+        "ollama-", id_payload(body.model_dump(mode="json", exclude={"stream", "receipt", "previous_receipt"}))
     )
     return ChatRequest(
         messages=messages,

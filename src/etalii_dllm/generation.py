@@ -172,7 +172,7 @@ class Generation:
     ) -> Iterator[Step]:
         model, tokenizer = generator.model, generator.tokenizer
         stop = [s for s in stop if s]
-        sampler = Sampler(options)
+        sampler = Sampler(options, context)
         data = bytearray()
         strip_leading_space = self._strip_leading_space
         emitted = ""
@@ -211,6 +211,7 @@ class Generation:
                 draft, pending = [], []
             if constraint is not None:
                 constraint.accept(token)
+            sampler.accept(token)
             self._tokens.append(token)
             context.append(token)
             logprobs = self._logprobs_of(logits, token, top_logprobs) if top_logprobs is not None else None
@@ -349,6 +350,9 @@ class Generator:
             raise ValueError("max_tokens must be non-negative")
         if top_logprobs is not None and not 0 <= top_logprobs <= MAX_TOP_LOGPROBS:
             raise ValueError(f"top_logprobs must be between 0 and {MAX_TOP_LOGPROBS}")
+        vocabulary = getattr(self.model, "vocabulary_size", None)
+        if vocabulary is not None and any(token >= vocabulary for token, _ in options.logit_bias):
+            raise ValueError(f"logit_bias token ids must be below the vocabulary size {vocabulary}")
         context = self.tokenizer.encode(prompt) if isinstance(prompt, str) else list(prompt)
         return Generation(self, context, max_tokens, options, stop, constraint, top_logprobs, new_text)
 
