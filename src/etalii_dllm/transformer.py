@@ -14,7 +14,7 @@ bits, so the logits, and the ``system_fingerprint``, do not depend on the device
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 import numpy as np
@@ -191,6 +191,7 @@ class Transformer:
         quantize: str | None = None,
         device: str = "cpu",
         steering: Mapping[int, npt.ArrayLike] | None = None,
+        release: Callable[[str], None] | None = None,
     ) -> None:
         """``steering`` maps 0-based layer indices to vectors ``[hidden]`` added (elementwise, float32) to the
         residual stream after that layer at every position (activation steering); it changes the output and so the
@@ -244,11 +245,15 @@ class Transformer:
         for name, tensor in weights.items():
             if name.endswith(_MATRICES):
                 self._w[name] = _prepare(tensor, quantize, self.device)
+                if release is not None:
+                    release(name)
             elif self.device == "cuda" and name not in ("token_embedding.weight", "lm_head.weight"):
                 self._w[name] = CudaTensor.upload(tensor.numpy())
             else:
                 self._w[name] = tensor
         self._lm_head = _prepare(head, quantize, self.device)
+        if release is not None:
+            release("token_embedding.weight" if config.tie_word_embeddings else "lm_head.weight")
         self._inv_freq = rope_inv_freq(
             config.head_dim, config.rope_theta, rotary_dim=config.rotary_dimension, scaling=config.rope_scaling
         )
@@ -280,6 +285,7 @@ class Transformer:
             quantize=quantize,
             device=device,
             steering=steering,
+            release=model.release,
         )
 
     @property

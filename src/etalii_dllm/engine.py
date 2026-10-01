@@ -257,6 +257,7 @@ class DllmEngine:
             quantize=quantize,
             device=device,
             steering=steering,
+            release=file.release if tensors is file.tensors else None,
         )
         tokenizer = from_model_header(file.tokenizer)
         template = None
@@ -275,7 +276,12 @@ class DllmEngine:
             if _vocabulary(draft.tokenizer) != _vocabulary(file.tokenizer):
                 raise ValueError(f"{draft_model}: the draft model's tokenizer differs from the model's")
             drafter = Transformer(
-                draft.config, draft.tensors, weights_fingerprint=draft.fingerprint, quantize=quantize, device=device
+                draft.config,
+                draft.tensors,
+                weights_fingerprint=draft.fingerprint,
+                quantize=quantize,
+                device=device,
+                release=draft.release,
             )
             if speculate is None:
                 speculate = DEFAULT_DRAFT_TOKENS
