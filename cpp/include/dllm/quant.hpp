@@ -59,6 +59,51 @@ inline void quantize_q8_0(const float* x, std::int8_t* q, float* scales, std::si
     }
 }
 
+// Q4_0: blocks of 32 values share a float32 scale, like Q8_0, with 4-bit values. Quantising a block:
+// amax = max |x_i| (float), d = amax / 7 (float division), q_i = round(x_i * (1 / d)) with the round-half-to-even of
+// Q8_0, clamped to +-7. A block is stored in 16 bytes: byte j holds q_j + 8 in its low and q_(j+16) + 8 in its high
+// four bits. linear_q4 unpacks the values to int8 and then runs exactly the Q8_0 computation (activations quantised
+// to Q8_0, exact int32 block sums, combined in double over blocks ascending), so its order is that of linear_q8.
+constexpr std::size_t kQ4BlockBytes = kQ8Block / 2;
+
+// Quantises n values (n a multiple of kQ8Block) into packed[n / 2] and scales[n / kQ8Block].
+inline void quantize_q4_0(const float* x, std::uint8_t* packed, float* scales, std::size_t n) {
+    for (std::size_t b = 0; b * kQ8Block < n; ++b) {
+        const float* xb = x + b * kQ8Block;
+        float amax = 0.0f;
+        for (std::size_t i = 0; i < kQ8Block; ++i) {
+            const float a = std::fabs(xb[i]);
+            if (a > amax && std::isfinite(a)) {
+                amax = a;
+            }
+        }
+        const float d = amax / 7.0f;
+        const float id = d != 0.0f ? 1.0f / d : 0.0f;
+        scales[b] = d;
+        int q[kQ8Block];
+        for (std::size_t i = 0; i < kQ8Block; ++i) {
+            float v = std::isfinite(xb[i]) ? round_half_even(xb[i] * id) : 0.0f;
+            v = v > 7.0f ? 7.0f : (v < -7.0f ? -7.0f : v);
+            q[i] = static_cast<int>(v);
+        }
+        for (std::size_t j = 0; j < kQ4BlockBytes; ++j) {
+            packed[b * kQ4BlockBytes + j] = static_cast<std::uint8_t>((q[j] + 8) | ((q[j + kQ4BlockBytes] + 8) << 4));
+        }
+    }
+}
+
+// The int8 values of n packed Q4_0 values (n a multiple of kQ8Block).
+inline void unpack_q4_0(const std::uint8_t* packed, std::int8_t* values, std::size_t n) {
+    for (std::size_t b = 0; b * kQ8Block < n; ++b) {
+        const std::uint8_t* src = packed + b * kQ4BlockBytes;
+        std::int8_t* dst = values + b * kQ8Block;
+        for (std::size_t j = 0; j < kQ4BlockBytes; ++j) {
+            dst[j] = static_cast<std::int8_t>((src[j] & 0x0F) - 8);
+            dst[j + kQ4BlockBytes] = static_cast<std::int8_t>((src[j] >> 4) - 8);
+        }
+    }
+}
+
 // Exact int32 sum of the 32 products of two int8 blocks (values in [-128, 127]): SSE2 on x86-64, NEON on arm64.
 inline std::int32_t q8_block_dot(const std::int8_t* xb, const std::int8_t* wb) {
 #if defined(DLLM_SSE2)
@@ -95,7 +140,8 @@ inline std::int32_t q8_block_dot(const std::int8_t* xb, const std::int8_t* wb) {
 #endif
 }
 
-// Rows [0, rows) of the outputs [n0, n0 + 16) of a Q8_0 linear layer, with the given exact block dot product.
+// Rows [0, rows) of the outputs [n0, n0 + 16) of a Q8_0 linear layer, with the given exact block dot product. wq and
+// ws point at the panel's first output (row n0 of the weights and scales).
 template <std::int32_t (*Dot)(const std::int8_t*, const std::int8_t*)>
 DLLM_ALWAYS_INLINE void linear_q8_panel(const std::int8_t* xq, const float* xs, const std::int8_t* wq,
                                         const float* ws, const float* bias, float* out, std::size_t rows,
@@ -107,8 +153,8 @@ DLLM_ALWAYS_INLINE void linear_q8_panel(const std::int8_t* xq, const float* xs, 
         const float* xsr = xs + r * blocks;
         for (std::size_t j = 0; j < width; ++j) {
             const std::size_t n = n0 + j;
-            const std::int8_t* wn = wq + n * in_features;
-            const float* wsn = ws + n * blocks;
+            const std::int8_t* wn = wq + j * in_features;
+            const float* wsn = ws + j * blocks;
             double acc = 0.0;
             for (std::size_t b = 0; b < blocks; ++b) {
                 const std::int32_t isum = Dot(xr + b * kQ8Block, wn + b * kQ8Block);
@@ -143,6 +189,17 @@ DLLM_TARGET_AVX2 inline __m256i q8_partial_sums_avx2(__m256i x, __m256i w) {
 DLLM_TARGET_AVX2 inline __m128i q8_totals_avx2(__m256i q0, __m256i q1, __m256i q2, __m256i q3) {
     const __m256i h = _mm256_hadd_epi32(_mm256_hadd_epi32(q0, q1), _mm256_hadd_epi32(q2, q3));
     return _mm_add_epi32(_mm256_castsi256_si128(h), _mm256_extracti128_si256(h, 1));
+}
+
+// unpack_q4_0 with AVX2: 16 bytes become the 32 int8 values of a block.
+DLLM_TARGET_AVX2 inline void unpack_q4_0_avx2(const std::uint8_t* packed, std::int8_t* values, std::size_t n) {
+    for (std::size_t b = 0; b * kQ8Block < n; ++b) {
+        const __m128i bytes = _mm_loadu_si128(reinterpret_cast<const __m128i*>(packed + b * kQ4BlockBytes));
+        const __m128i low = _mm_and_si128(bytes, _mm_set1_epi8(0x0F));
+        const __m128i high = _mm_and_si128(_mm_srli_epi16(bytes, 4), _mm_set1_epi8(0x0F));
+        const __m256i w = _mm256_sub_epi8(_mm256_set_m128i(high, low), _mm256_set1_epi8(8));
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(values + b * kQ8Block), w);
+    }
 }
 
 struct Q8TileArgs {
@@ -187,21 +244,30 @@ DLLM_TARGET_AVX2 inline void q8_tile_avx2(const Q8TileArgs& a, double (&result)[
     }
 }
 
-DLLM_TARGET_AVX2 inline void linear_q8_panel_avx2(const std::int8_t* xq, const float* xs, const std::int8_t* wq,
-                                                  const float* ws, const float* bias, float* out, std::size_t rows,
-                                                  std::size_t in_features, std::size_t out_features,
-                                                  std::size_t n0) {
+template <bool Q4>
+DLLM_TARGET_AVX2 inline void linear_quant_panel_avx2(const std::int8_t* xq, const float* xs, const std::uint8_t* wq,
+                                                     const float* ws, const float* bias, float* out, std::size_t rows,
+                                                     std::size_t in_features, std::size_t out_features,
+                                                     std::size_t n0) {
+    const std::size_t row_bytes = Q4 ? in_features / 2 : in_features;
     const std::size_t width = n0 + 16 <= out_features ? 16 : out_features - n0;
     const std::size_t blocks = in_features / kQ8Block;
     thread_local std::vector<double> scales;
+    thread_local std::vector<std::int8_t> unpacked;  // Q4: the four outputs' values as int8
     scales.resize(blocks * 4);
+    unpacked.resize(Q4 ? 4 * in_features : 0);
     for (std::size_t g = 0; g < width; g += 4) {
         Q8TileArgs args{nullptr, nullptr, {}, scales.data(), in_features, blocks};
         for (std::size_t j = 0; j < 4; ++j) {
-            const std::size_t n = n0 + (g + j < width ? g + j : g);  // past the last output: repeat one, unused
-            args.w[j] = wq + n * in_features;
+            const std::size_t k = g + j < width ? g + j : g;  // past the last output: repeat one, unused
+            if constexpr (Q4) {
+                unpack_q4_0_avx2(wq + k * row_bytes, unpacked.data() + j * in_features, in_features);
+                args.w[j] = unpacked.data() + j * in_features;
+            } else {
+                args.w[j] = reinterpret_cast<const std::int8_t*>(wq + k * row_bytes);
+            }
             for (std::size_t b = 0; b < blocks; ++b) {
-                scales[b * 4 + j] = ws[n * blocks + b];
+                scales[b * 4 + j] = ws[k * blocks + b];
             }
         }
         const std::size_t end = g + 4 < width ? g + 4 : width;
@@ -229,6 +295,21 @@ DLLM_TARGET_AVX2 inline void linear_q8_panel_avx2(const std::int8_t* xq, const f
         }
     }
 }
+
+DLLM_TARGET_AVX2 inline void linear_q8_panel_avx2(const std::int8_t* xq, const float* xs, const std::int8_t* wq,
+                                                  const float* ws, const float* bias, float* out, std::size_t rows,
+                                                  std::size_t in_features, std::size_t out_features,
+                                                  std::size_t n0) {
+    linear_quant_panel_avx2<false>(xq, xs, reinterpret_cast<const std::uint8_t*>(wq), ws, bias, out, rows,
+                                   in_features, out_features, n0);
+}
+
+DLLM_TARGET_AVX2 inline void linear_q4_panel_avx2(const std::int8_t* xq, const float* xs, const std::uint8_t* wq,
+                                                  const float* ws, const float* bias, float* out, std::size_t rows,
+                                                  std::size_t in_features, std::size_t out_features,
+                                                  std::size_t n0) {
+    linear_quant_panel_avx2<true>(xq, xs, wq, ws, bias, out, rows, in_features, out_features, n0);
+}
 #endif
 
 inline LinearQ8PanelFn linear_q8_panel_kernel() {
@@ -243,6 +324,46 @@ inline LinearQ8PanelFn linear_q8_panel_kernel() {
     return linear_q8_panel_portable;
 }
 
+using LinearQ4PanelFn = void (*)(const std::int8_t*, const float*, const std::uint8_t*, const float*, const float*,
+                                 float*, std::size_t, std::size_t, std::size_t, std::size_t);
+
+// The baseline Q4_0 panel: the panel's weights unpacked to int8, then the baseline Q8_0 panel.
+inline void linear_q4_panel_portable(const std::int8_t* xq, const float* xs, const std::uint8_t* wq, const float* ws,
+                                     const float* bias, float* out, std::size_t rows, std::size_t in_features,
+                                     std::size_t out_features, std::size_t n0) {
+    const std::size_t width = n0 + 16 <= out_features ? 16 : out_features - n0;
+    thread_local std::vector<std::int8_t> panel;
+    panel.resize(16 * in_features);
+    unpack_q4_0(wq, panel.data(), width * in_features);
+    linear_q8_panel_portable(xq, xs, panel.data(), ws, bias, out, rows, in_features, out_features, n0);
+}
+
+inline LinearQ4PanelFn linear_q4_panel_kernel() {
+#ifdef DLLM_X86_DISPATCH
+    switch (active_isa()) {
+        case Isa::avx2:
+            return linear_q4_panel_avx2;
+        default:
+            break;
+    }
+#endif
+    return linear_q4_panel_portable;
+}
+
+// Quantises the activations x[rows][in_features] for the Q8_0 and Q4_0 kernels, rows in blocks on the pool.
+inline void quantize_rows_q8_0(const float* x, std::int8_t* xq, float* xs, std::size_t rows, std::size_t in_features) {
+    constexpr std::size_t kRows = 64;
+    const std::size_t blocks = in_features / kQ8Block;
+    parallel_for((rows + kRows - 1) / kRows, [&](std::size_t block) {
+        for (std::size_t r = block * kRows; r < rows && r < (block + 1) * kRows; ++r) {
+            quantize_q8_0(x + r * in_features, xq + r * in_features, xs + r * blocks, in_features);
+        }
+    });
+}
+
+// Rows are processed in blocks of kQuantRows so a block of activations stays in cache while it meets every panel.
+constexpr std::size_t kQuantRows = 64;
+
 // out[rows, out_features] = Q8_0 linear of x[rows, in_features] (in_features a multiple of 32) with weights
 // wq[out_features, in_features] and scales ws[out_features, in_features / 32].
 inline void linear_q8(const float* x, const std::int8_t* wq, const float* ws, const float* bias, float* out,
@@ -250,21 +371,36 @@ inline void linear_q8(const float* x, const std::int8_t* wq, const float* ws, co
     const std::size_t blocks = in_features / kQ8Block;
     std::vector<std::int8_t> xq(rows * in_features);
     std::vector<float> xs(rows * blocks);
-    constexpr std::size_t kRows = 64;
-    const std::size_t row_blocks = (rows + kRows - 1) / kRows;
-    parallel_for(row_blocks, [&](std::size_t block) {
-        for (std::size_t r = block * kRows; r < rows && r < (block + 1) * kRows; ++r) {
-            quantize_q8_0(x + r * in_features, xq.data() + r * in_features, xs.data() + r * blocks, in_features);
-        }
-    });
+    quantize_rows_q8_0(x, xq.data(), xs.data(), rows, in_features);
     const LinearQ8PanelFn kernel = linear_q8_panel_kernel();
     const std::size_t panels = (out_features + 15) / 16;
+    const std::size_t row_blocks = (rows + kQuantRows - 1) / kQuantRows;
     parallel_for(panels * row_blocks, [&](std::size_t task) {
         const std::size_t p = task % panels;
-        const std::size_t r0 = (task / panels) * kRows;
-        const std::size_t count = r0 + kRows <= rows ? kRows : rows - r0;
-        kernel(xq.data() + r0 * in_features, xs.data() + r0 * blocks, wq, ws, bias, out + r0 * out_features, count,
-               in_features, out_features, p * 16);
+        const std::size_t r0 = (task / panels) * kQuantRows;
+        const std::size_t count = r0 + kQuantRows <= rows ? kQuantRows : rows - r0;
+        kernel(xq.data() + r0 * in_features, xs.data() + r0 * blocks, wq + p * 16 * in_features, ws + p * 16 * blocks,
+               bias, out + r0 * out_features, count, in_features, out_features, p * 16);
+    });
+}
+
+// out[rows, out_features] = Q4_0 linear of x[rows, in_features] with packed weights wq[out_features, in_features / 2]
+// and scales ws[out_features, in_features / 32]: the bits of linear_q8 with the weights unpacked to int8.
+inline void linear_q4(const float* x, const std::uint8_t* wq, const float* ws, const float* bias, float* out,
+                      std::size_t rows, std::size_t in_features, std::size_t out_features) {
+    const std::size_t blocks = in_features / kQ8Block;
+    std::vector<std::int8_t> xq(rows * in_features);
+    std::vector<float> xs(rows * blocks);
+    quantize_rows_q8_0(x, xq.data(), xs.data(), rows, in_features);
+    const LinearQ4PanelFn kernel = linear_q4_panel_kernel();
+    const std::size_t panels = (out_features + 15) / 16;
+    const std::size_t row_blocks = (rows + kQuantRows - 1) / kQuantRows;
+    parallel_for(panels * row_blocks, [&](std::size_t task) {
+        const std::size_t p = task % panels;
+        const std::size_t r0 = (task / panels) * kQuantRows;
+        const std::size_t count = r0 + kQuantRows <= rows ? kQuantRows : rows - r0;
+        kernel(xq.data() + r0 * in_features, xs.data() + r0 * blocks, wq + p * 16 * (in_features / 2),
+               ws + p * 16 * blocks, bias, out + r0 * out_features, count, in_features, out_features, p * 16);
     });
 }
 

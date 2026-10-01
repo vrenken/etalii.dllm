@@ -299,6 +299,63 @@ NB_MODULE(_kernels, module) {
         "Q8_0 linear: activations quantised per 32-block, exact int32 block sums, combined in double in block order.");
 
     m.def(
+        "quantize_q4_0",
+        [](FloatMatrix w) {
+            const std::size_t rows = w.shape(0);
+            const std::size_t cols = w.shape(1);
+            require(cols % dllm::kQ8Block == 0, "Q4_0 needs in_features to be a multiple of 32");
+            std::int8_t* q;
+            float* scales;
+            auto q_array = make_int8_array({rows, cols / 2}, &q);
+            auto s_array = make_array({rows, cols / dllm::kQ8Block}, &scales);
+            nb::gil_scoped_release release;
+            for (std::size_t r = 0; r < rows; ++r) {
+                dllm::quantize_q4_0(w.data() + r * cols, reinterpret_cast<std::uint8_t*>(q) + r * (cols / 2),
+                                    scales + r * (cols / dllm::kQ8Block), cols);
+            }
+            return std::make_tuple(q_array, s_array);
+        },
+        nb::arg("weight"),
+        "(packed 4-bit values as bytes [out, in / 2], float32 scales [out, in / 32]) of a Q4_0 quantised matrix.");
+
+    m.def(
+        "unpack_q4_0",
+        [](Int8Matrix q) {
+            const std::size_t rows = q.shape(0);
+            const std::size_t cols = q.shape(1) * 2;
+            require(cols % dllm::kQ8Block == 0, "Q4_0 needs in_features to be a multiple of 32");
+            std::int8_t* values;
+            auto array = make_int8_array({rows, cols}, &values);
+            nb::gil_scoped_release release;
+            dllm::unpack_q4_0(reinterpret_cast<const std::uint8_t*>(q.data()), values, rows * cols);
+            return array;
+        },
+        nb::arg("q"), "The int8 values [out, in] of packed Q4_0 values [out, in / 2].");
+
+    m.def(
+        "linear_q4",
+        [](FloatTensor x, Int8Matrix q, FloatMatrix scales, std::optional<FloatVector> bias) {
+            require(x.ndim() >= 1, "x must have at least one dimension");
+            const std::size_t in_features = x.shape(x.ndim() - 1);
+            const std::size_t out_features = q.shape(0);
+            require(q.shape(1) * 2 == in_features, "weight in_features does not match the last dimension of x");
+            require(in_features % dllm::kQ8Block == 0, "Q4_0 needs in_features to be a multiple of 32");
+            require(scales.shape(0) == out_features && scales.shape(1) == in_features / dllm::kQ8Block,
+                    "scales must be [out_features, in_features / 32]");
+            require(!bias || bias->shape(0) == out_features, "bias length must equal out_features");
+            auto shape = shape_of(x);
+            shape.back() = out_features;
+            float* out;
+            auto result = make_array(shape, &out);
+            nb::gil_scoped_release release;
+            dllm::linear_q4(x.data(), reinterpret_cast<const std::uint8_t*>(q.data()), scales.data(),
+                            bias ? bias->data() : nullptr, out, leading_rows(x), in_features, out_features);
+            return result;
+        },
+        nb::arg("x"), nb::arg("q"), nb::arg("scales"), nb::arg("bias").none() = nb::none(),
+        "Q4_0 linear: the weights unpacked to int8, then exactly the Q8_0 computation.");
+
+    m.def(
         "set_threads", [](std::size_t n) { dllm::ThreadPool::global().set_threads(n); }, nb::arg("n"),
         "Number of kernel threads (0: DLLM_THREADS or the hardware concurrency). Never changes results.");
     m.def("threads", []() { return dllm::ThreadPool::global().threads(); }, "Current number of kernel threads.");

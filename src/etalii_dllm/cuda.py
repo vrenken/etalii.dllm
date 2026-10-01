@@ -260,8 +260,9 @@ class CudaWeight:
 
 
 class CudaQuantizedWeight:
-    """A Q8_0 :class:`etalii_dllm.numerics.QuantizedWeight` resident on the GPU; linear with it gives the bits of
-    the CPU Q8_0 kernel."""
+    """A quantised :class:`etalii_dllm.numerics.QuantizedWeight` resident on the GPU; linear with it gives the bits
+    of the CPU kernel. Q4_0 values are stored unpacked, as 8-bit, and run the Q8_0 kernel: the CPU Q4_0 kernel computes
+    exactly that, so the bits are the same (the memory saving is the CPU's only)."""
 
     def __init__(self, weight: Any, kind: str = "q8_0") -> None:
         from etalii_dllm.numerics import QuantizedWeight
@@ -270,7 +271,7 @@ class CudaQuantizedWeight:
         initialize()
         self.kind = quantized.kind
         self.out_features, self.in_features = quantized.out_features, quantized.in_features
-        self.array = _kernels.cuda_upload_q8(quantized.values, quantized.scales)
+        self.array = _kernels.cuda_upload_q8(quantized.int8_values(), quantized.scales)
 
     @property
     def shape(self) -> tuple[int, int]:
