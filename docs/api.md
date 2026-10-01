@@ -16,6 +16,7 @@ what the CLI and the MCP server use, so all front ends give the same answer for 
 | `POST /api/embed`, `POST /api/embeddings` | Ollama | Same vectors as `/v1/embeddings` |
 | `GET /api/tags`, `POST /api/show`, `GET /api/ps`, `GET /api/version` | Ollama | The served model, its template and architecture |
 | `POST /v1/receipts/verify` | Extension | Re-runs a [generation receipt](receipts.md) and returns `{"ok", "reasons", "notes", "receipt"}`; a list is a [receipt chain](agents.md#receipt-chains) (`{"ok", "reasons", "notes", "turns"}`) |
+| `GET /v1/audit` | Extension | What `--audit-every` found, the response cache's counters and how many requests were coalesced. See [serving at scale](serving.md) |
 | `GET /` | Browser | A chat page over the streamed `/v1/chat/completions`, with temperature, seed and system prompt; it marks a regenerated answer that is identical to the earlier one. Self-contained, nothing loaded from elsewhere |
 
 ## Determinism guarantees
@@ -37,6 +38,9 @@ what the CLI and the MCP server use, so all front ends give the same answer for 
   `"previous_receipt": "rcpt_..."` links it to the previous turn's receipt, and `previous_response_id` does so
   automatically; `POST /v1/receipts/verify` with a list checks the whole [chain](agents.md#receipt-chains).
   Asking for one changes neither the answer nor the response id.
+- `--response-cache DIR` answers repeated requests from storage, and identical requests in flight share one
+  generation. Both give the same bytes as a fresh run, apart from the cached-token counters; see
+  [serving at scale](serving.md).
 
 ## Defaults and differences
 

@@ -474,6 +474,18 @@ dllm inspect tuned.dllm --trust me.key.pub     # checks tuned.dllm.sig
 `dllm import` prints the file's SHA-256, which is the same on every platform. Signing needs
 `pip install "etalii-dllm[sign]"`. Details: [verifiable models](provenance.md).
 
+## 14. Serve many users with the same bits
+
+```bash
+dllm-server --model qwen2.5-0.5b.dllm --response-cache ~/.cache/dllm --audit-every 50
+curl localhost:5080/v1/audit                  # cache hits, coalesced requests, audit results
+dllm audit --url http://localhost:5080 --url http://other-machine:5080 --prompts prompts.txt
+```
+
+Repeated requests are answered from the cache with the same bits, and identical requests in flight share one
+generation. Every 50th answer is re-run in the background to check it reproduces, and `dllm audit` checks that two
+servers agree. Details: [serving at scale](serving.md).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,

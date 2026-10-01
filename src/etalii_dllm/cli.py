@@ -309,9 +309,27 @@ def main(argv: list[str] | None = None) -> int:
     sign.add_argument("-o", "--output", help="JSON documents: write the signed document here (default: in place)")
     sign.add_argument("--keygen", metavar="FILE", help="create a private key FILE and its public key FILE.pub")
 
+    cache_command = commands.add_parser("cache", help="show or clear a response cache directory (--response-cache)")
+    cache_commands = cache_command.add_subparsers(dest="cache_command", required=True)
+    for name, text in (("stats", "how many responses DIR holds"), ("clear", "remove every response in DIR")):
+        cache_commands.add_parser(name, help=text).add_argument("directory", metavar="DIR")
+
+    audit = commands.add_parser("audit", help="check that servers (and this engine) give the same bits")
+    audit.add_argument("--url", action="append", default=[], help="a server's base URL (repeatable)")
+    audit.add_argument("--local", action="store_true", help="also run every request on this engine (--model ...)")
+    audit.add_argument(
+        "--prompts", required=True, help="one request per line: a user message, or a chat completions JSON object"
+    )
+    audit.add_argument("--max-tokens", type=int, default=32, help="for lines that do not set max_tokens")
+    audit.add_argument("--json", action="store_true", help="print the results as JSON")
+
     args = parser.parse_args(argv)
     if args.command == "sign":
         return _sign(args)
+    if args.command == "cache":
+        return _cache(args)
+    if args.command == "audit" and not args.local:
+        return _audit(None, args)
     if args.command == "finetune":
         return _finetune(args)
     if args.command == "edit":
@@ -350,6 +368,8 @@ def main(argv: list[str] | None = None) -> int:
         draft_model=args.draft_model,
         prompt_cache_dir=args.prompt_cache_dir,
         sign_key=args.sign_key,
+        response_cache=args.response_cache,
+        audit_every=args.audit_every,
     )
     try:
         engine = default_engine()
@@ -367,6 +387,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "verify":
         return _verify(engine, args.json)
+
+    if args.command == "audit":
+        return _audit(engine, args)
 
     if args.command == "replay":
         return _signed(_replay(engine, args), problems)
@@ -480,6 +503,62 @@ def _evaluate(engine: DllmEngine, args: argparse.Namespace) -> int:
         if key != "results":
             print(f"{key + ':':<20}{value}")
     return 0
+
+
+def _cache(args: argparse.Namespace) -> int:
+    from etalii_dllm.serving import ResponseCache
+
+    if not Path(args.directory).is_dir():
+        print(f"dllm cache: {args.directory} is not a directory", file=sys.stderr)
+        return 2
+    cache = ResponseCache(args.directory)
+    if args.cache_command == "clear":
+        print(f"removed {cache.clear()} responses")
+        return 0
+    stats = cache.stats()
+    print(f"responses: {stats['responses']}")
+    print(f"bytes:     {stats['bytes']}")
+    return 0
+
+
+def _audit(engine: DllmEngine | None, args: argparse.Namespace) -> int:
+    """``dllm audit``: the same requests to every server (and this engine), compared receipt by receipt."""
+    from functools import partial
+
+    from etalii_dllm import serving
+
+    targets: dict[str, Any] = {url: partial(serving.post_json, url) for url in args.url}
+    if engine is not None:
+        from etalii_dllm.server.app import _chat_request
+        from etalii_dllm.server.contracts import ChatCompletionRequest
+
+        def local(body: Any) -> dict[str, Any]:
+            request = _chat_request(ChatCompletionRequest.model_validate(body), engine)
+            return {"receipt": engine.chat_completion(request, fresh=True).receipt}
+
+        targets = {"local": local, **targets}
+    if len(targets) < 2:
+        print("dllm audit: give at least two targets (--url, --local)", file=sys.stderr)
+        return 2
+    try:
+        lines = [line for line in Path(args.prompts).read_text(encoding="utf-8").splitlines() if line.strip()]
+        bodies = [serving.request_body(line, args.max_tokens) for line in lines]
+        results = serving.audit_servers(targets, bodies)
+    except (OSError, ValueError, KeyError) as error:
+        print(f"dllm audit: {error}", file=sys.stderr)
+        return 2
+    agree = all(result.ok for result in results)
+    if args.json:
+        rows = [{"ok": r.ok, "differences": list(r.differences), "outputs": r.outputs} for r in results]
+        print(json.dumps({"ok": agree, "targets": list(targets), "requests": rows}, indent=2))
+    else:
+        for number, result in enumerate(results, 1):
+            first = next(iter(result.outputs.values()))
+            print(f"request {number}: {'same' if result.ok else 'DIFFERENT'} ({first['tokens']})")
+            for difference in result.differences:
+                print(f"  {difference}")
+        print(f"{len(targets)} targets, {len(results)} requests: {'the same bits' if agree else 'they differ'}")
+    return 0 if agree else 1
 
 
 def _sign(args: argparse.Namespace) -> int:

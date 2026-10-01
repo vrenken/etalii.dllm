@@ -202,7 +202,7 @@ def verify(engine: DllmEngine, receipt: Mapping[str, Any]) -> Verification:
     notes = []
     if receipt["engine"] != __version__:
         notes.append(f"made by engine version {receipt['engine']}, replayed with {__version__}")
-    replayed = engine.chat_completion(request_from_record(receipt["request"])).receipt
+    replayed = engine.chat_completion(request_from_record(receipt["request"]), fresh=True).receipt
     expected, actual = receipt["output"], replayed["output"]
     for key, label in (
         ("prompt_tokens", "the prompt"),

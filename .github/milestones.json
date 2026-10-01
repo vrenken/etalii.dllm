@@ -16,5 +16,6 @@
   {"title": "Phase 14: Lean and fast decoding", "due_on": "2028-10-31", "description": "Speculative decoding that changes no bit, Q4_0 weights with exact integer sums, one copy of the weights in memory"},
   {"title": "Phase 15: Verifiable outputs", "due_on": "2028-12-31", "description": "Content-derived receipts for every response, dllm replay to verify them bit for bit, a prompt cache that survives restarts, reproducible evaluation"},
   {"title": "Phase 16: Reproducible agents", "due_on": "2029-02-28", "description": "Agent transcripts of MCP tool loops, offline replay with recorded tool results, built-in deterministic tools, receipt chains for conversations"},
-  {"title": "Phase 17: Verifiable models", "due_on": "2029-04-30", "description": "Model lineage in every model file, training receipts that replay a fine-tune bit for bit, byte-identical model files on every platform, signed receipts and models"}
+  {"title": "Phase 17: Verifiable models", "due_on": "2029-04-30", "description": "Model lineage in every model file, training receipts that replay a fine-tune bit for bit, byte-identical model files on every platform, signed receipts and models"},
+  {"title": "Phase 18: Deterministic serving at scale", "due_on": "2029-06-30", "description": "An exact response cache, coalescing of identical in-flight requests, self-audits and dllm audit to check that servers give the same bits"}
 ]

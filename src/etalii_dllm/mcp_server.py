@@ -226,5 +226,7 @@ def main(argv: list[str] | None = None) -> None:
         draft_model=args.draft_model,
         prompt_cache_dir=args.prompt_cache_dir,
         sign_key=args.sign_key,
+        response_cache=args.response_cache,
+        audit_every=args.audit_every,
     )
     server.run("stdio")
