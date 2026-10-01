@@ -209,20 +209,22 @@ def test_quantization_matches_reference_and_rounds_half_to_even():
     assert list(values[0, :6]) == [-2, -2, 0, 0, 2, 2]
 
 
-def test_quantized_linear_matches_exact_reference():
-    w, x, b = gaussian(19, 5, 64), gaussian(20, 3, 64), gaussian(21, 5)
+@pytest.mark.parametrize(("rows", "outputs", "inputs"), [(3, 5, 64), (7, 37, 96)])  # ragged row and output tiles
+def test_quantized_linear_matches_exact_reference(rows, outputs, inputs):
+    w, x, b = gaussian(19, outputs, inputs), gaussian(20, rows, inputs), gaussian(21, outputs)
     wq, ws = _kernels.quantize_q8_0(w)
     xq, xs = _kernels.quantize_q8_0(x)
-    expected = np.empty((3, 5), dtype=np.float32)
-    for r in range(3):
-        for n in range(5):
+    expected = np.empty((rows, outputs), dtype=np.float32)
+    for r in range(rows):
+        for n in range(outputs):
             acc = 0.0  # Python floats are IEEE doubles: the kernel's order, spelled out
-            for block in range(2):
+            for block in range(inputs // 32):
                 part = slice(32 * block, 32 * block + 32)
                 isum = int(np.dot(xq[r, part].astype(np.int64), wq[n, part].astype(np.int64)))
                 acc += (float(xs[r, block]) * float(ws[n, block])) * float(isum)
             expected[r, n] = np.float32(acc + float(b[n]))
-    assert numerics.linear(x, QuantizedWeight(w), b).numpy().tobytes() == expected.tobytes()
+    for setting in every_setting():
+        assert numerics.linear(x, QuantizedWeight(w), b).numpy().tobytes() == expected.tobytes(), setting
     approx = numerics.linear(x, w, b).numpy()
     assert np.abs(expected - approx).max() < 0.05 * np.abs(approx).max()
 

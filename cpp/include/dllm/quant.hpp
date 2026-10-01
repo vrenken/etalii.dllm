@@ -13,6 +13,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 
@@ -132,23 +133,101 @@ inline void linear_q8_panel_portable(const std::int8_t* xq, const float* xs, con
 
 #ifdef DLLM_X86_DISPATCH
 // |w| times sign-adjusted x as u8 x s8 pairs (a pair sum is at most 2 * 128 * 127 < 2^15, so the 16-bit step
-// cannot saturate; x never holds -128 because quantize_q8_0 clamps to +-127), widened to int32 and reduced.
-DLLM_TARGET_AVX2 inline std::int32_t q8_block_dot_avx2(const std::int8_t* xb, const std::int8_t* wb) {
-    const __m256i x = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(xb));
-    const __m256i w = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(wb));
-    const __m256i pairs = _mm256_maddubs_epi16(_mm256_sign_epi8(w, w), _mm256_sign_epi8(x, w));
-    const __m256i quads = _mm256_madd_epi16(pairs, _mm256_set1_epi16(1));
-    __m128i sum = _mm_add_epi32(_mm256_castsi256_si128(quads), _mm256_extracti128_si256(quads, 1));
-    sum = _mm_add_epi32(sum, _mm_shuffle_epi32(sum, 0x4e));
-    sum = _mm_add_epi32(sum, _mm_shuffle_epi32(sum, 0xb1));
-    return _mm_cvtsi128_si32(sum);
+// cannot saturate; x never holds -128 because quantize_q8_0 clamps to +-127), widened to eight int32 partial sums.
+DLLM_TARGET_AVX2 inline __m256i q8_partial_sums_avx2(__m256i x, __m256i w) {
+    return _mm256_madd_epi16(_mm256_maddubs_epi16(_mm256_sign_epi8(w, w), _mm256_sign_epi8(x, w)),
+                             _mm256_set1_epi16(1));
+}
+
+// The exact int32 totals of four vectors of partial sums, as one vector [sum q0, sum q1, sum q2, sum q3].
+DLLM_TARGET_AVX2 inline __m128i q8_totals_avx2(__m256i q0, __m256i q1, __m256i q2, __m256i q3) {
+    const __m256i h = _mm256_hadd_epi32(_mm256_hadd_epi32(q0, q1), _mm256_hadd_epi32(q2, q3));
+    return _mm_add_epi32(_mm256_castsi256_si128(h), _mm256_extracti128_si256(h, 1));
+}
+
+struct Q8TileArgs {
+    const std::int8_t* xq;     // the tile's first row
+    const float* xs;           // its scales
+    const std::int8_t* w[4];   // the four outputs' weight rows
+    const double* scales;      // their scales, [blocks][4]
+    std::size_t in_features;
+    std::size_t blocks;
+};
+
+// R rows by four outputs (R = 1 or 2): each weight block loaded serves R rows, and the four block sums of a row
+// are reduced together. Per output the double combine is that of linear_q8_panel(): the product of the two scales,
+// times the block sum, added over blocks ascending, as separate multiplies and adds (no fused multiply-add).
+template <std::size_t R>
+DLLM_TARGET_AVX2 inline void q8_tile_avx2(const Q8TileArgs& a, double (&result)[R][4]) {
+    __m256d acc[R];
+    for (std::size_t i = 0; i < R; ++i) {
+        acc[i] = _mm256_setzero_pd();
+    }
+    for (std::size_t b = 0; b < a.blocks; ++b) {
+        __m256i x[R];
+        for (std::size_t i = 0; i < R; ++i) {
+            x[i] = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(a.xq + i * a.in_features + b * kQ8Block));
+        }
+        __m256i q[R][4];
+        for (std::size_t j = 0; j < 4; ++j) {
+            const __m256i w = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(a.w[j] + b * kQ8Block));
+            for (std::size_t i = 0; i < R; ++i) {
+                q[i][j] = q8_partial_sums_avx2(x[i], w);
+            }
+        }
+        const __m256d dw = _mm256_loadu_pd(a.scales + b * 4);
+        for (std::size_t i = 0; i < R; ++i) {
+            const __m256d sums = _mm256_cvtepi32_pd(q8_totals_avx2(q[i][0], q[i][1], q[i][2], q[i][3]));
+            const __m256d scale = _mm256_mul_pd(_mm256_set1_pd(static_cast<double>(a.xs[i * a.blocks + b])), dw);
+            acc[i] = _mm256_add_pd(acc[i], _mm256_mul_pd(scale, sums));
+        }
+    }
+    for (std::size_t i = 0; i < R; ++i) {
+        _mm256_storeu_pd(result[i], acc[i]);
+    }
 }
 
 DLLM_TARGET_AVX2 inline void linear_q8_panel_avx2(const std::int8_t* xq, const float* xs, const std::int8_t* wq,
                                                   const float* ws, const float* bias, float* out, std::size_t rows,
                                                   std::size_t in_features, std::size_t out_features,
                                                   std::size_t n0) {
-    linear_q8_panel<q8_block_dot_avx2>(xq, xs, wq, ws, bias, out, rows, in_features, out_features, n0);
+    const std::size_t width = n0 + 16 <= out_features ? 16 : out_features - n0;
+    const std::size_t blocks = in_features / kQ8Block;
+    thread_local std::vector<double> scales;
+    scales.resize(blocks * 4);
+    for (std::size_t g = 0; g < width; g += 4) {
+        Q8TileArgs args{nullptr, nullptr, {}, scales.data(), in_features, blocks};
+        for (std::size_t j = 0; j < 4; ++j) {
+            const std::size_t n = n0 + (g + j < width ? g + j : g);  // past the last output: repeat one, unused
+            args.w[j] = wq + n * in_features;
+            for (std::size_t b = 0; b < blocks; ++b) {
+                scales[b * 4 + j] = ws[n * blocks + b];
+            }
+        }
+        const std::size_t end = g + 4 < width ? g + 4 : width;
+        for (std::size_t r = 0; r < rows; r += 2) {
+            args.xq = xq + r * in_features;
+            args.xs = xs + r * blocks;
+            double result[2][4];
+            const std::size_t count = r + 2 <= rows ? 2 : 1;
+            if (count == 2) {
+                q8_tile_avx2<2>(args, result);
+            } else {
+                double single[1][4];
+                q8_tile_avx2<1>(args, single);
+                std::copy(single[0], single[0] + 4, result[0]);
+            }
+            for (std::size_t i = 0; i < count; ++i) {
+                for (std::size_t j = g; j < end; ++j) {
+                    double acc = result[i][j - g];
+                    if (bias != nullptr) {
+                        acc += bias[n0 + j];
+                    }
+                    out[(r + i) * out_features + n0 + j] = static_cast<float>(acc);
+                }
+            }
+        }
+    }
 }
 #endif
 
@@ -171,13 +250,15 @@ inline void linear_q8(const float* x, const std::int8_t* wq, const float* ws, co
     const std::size_t blocks = in_features / kQ8Block;
     std::vector<std::int8_t> xq(rows * in_features);
     std::vector<float> xs(rows * blocks);
-    for (std::size_t r = 0; r < rows; ++r) {
-        quantize_q8_0(x + r * in_features, xq.data() + r * in_features, xs.data() + r * blocks, in_features);
-    }
-    const LinearQ8PanelFn kernel = linear_q8_panel_kernel();
     constexpr std::size_t kRows = 64;
-    const std::size_t panels = (out_features + 15) / 16;
     const std::size_t row_blocks = (rows + kRows - 1) / kRows;
+    parallel_for(row_blocks, [&](std::size_t block) {
+        for (std::size_t r = block * kRows; r < rows && r < (block + 1) * kRows; ++r) {
+            quantize_q8_0(x + r * in_features, xq.data() + r * in_features, xs.data() + r * blocks, in_features);
+        }
+    });
+    const LinearQ8PanelFn kernel = linear_q8_panel_kernel();
+    const std::size_t panels = (out_features + 15) / 16;
     parallel_for(panels * row_blocks, [&](std::size_t task) {
         const std::size_t p = task % panels;
         const std::size_t r0 = (task / panels) * kRows;
