@@ -23,8 +23,10 @@ Runs over stdio. `--model` (or `DLLM_MODEL`) selects the model; without it the p
 | `chat` | `messages` (`[{"role", "content"}]`), `max_tokens` (256), `temperature` (0), `seed` (0), `json_schema` (optional) | The answer, rendered with the model's chat template; with `json_schema`, JSON valid under it (constrained decoding) |
 | `generate` | `prompt`, `max_tokens` (64), `temperature` (0), `seed` (0) | A continuation of the prompt |
 | `model_info` | | Model id and system fingerprint |
+| `search_documents` | `query`, `top` (5) | The passages of the server's document index (`--index`) closest to the query, as JSON; an error without an index ([retrieval](retrieval.md)) |
 
-All three are annotated read-only and idempotent: the same arguments always return the same text.
+All four are annotated read-only and idempotent: the same arguments always return the same text. With `--index` the
+`chat` tool's answers are grounded in the index too.
 
 ### Resources
 

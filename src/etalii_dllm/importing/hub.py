@@ -35,7 +35,12 @@ WANTED = (
     "LICENCE*",
     "*.safetensors",
     "model.safetensors.index.json",
+    # sentence-transformers embedding models: the module list, pooling and query prompts
+    "modules.json",
+    "config_sentence_transformers.json",
 )
+# Files in subdirectories an import reads (exact paths).
+WANTED_NESTED = ("1_Pooling/config.json",)
 
 _REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -83,7 +88,8 @@ def download(repository: str, revision: str, cache: str | Path, opener: Opener |
     names = sorted(
         sibling["rfilename"]
         for sibling in info.get("siblings", [])
-        if "/" not in sibling["rfilename"] and any(fnmatch.fnmatch(sibling["rfilename"], p) for p in WANTED)
+        if sibling["rfilename"] in WANTED_NESTED
+        or ("/" not in sibling["rfilename"] and any(fnmatch.fnmatch(sibling["rfilename"], p) for p in WANTED))
     )
     directory = Path(cache) / repository / commit
     directory.mkdir(parents=True, exist_ok=True)
@@ -91,6 +97,7 @@ def download(repository: str, revision: str, cache: str | Path, opener: Opener |
         target = directory / name
         if target.exists():
             continue
+        target.parent.mkdir(parents=True, exist_ok=True)
         partial = target.with_name(target.name + ".partial")
         url = f"{ENDPOINT}/{quoted_repo}/resolve/{commit}/{urllib.parse.quote(name)}"
         with opener(url) as response, partial.open("wb") as stream:

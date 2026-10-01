@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 from etalii_dllm import cuda
 from etalii_dllm.chat import ChatMessage
 from etalii_dllm.engine import (
+    MODEL_ENVIRONMENT_VARIABLE,
     ChatRequest,
     DllmEngine,
     Finished,
@@ -199,6 +201,18 @@ def main(argv: list[str] | None = None) -> int:
 
     interpret_commands.add_commands(commands)
 
+    index = commands.add_parser("index", help="build or search a document index (retrieval, embedding models)")
+    index_commands = index.add_subparsers(dest="index_command", required=True)
+    build = index_commands.add_parser("build", help="chunk and embed documents with --model into an index file")
+    build.add_argument("paths", nargs="+", help="text files, or directories (their .md/.txt/... files)")
+    build.add_argument("-o", "--output", required=True, help="the index file to write")
+    build.add_argument("--chunk-tokens", type=int, default=256, help="largest chunk, in tokens")
+    search = index_commands.add_parser("search", help="the passages closest to a query (exact, reproducible)")
+    search.add_argument("index_file", metavar="INDEX", help="the index file")
+    search.add_argument("query")
+    search.add_argument("--top", type=int, default=5)
+    search.add_argument("--json", action="store_true", help="print the hits as JSON")
+
     importer = commands.add_parser("import", help="convert an open-weight model to model.dllm")
     importer.add_argument("source", help="checkpoint directory, .gguf file, or hf:org/name[@revision]")
     importer.add_argument("-o", "--output", required=True, help="the model.dllm file to write")
@@ -247,6 +261,9 @@ def main(argv: list[str] | None = None) -> int:
         return _import(args)
     if args.command == "inspect":
         return _inspect(args)
+    configured = args.model or os.environ.get(MODEL_ENVIRONMENT_VARIABLE)
+    if args.command == "index" and args.index_command == "search" and not configured:
+        args.model = _index_model(args.index_file)  # search with the model the index was built with
     use_model_file(
         args.model,
         args.quantize,
@@ -256,6 +273,9 @@ def main(argv: list[str] | None = None) -> int:
         args.adapter,
         steer=args.steer,
         steer_strength=args.steer_strength,
+        index=args.index,
+        index_top=args.index_top,
+        embedding_model=args.embedding_model,
     )
     try:
         engine = default_engine()
@@ -276,6 +296,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command in interpret_commands.COMMANDS:
         return interpret_commands.run(args, engine)
+    if args.command == "index":
+        return _index(args, engine)
 
     options = SamplingOptions(temperature=args.temperature, top_k=args.top_k, top_p=args.top_p, seed=args.seed)
     if args.command == "chat":
@@ -289,6 +311,49 @@ def main(argv: list[str] | None = None) -> int:
         f"fingerprint: {result.fingerprint}  tokens: {len(result.tokens)}  finish: {result.finish_reason}",
         file=sys.stderr,
     )
+    return 0
+
+
+def _index_model(path: str) -> str | None:
+    from etalii_dllm.retrieval import Index, RetrievalError
+
+    try:
+        return Index.load(path).model.get("path")
+    except RetrievalError:
+        return None  # reported by the search itself
+
+
+def _index(args: argparse.Namespace, engine: DllmEngine) -> int:
+    from etalii_dllm import retrieval
+
+    try:
+        if args.index_command == "build":
+            documents = retrieval.read_documents(args.paths)
+            model_path = args.model or os.environ.get(MODEL_ENVIRONMENT_VARIABLE)
+            model_path = str(Path(model_path).resolve()) if model_path else None
+
+            def progress(count: int, chunk: retrieval.Chunk) -> None:
+                print(f"chunk {count:6d}  {chunk.source}:{chunk.start}", file=sys.stderr)
+
+            index = retrieval.build_index(
+                engine, documents, chunk_tokens=args.chunk_tokens, model_path=model_path, progress=progress
+            )
+            index.save(args.output)
+            print(f"wrote: {args.output}  ({len(documents)} documents, {len(index.chunks)} chunks)")
+            print(f"index fingerprint: {index.fingerprint}")
+            return 0
+        index = retrieval.Index.load(args.index_file)
+        hits = index.search(engine, args.query, args.top)
+    except (OSError, ValueError) as error:
+        print(f"dllm index: {error}", file=sys.stderr)
+        return 1
+    if args.json:
+        rows = [{"rank": h.rank, "score": h.score, "chunk": h.index, **h.chunk.to_json()} for h in hits]
+        print(json.dumps(rows, indent=2, ensure_ascii=False))
+        return 0
+    for hit in hits:
+        print(f"{hit.rank}. {hit.score:.4f}  {hit.chunk.source}:{hit.chunk.start}-{hit.chunk.end}")
+        print("   " + hit.chunk.text.replace("\n", "\n   "))
     return 0
 
 

@@ -105,7 +105,8 @@ def write_model_file(
         "fingerprint": _FINGERPRINT_PLACEHOLDER,
         **{key: metadata.get(key) for key in ("source", "licence", "tokenizer", "chat_template")},
     }
-    for section in ("fine_tuning", "adapter", "edits"):  # only fine-tuned, adapted and edited models carry these
+    # Only fine-tuned, adapted, edited and embedding models carry these.
+    for section in ("fine_tuning", "adapter", "edits", "embedding"):
         if metadata.get(section) is not None:
             header[section] = metadata[section]
     header_bytes = canonical_json(header)
@@ -216,6 +217,12 @@ class ModelFile:
     def adapter(self) -> dict[str, Any] | None:
         """The LoRA adapter merged into the weights, when the file was written by an adapter import."""
         return self.header.get("adapter")
+
+    @property
+    def embedding(self) -> dict[str, Any] | None:
+        """How an embedding model pools and normalises its hidden states (``pooling``: ``mean`` or ``last_token``,
+        ``normalize``, ``prompts``), when the file was imported from a sentence-transformers model."""
+        return self.header.get("embedding")
 
     @property
     def edits(self) -> list[dict[str, Any]]:

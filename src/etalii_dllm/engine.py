@@ -29,6 +29,7 @@ from etalii_dllm.grammar import Grammar, TokenConstraint, TokenTrie
 from etalii_dllm.models import BigramModel, LanguageModel
 from etalii_dllm.numerics import QUANTIZATIONS, linear, set_threads, sum_squares
 from etalii_dllm.prompt_cache import DEFAULT_PROMPT_CACHE_SIZE
+from etalii_dllm.retrieval import DEFAULT_TOP, Retriever
 from etalii_dllm.sampling import GREEDY, SamplingOptions
 from etalii_dllm.tokenization import ByteTokenizer, Tokenizer
 from etalii_dllm.tools import AUTO, Tool, ToolChoice
@@ -48,6 +49,12 @@ STEER_ENVIRONMENT_VARIABLE = "DLLM_STEER"
 """A steering vector file (``dllm steer``) added to the model's residual stream; changes the output."""
 STEER_STRENGTH_ENVIRONMENT_VARIABLE = "DLLM_STEER_STRENGTH"
 """Overrides the steering vector file's strength."""
+INDEX_ENVIRONMENT_VARIABLE = "DLLM_INDEX"
+"""A document index (``dllm index build``) that grounds every chat in the passages it finds; changes the output."""
+INDEX_TOP_ENVIRONMENT_VARIABLE = "DLLM_INDEX_TOP"
+"""How many passages grounding adds (default 3)."""
+EMBEDDING_MODEL_ENVIRONMENT_VARIABLE = "DLLM_EMBEDDING_MODEL"
+"""The index's embedding model, when it is not at the path the index records."""
 
 
 @dataclass(frozen=True)
@@ -161,10 +168,20 @@ class DllmEngine:
         chat_template: ChatTemplate | None = None,
         stop_tokens: Iterable[int] = (),
         prompt_cache: int = 0,
+        embedding: Mapping[str, Any] | None = None,
+        retriever: Retriever | None = None,
     ) -> None:
         """``prompt_cache`` keeps that many KV caches to reuse for prompts sharing a prefix with an earlier one
-        (:mod:`etalii_dllm.prompt_cache`); it saves work and never changes the output."""
+        (:mod:`etalii_dllm.prompt_cache`); it saves work and never changes the output. ``embedding`` holds an
+        embedding model's pooling settings (:attr:`etalii_dllm.modelfile.ModelFile.embedding`). ``retriever`` grounds
+        chats in a document index (:class:`etalii_dllm.retrieval.Retriever`); its fingerprint joins the
+        ``system_fingerprint``."""
         self.model = model
+        self.embedding = dict(embedding) if embedding else None
+        self.retriever = retriever
+        if retriever is not None:
+            joined = hashlib.sha256(f"{system_fingerprint}|{retriever.fingerprint}".encode()).hexdigest()
+            system_fingerprint = "fp_" + joined[:12]
         self.tokenizer = tokenizer
         self.system_fingerprint = system_fingerprint
         """Identifies the exact weights and engine; equal fingerprints plus equal requests give equal output."""
@@ -182,6 +199,9 @@ class DllmEngine:
         adapter: str | Path | None = None,
         steer: str | Path | None = None,
         steer_strength: float | None = None,
+        index: str | Path | None = None,
+        index_top: int | None = None,
+        embedding_model: str | Path | None = None,
     ) -> DllmEngine:
         """An engine for an imported ``model.dllm``: its decoder, BPE tokenizer and chat template. ``quantize``
         (``"q8_0"``) runs the linear layers on quantised weights; that changes the output, and so the
@@ -189,7 +209,9 @@ class DllmEngine:
         PEFT LoRA adapter directory, is merged into the weights first, exactly as ``dllm import ADAPTER --base``
         merges it, so the output and the ``system_fingerprint`` equal those of the merged file. ``steer``, a steering
         vector file, is added to the residual stream after its layer at ``steer_strength`` (default: the file's);
-        that changes the output and the ``system_fingerprint``."""
+        that changes the output and the ``system_fingerprint``. ``index``, a document index, grounds every chat in
+        the ``index_top`` passages it finds for the last user message, embedded with ``embedding_model`` (default:
+        the model the index records); that changes the output and the ``system_fingerprint`` too."""
         from etalii_dllm.bpe import from_model_header, special_token_text
         from etalii_dllm.modelfile import ModelFile
         from etalii_dllm.transformer import Transformer
@@ -235,7 +257,14 @@ class DllmEngine:
         stops = [*file.config.eos_token_ids, tokenizer.end_of_sequence]
         fingerprint = "fp_" + model.weights_fingerprint[:12]
         return DllmEngine(
-            model, tokenizer, fingerprint, chat_template=template, stop_tokens=stops, prompt_cache=prompt_cache
+            model,
+            tokenizer,
+            fingerprint,
+            chat_template=template,
+            stop_tokens=stops,
+            prompt_cache=prompt_cache,
+            embedding=file.embedding,
+            retriever=Retriever.open(index, index_top or DEFAULT_TOP, embedding_model) if index else None,
         )
 
     @staticmethod
@@ -313,7 +342,10 @@ class DllmEngine:
         if request.prompt is not None and tools:
             raise ValueError("a raw prompt cannot use tools")
         constraint = self._constraint(request, tools)
-        prompt = request.prompt if request.prompt is not None else self.render_chat(request.messages, tools)
+        messages = request.messages
+        if self.retriever is not None and request.prompt is None:
+            messages, _ = self.retriever.ground(messages)
+        prompt = request.prompt if request.prompt is not None else self.render_chat(messages, tools)
         generation = self._generator.stream(
             prompt,
             request.max_tokens,
@@ -396,27 +428,49 @@ class DllmEngine:
 
     # -- embeddings ---------------------------------------------------------------------------------------------
 
-    def embed(self, text: str | Sequence[int], dimensions: int | None = None) -> Embedding:
-        """Mean of the final hidden states over all positions (each column summed over positions ascending in
-        double, through the ``linear`` kernel), L2-normalised. ``dimensions`` keeps the first components and
-        normalises again."""
-        tokens = self.tokenizer.encode(text) if isinstance(text, str) else list(text)
+    def embed(
+        self, text: str | Sequence[int], dimensions: int | None = None, input_type: str | None = None
+    ) -> Embedding:
+        """The embedding of ``text``, L2-normalised; ``dimensions`` keeps the first components and normalises again.
+
+        Models imported from sentence-transformers use their own recipe: the text is prefixed with the prompt named
+        ``input_type`` (e.g. ``"query"``; default: the model's default prompt), encoded with the tokenizer's special
+        tokens, and pooled as the model says (``last_token``: the last position's final hidden state; ``mean``).
+        Other models take the mean of the final hidden states over all positions. The mean sums each column over
+        positions ascending in double, through the ``linear`` kernel."""
+        settings = self.embedding or {}
+        prompts: Mapping[str, str] = settings.get("prompts") or {}
+        name = input_type or settings.get("default_prompt_name")
+        if name is not None and prompts and name not in prompts:
+            raise ValueError(f"unknown input_type {name!r}; this model has {', '.join(sorted(prompts))}")
+        if isinstance(text, str):
+            if settings:
+                text = prompts.get(name, "") + text if name else text
+                tokens = self.tokenizer.encode(text, add_special_tokens=True)  # type: ignore[call-arg]
+            else:
+                tokens = self.tokenizer.encode(text)
+        else:
+            tokens = list(text)
         if not tokens:
             raise ValueError("cannot embed an empty input")
         hidden_states = getattr(self.model, "hidden_states", None)
         if hidden_states is None:
             raise ValueError(f"model {self.model.id} does not provide hidden states")
         states = np.asarray(hidden_states(tokens), dtype=np.float32)
-        ones = np.ones((1, states.shape[0]), dtype=np.float32)
-        total = linear(ones, np.ascontiguousarray(states.T)).numpy().reshape(-1)
-        vector = (total / np.float32(states.shape[0])).astype(np.float32)
+        if settings.get("pooling") == "last_token":
+            vector = states[-1].copy()
+        else:
+            ones = np.ones((1, states.shape[0]), dtype=np.float32)
+            total = linear(ones, np.ascontiguousarray(states.T)).numpy().reshape(-1)
+            vector = (total / np.float32(states.shape[0])).astype(np.float32)
         if dimensions is not None:
             if not 1 <= dimensions <= vector.shape[0]:
                 raise ValueError(f"dimensions must be between 1 and {vector.shape[0]}")
             vector = vector[:dimensions]
-        norm = np.float32(np.sqrt(sum_squares(vector)))
-        if norm > 0:
-            vector = (vector / norm).astype(np.float32)
+        if settings.get("normalize", True) or dimensions is not None:
+            norm = np.float32(np.sqrt(sum_squares(vector)))
+            if norm > 0:
+                vector = (vector / norm).astype(np.float32)
         return Embedding(vector, len(tokens))
 
 
@@ -445,6 +499,9 @@ def use_model_file(
     adapter: str | Path | None = None,
     steer: str | Path | None = None,
     steer_strength: float | None = None,
+    index: str | Path | None = None,
+    index_top: int | None = None,
+    embedding_model: str | Path | None = None,
 ) -> None:
     """Makes the front ends serve ``path`` (sets ``DLLM_MODEL``, and ``DLLM_QUANTIZE``/``DLLM_DEVICE``/
     ``DLLM_PROMPT_CACHE``/``DLLM_ADAPTER`` when ``quantize``/``device``/``prompt_cache``/``adapter`` are given) and
@@ -464,14 +521,20 @@ def use_model_file(
         os.environ[STEER_ENVIRONMENT_VARIABLE] = str(steer)
     if steer_strength is not None:
         os.environ[STEER_STRENGTH_ENVIRONMENT_VARIABLE] = repr(float(steer_strength))
+    if index:
+        os.environ[INDEX_ENVIRONMENT_VARIABLE] = str(index)
+    if index_top is not None:
+        os.environ[INDEX_TOP_ENVIRONMENT_VARIABLE] = str(index_top)
+    if embedding_model:
+        os.environ[EMBEDDING_MODEL_ENVIRONMENT_VARIABLE] = str(embedding_model)
     if threads is not None:
         set_threads(threads)
     default_engine.cache_clear()
 
 
 def add_runtime_arguments(parser: argparse.ArgumentParser) -> None:
-    """The ``--model``, ``--adapter``, ``--quantize``, ``--threads``, ``--device``, ``--steer``, ``--steer-strength``
-    and ``--prompt-cache`` options every front end shares."""
+    """The ``--model``, ``--adapter``, ``--quantize``, ``--threads``, ``--device``, ``--steer``, ``--steer-strength``,
+    ``--index``, ``--index-top``, ``--embedding-model`` and ``--prompt-cache`` options every front end shares."""
     parser.add_argument("--model", help="model.dllm file to use (default: $DLLM_MODEL, else the placeholder model)")
     parser.add_argument(
         "--adapter",
@@ -497,6 +560,17 @@ def add_runtime_arguments(parser: argparse.ArgumentParser) -> None:
         "--steer-strength",
         type=float,
         help="multiplier for the steering vector (default: $DLLM_STEER_STRENGTH, else the file's)",
+    )
+    parser.add_argument(
+        "--index",
+        help="document index (dllm index build) to ground every chat in (default: $DLLM_INDEX); changes output",
+    )
+    parser.add_argument(
+        "--index-top", type=int, help="passages to add from the index (default: $DLLM_INDEX_TOP, else 3)"
+    )
+    parser.add_argument(
+        "--embedding-model",
+        help="the index's embedding model (default: $DLLM_EMBEDDING_MODEL, else the path the index records)",
     )
     parser.add_argument(
         "--prompt-cache",
@@ -536,6 +610,16 @@ def configured_steer_strength() -> float | None:
         raise ValueError(f"{STEER_STRENGTH_ENVIRONMENT_VARIABLE}={value!r}; expected a number") from None
 
 
+def configured_index_top() -> int:
+    """``$DLLM_INDEX_TOP``, or the default when it is unset or empty."""
+    value = os.environ.get(INDEX_TOP_ENVIRONMENT_VARIABLE, "").strip()
+    if not value:
+        return DEFAULT_TOP
+    if not value.isdigit() or int(value) < 1:
+        raise ValueError(f"{INDEX_TOP_ENVIRONMENT_VARIABLE}={value!r}; expected a positive integer")
+    return int(value)
+
+
 def configured_prompt_cache() -> int:
     """``$DLLM_PROMPT_CACHE``, or the default when it is unset or empty."""
     value = os.environ.get(PROMPT_CACHE_ENVIRONMENT_VARIABLE, "").strip()
@@ -561,4 +645,7 @@ def default_engine() -> DllmEngine:
         adapter=os.environ.get(ADAPTER_ENVIRONMENT_VARIABLE) or None,
         steer=os.environ.get(STEER_ENVIRONMENT_VARIABLE) or None,
         steer_strength=configured_steer_strength(),
+        index=os.environ.get(INDEX_ENVIRONMENT_VARIABLE) or None,
+        index_top=configured_index_top(),
+        embedding_model=os.environ.get(EMBEDDING_MODEL_ENVIRONMENT_VARIABLE) or None,
     )

@@ -89,6 +89,20 @@ REFERENCE_MODELS = {
     ),
 }
 
+# Sentence-transformers embedding models (last-token pooling, query instructions): compared with transformers'
+# AutoModel hidden states, pooled and normalised the sentence-transformers way.
+EMBEDDING_MODELS = {
+    "qwen3-embedding": ReferenceModel("Qwen/Qwen3-Embedding-0.6B", "main", "Apache-2.0"),
+}
+_ALL_MODELS = {**REFERENCE_MODELS, **EMBEDDING_MODELS}
+
+EMBEDDING_TEXTS = [
+    ("query", "What is the capital of France?"),
+    ("document", "Paris is the capital and largest city of France."),
+    ("document", "The mitochondria is the powerhouse of the cell."),
+    (None, "Ünïcödé café 日本語 🚀"),
+]
+
 # Variables every render passes, to both implementations: Llama 3.x puts a date in its system prompt, and
 # transformers would take today's.
 TEMPLATE_VARIABLES = {"llama3.2": {"date_string": "26 Jul 2024"}}
@@ -147,7 +161,7 @@ def _checkpoint(key: str) -> Path | None:
     root = os.environ.get(ENVIRONMENT_VARIABLE)
     if not root:
         return None
-    model = REFERENCE_MODELS[key]
+    model = _ALL_MODELS[key]
     candidates = [Path(root) / model.name, Path(root) / model.repository / model.revision]
     if model.revision == "main":  # a model being added: its only snapshot, until the commit is pinned
         candidates += sorted((Path(root) / model.repository).glob("*/"))
@@ -164,7 +178,7 @@ def _checkpoint(key: str) -> Path | None:
 def checkpoint(key: str, *, weights: bool = False) -> Path:
     directory = _checkpoint(key)
     if directory is None:
-        pytest.skip(f"set {ENVIRONMENT_VARIABLE} to a directory holding {REFERENCE_MODELS[key].name}")
+        pytest.skip(f"set {ENVIRONMENT_VARIABLE} to a directory holding {_ALL_MODELS[key].name}")
     if weights and not any(directory.glob("*.safetensors")):
         pytest.skip(f"{directory} has no weights")
     return directory
@@ -445,6 +459,56 @@ def test_quantized_greedy_chat(model_key, imported):
     assert "Paris" in engine.complete(prompt, GENERATED_TOKENS, GREEDY).text
 
 
+# ---------------------------------------------------------------------------------------------------------------
+# Real embedding models
+
+
+@pytest.fixture(scope="module", params=sorted(EMBEDDING_MODELS))
+def embedding_imported(request, tmp_path_factory):
+    directory = checkpoint(request.param, weights=True)
+    model = EMBEDDING_MODELS[request.param]
+    output = tmp_path_factory.mktemp(request.param.replace(".", "_")) / "model.dllm"
+    result = import_model(
+        directory, output, repository=model.repository, revision=model.revision, licence=model.licence
+    )
+    return request.param, directory, result
+
+
+def _embeddings(engine: DllmEngine) -> np.ndarray:
+    return np.stack([engine.embed(text, input_type=kind).vector for kind, text in EMBEDDING_TEXTS])
+
+
+def test_embedding_golden(embedding_imported):
+    key, _, result = embedding_imported
+    golden = REFERENCE_MODEL_FINGERPRINTS.get(key, {})
+    assert result.fingerprint == golden.get("import")
+    assert fingerprint(_embeddings(DllmEngine.from_model_file(result.path))) == golden.get("embedding")
+
+
+def test_embeddings_match_reference(embedding_imported):
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    _, directory, result = embedding_imported
+    engine = DllmEngine.from_model_file(result.path)
+    assert engine.embedding is not None and engine.embedding["pooling"] == "last_token"
+    prompts = engine.embedding["prompts"]
+    tokenizer = transformers.AutoTokenizer.from_pretrained(directory)
+    reference = transformers.AutoModel.from_pretrained(directory, dtype=torch.float32, attn_implementation="eager")
+    expected = []
+    for kind, text in EMBEDDING_TEXTS:
+        full = (prompts.get(kind, "") if kind else "") + text
+        tokens = tokenizer(full)["input_ids"]
+        assert engine.tokenizer.encode(full, add_special_tokens=True) == tokens, full
+        with torch.no_grad():
+            last = reference.eval()(torch.tensor([tokens])).last_hidden_state[0, -1]
+        expected.append(torch.nn.functional.normalize(last, dim=0).numpy())
+    actual = _embeddings(engine)
+    np.testing.assert_allclose(actual, np.stack(expected), rtol=0, atol=1e-4)
+    # Retrieval works: the query is closest to the passage that answers it.
+    scores = actual[1:3] @ actual[0]  # test-side cosine; the vectors are unit length
+    assert scores[0] > scores[1]
+
+
 def main() -> None:
     """``python tests/test_reference_models.py DIR [KEY ...]`` downloads the pinned models (all, or the given keys)
     into DIR (hub cache layout)."""
@@ -453,8 +517,8 @@ def main() -> None:
 
     from etalii_dllm.importing import hub
 
-    keys = sys.argv[2:] or list(REFERENCE_MODELS)
-    for model in (REFERENCE_MODELS[key] for key in keys):
+    keys = sys.argv[2:] or list(_ALL_MODELS)
+    for model in (_ALL_MODELS[key] for key in keys):
         try:
             snapshot = hub.download(model.repository, model.revision, sys.argv[1])
         except urllib.error.HTTPError as error:
