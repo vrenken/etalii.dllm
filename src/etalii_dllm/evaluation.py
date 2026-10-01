@@ -12,6 +12,10 @@ A task file is JSON lines, one item per line:
   continuation of the context; the prediction is the most likely choice (``accuracy``) and the most likely per byte
   of the choice (``accuracy_norm``), ties going to the first.
 - ``{"text": "..."}``: perplexity over the text. A plain ``.txt`` file is one such item.
+- ``{"prompt": "...", "chosen": "...", "rejected": "..."}`` (or ``"messages"`` instead of ``"prompt"``, rendered with
+  the chat template and its generation prompt): preference, the format ``dllm finetune --dpo`` trains on. Both answers
+  are scored as continuations of the prompt; ``preference_accuracy`` is the share of pairs whose chosen answer is
+  strictly more likely (a tie counts as a miss) and ``mean_margin`` the mean of ``log p(chosen) - log p(rejected)``.
 
 Every sequence starts with the tokenizer's begin-of-sequence token (its end-of-sequence token when it has none), so
 the first token of a text is scored too. A text longer than ``max_length`` is scored in consecutive windows, each
@@ -146,6 +150,13 @@ def _kind(items: Sequence[Mapping[str, Any]]) -> str:
         if "text" in item and isinstance(item["text"], str):
             kinds.add("perplexity")
             continue
+        if (
+            isinstance(item.get("chosen"), str)
+            and isinstance(item.get("rejected"), str)
+            and (isinstance(item.get("prompt"), str) or isinstance(item.get("messages"), list))
+        ):
+            kinds.add("preference")
+            continue
         choices, answer = item.get("choices"), item.get("answer")
         if (
             isinstance(item.get("context"), str)
@@ -159,10 +170,11 @@ def _kind(items: Sequence[Mapping[str, Any]]) -> str:
             kinds.add("multiple_choice")
             continue
         raise EvaluationError(
-            f"item {number}: expected {{'text'}} or {{'context', 'choices', 'answer'}} with a valid answer index"
+            f"item {number}: expected {{'text'}}, {{'context', 'choices', 'answer'}} with a valid answer index, or "
+            "{'prompt', 'chosen', 'rejected'}"
         )
     if len(kinds) > 1:
-        raise EvaluationError("a task mixes perplexity texts and multiple-choice items; split it into two files")
+        raise EvaluationError(f"a task mixes {' and '.join(sorted(kinds))} items; split it into one file per kind")
     return kinds.pop()
 
 
@@ -216,6 +228,27 @@ def evaluate(
             perplexity=_kernels.exp(-total / counts) if counts else None,
             bits_per_byte=(-total / sizes) / _kernels.log(2.0) if sizes else None,
         )
+    elif kind == "preference":
+        preferred, margins = 0, []
+        for index, item in enumerate(items):
+            prompt = _preference_prompt(engine, item, index + 1)
+            scores = [_choice(engine, prompt, item[key]) for key in ("chosen", "rejected")]
+            chosen, rejected = (s.log_likelihood for s in scores)
+            margins.append(chosen - rejected)
+            preferred += chosen > rejected
+            rows.append(
+                {
+                    "index": index,
+                    "log_likelihoods": [chosen, rejected],
+                    "margin": chosen - rejected,
+                    "preferred": chosen > rejected,
+                    "greedy": [s.greedy for s in scores],
+                    "logprobs": [fingerprint(s.logprobs) for s in scores],
+                }
+            )
+            if progress:
+                progress(index + 1, len(items))
+        report.update(preference_accuracy=preferred / len(items), mean_margin=_sum_doubles(margins) / len(items))
     else:
         correct, correct_norm = 0, 0
         for index, item in enumerate(items):
@@ -245,6 +278,14 @@ def evaluate(
     report["fingerprint"] = hashlib.sha256(_canonical(rows).encode()).hexdigest()
     report["results"] = rows
     return report
+
+
+def _preference_prompt(engine: DllmEngine, item: Mapping[str, Any], number: int) -> str:
+    if isinstance(item.get("prompt"), str):
+        return item["prompt"]
+    if engine.chat_template is None:
+        raise EvaluationError(f"item {number}: 'messages' prompts need a model with a chat template")
+    return engine.chat_template.render(item["messages"], add_generation_prompt=True)
 
 
 def _best(values: Sequence[float]) -> int:

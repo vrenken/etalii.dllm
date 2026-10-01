@@ -48,7 +48,8 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
   min-p, choice seeds; `docs/api.md#decoding-controls`), `regexp` (regexes compiled to byte DFAs for `grammar`), `cuda` (the GPU backend: NVRTC discovery, `CudaTensor`, device
   ops; `--device cuda`/`DLLM_DEVICE`), `architecture` (`TransformerConfig`), `modelfile`
   (the `model.dllm` container, `docs/model-format.md`), `importing` (safetensors/GGUF readers and `dllm import`),
-  `training` (gradients, AdamW, data order, checkpoints and `dllm finetune`, `docs/training.md`), `lora` (LoRA
+  `training` (gradients, AdamW, data order, checkpoints and `dllm finetune`, DPO on preference pairs in
+  `training/preference.py`, `docs/training.md`), `lora` (LoRA
   adapters, always merged into the weights; the PEFT format), `grammar`
   (JSON-schema constrained decoding over a token trie), `tools` (tool calling in the Hermes `<tool_call>` format), `interpret/` (activation tracing via `LayerHook`, logit lens,
   embedding explorer, attention maps, steering vectors, ROME edits, sparse autoencoders; `dllm lens|attention|

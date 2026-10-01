@@ -7,6 +7,13 @@ loss and gradients on its own (so a window's gradients do not depend on the rest
 elementwise in batch order and applies one :class:`~etalii_dllm.training.optimizer.AdamW` update. The loss is the
 mean next-token cross-entropy over all targets of the batch.
 
+With ``RunConfig.objective == "dpo"`` a step takes ``batch_size`` preference pairs instead
+(:mod:`etalii_dllm.training.preference`) and minimises the direct preference optimization loss
+``-log sigmoid(beta * ((log p(chosen) - ref_chosen) - (log p(rejected) - ref_rejected)))``, where the reference
+log-probabilities are computed once, from the base weights, when the run starts (and stored in checkpoints). The
+gradient of a pair is ``w * grad CE(chosen) - w * grad CE(rejected)`` with ``w = beta * (1 - sigmoid(z)) /
+batch_size``, computed in double and applied as an elementwise float32 multiply; pairs are summed in batch order.
+
 Checkpoint file (``.dllmckpt``): the magic ``DLLMCKPT``, a uint32 format version, a uint64 header length, a canonical
 JSON header (run settings, step, loss history, base model metadata, tensor index, fingerprint) padded to 64 bytes,
 then the parameters and both AdamW moments as aligned little-endian float32. As with ``model.dllm``, nothing comes
@@ -19,7 +26,7 @@ import hashlib
 import json
 import math
 import struct
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -38,10 +45,11 @@ from etalii_dllm.modelfile import (
     tensor_order,
     write_model_file,
 )
-from etalii_dllm.numerics import FloatArray
+from etalii_dllm.numerics import FloatArray, cross_entropy, sigmoid
 from etalii_dllm.training.backprop import DecoderGradients
 from etalii_dllm.training.data import TrainingData
 from etalii_dllm.training.optimizer import AdamW, AdamWConfig
+from etalii_dllm.training.preference import PreferenceData, PreferencePair, log_sigmoid
 
 CHECKPOINT_MAGIC = b"DLLMCKPT"
 CHECKPOINT_VERSION = 1
@@ -65,10 +73,18 @@ class RunConfig:
     optimizer: AdamWConfig = field(default_factory=AdamWConfig)
     lora: LoraConfig | None = None
     """Train LoRA adapters of this shape instead of every parameter."""
+    objective: str = "lm"
+    """``lm`` (next-token cross-entropy on windows) or ``dpo`` (direct preference optimization on pairs)."""
+    beta: float = 0.1
+    """DPO: how far the model may move from the reference (larger keeps it closer)."""
 
     def __post_init__(self) -> None:
         if self.steps < 1 or self.batch_size < 1 or self.sequence_length < 1:
             raise ValueError("steps, batch_size and sequence_length must be positive")
+        if self.objective not in ("lm", "dpo"):
+            raise ValueError(f"unknown training objective {self.objective!r} (expected 'lm' or 'dpo')")
+        if not (math.isfinite(self.beta) and self.beta > 0.0):
+            raise ValueError("beta must be a positive number")
 
     def to_dict(self) -> dict[str, Any]:
         values = asdict(self)
@@ -77,6 +93,8 @@ class RunConfig:
             del values["lora"]
         else:
             values["lora"] = self.lora.to_dict()
+        if self.objective == "lm":  # likewise: language-model runs keep their settings and receipts
+            del values["objective"], values["beta"]
         return values
 
     @classmethod
@@ -104,12 +122,15 @@ class FineTuner:
         self,
         config: TransformerConfig,
         params: Mapping[str, np.ndarray],
-        data: TrainingData,
+        data: TrainingData | PreferenceData,
         run: RunConfig,
         *,
         base_fingerprint: str,
         metadata: Mapping[str, Any],
+        reference: Sequence[tuple[float, float]] | None = None,
     ) -> None:
+        if isinstance(data, PreferenceData) != (run.objective == "dpo"):
+            raise ValueError("a DPO run trains on preference pairs, a language-model run on text windows")
         if data.sequence_length != run.sequence_length:
             raise ValueError("the data was windowed for a different sequence length")
         if run.sequence_length > config.context_length:
@@ -139,9 +160,21 @@ class FineTuner:
         """Where the training data came from when it is a teacher's answers (:mod:`etalii_dllm.training.distill`)."""
         self.losses: list[float] = []
         self._gradients = DecoderGradients(config)
+        self.reference: list[tuple[float, float]] | None = None
+        """DPO: the base model's log-probabilities of every pair's chosen and rejected answer."""
+        if isinstance(data, PreferenceData):
+            if reference is None:
+                frozen = params if self.base is None else self.base
+                reference = [
+                    (self.log_probability(frozen, pair, "chosen"), self.log_probability(frozen, pair, "rejected"))
+                    for pair in data.pairs
+                ]
+            if len(reference) != len(data):
+                raise ValueError("there must be one reference pair of log-probabilities per preference pair")
+            self.reference = [(float(chosen), float(rejected)) for chosen, rejected in reference]
 
     @classmethod
-    def from_model_file(cls, model: ModelFile, data: TrainingData, run: RunConfig) -> FineTuner:
+    def from_model_file(cls, model: ModelFile, data: TrainingData | PreferenceData, run: RunConfig) -> FineTuner:
         return cls(
             model.config,
             model.tensors,
@@ -157,7 +190,20 @@ class FineTuner:
         """Runs the next step and returns its loss (before the update), learning rate and gradient norm."""
         if self.step >= self.run.steps:
             raise RuntimeError("the run has already completed all of its steps")
-        windows = self.data.batch(self.step, self.run.batch_size, self.run.seed)
+        if isinstance(self.data, PreferenceData):
+            loss, gradients = self._preference_gradients(self.data)
+        else:
+            loss, gradients = self._language_model_gradients(self.data)
+        if self.lora is not None:
+            gradients = self._adapter_gradients(gradients)
+        self.step += 1
+        learning_rate = self.run.optimizer.learning_rate_at(self.step, self.run.steps)
+        norm = self.optimizer.step(self.params, gradients, self.step, learning_rate)
+        self.losses.append(loss)
+        return StepResult(self.step, loss, learning_rate, norm)
+
+    def _language_model_gradients(self, data: TrainingData) -> tuple[float, dict[str, FloatArray]]:
+        windows = data.batch(self.step, self.run.batch_size, self.run.seed)
         targets_total = sum(len(window) - 1 for window in windows)
         scale = 1.0 / targets_total
         loss_total = 0.0
@@ -171,14 +217,35 @@ class FineTuner:
                     gradients[name] += gradient
                 else:
                     gradients[name] = gradient.copy()
-        if self.lora is not None:
-            gradients = self._adapter_gradients(gradients)
-        self.step += 1
-        learning_rate = self.run.optimizer.learning_rate_at(self.step, self.run.steps)
-        norm = self.optimizer.step(self.params, gradients, self.step, learning_rate)
-        mean_loss = loss_total / targets_total
-        self.losses.append(mean_loss)
-        return StepResult(self.step, mean_loss, learning_rate, norm)
+        return loss_total / targets_total, gradients
+
+    def _preference_gradients(self, data: PreferenceData) -> tuple[float, dict[str, FloatArray]]:
+        assert self.reference is not None
+        beta = self.run.beta
+        loss_total = 0.0
+        gradients: dict[str, FloatArray] = {}
+        weights = self.weights()
+        for index in data.batch(self.step, self.run.batch_size, self.run.seed):
+            pair = data.pairs[index]
+            chosen_loss, chosen_gradients = self._gradients.loss_and_gradients(weights, *pair.sequence("chosen"))
+            rejected_loss, rejected_gradients = self._gradients.loss_and_gradients(weights, *pair.sequence("rejected"))
+            reference_chosen, reference_rejected = self.reference[index]
+            z = beta * ((-chosen_loss - reference_chosen) - (-rejected_loss - reference_rejected))
+            loss_total += -log_sigmoid(z)
+            weight = np.float32(beta * (1.0 - sigmoid(z)) / self.run.batch_size)
+            for sign, pair_gradients in ((weight, chosen_gradients), (-weight, rejected_gradients)):
+                for name, gradient in pair_gradients.items():
+                    if name in gradients:
+                        gradients[name] += gradient * sign
+                    else:
+                        gradients[name] = gradient * sign
+        return loss_total / self.run.batch_size, gradients
+
+    def log_probability(self, weights: Mapping[str, np.ndarray], pair: PreferencePair, which: str) -> float:
+        """The log-probability (double) that ``weights`` give the ``chosen`` or ``rejected`` answer of ``pair``."""
+        tokens, targets = pair.sequence(which)
+        loss, _ = cross_entropy(self._gradients.logits(weights, tokens), targets)
+        return -loss
 
     def weights(self) -> Mapping[str, np.ndarray]:
         """The model weights the run currently describes (with LoRA: the base with the adapters merged in)."""
@@ -272,6 +339,7 @@ class FineTuner:
             "base_fingerprint": self.base_fingerprint,
             "data_fingerprint": self.data.fingerprint,
             "metadata": self.metadata,
+            **({} if self.reference is None else {"reference": [[c.hex(), r.hex()] for c, r in self.reference]}),
             "tensors": entries,
             "fingerprint": _PLACEHOLDER,
         }
@@ -293,7 +361,9 @@ class FineTuner:
         return fingerprint
 
     @classmethod
-    def load_checkpoint(cls, path: str | Path, data: TrainingData, base: ModelFile | None = None) -> FineTuner:
+    def load_checkpoint(
+        cls, path: str | Path, data: TrainingData | PreferenceData, base: ModelFile | None = None
+    ) -> FineTuner:
         """Restores a run from a checkpoint; ``data`` must be the data the run was started with. A LoRA checkpoint
         holds only the adapters, so it also needs ``base``, the model the run started from."""
         path = Path(path)
@@ -334,6 +404,9 @@ class FineTuner:
             run,
             base_fingerprint=header["base_fingerprint"],
             metadata=header["metadata"],
+            reference=[(float.fromhex(c), float.fromhex(r)) for c, r in header["reference"]]
+            if "reference" in header
+            else None,
         )
         if run.lora is not None:
             for name in tuner.params:

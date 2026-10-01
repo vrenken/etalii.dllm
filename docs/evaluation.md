@@ -29,12 +29,13 @@ JSON lines, one item per line, all of one kind:
 | --- | --- | --- |
 | Multiple choice | `{"context": "The capital of France is", "choices": [" Paris", " Rome"], "answer": 0}` | `accuracy`: the most likely choice is the answer; `accuracy_norm`: the most likely per byte of the choice |
 | Perplexity | `{"text": "..."}` (a `.txt` file is one such item) | `log_likelihood`, `tokens`, `perplexity` (e to the mean negative log-likelihood per token), `bits_per_byte` |
+| Preference | `{"prompt": "...", "chosen": "...", "rejected": "..."}`, or `"messages"` (rendered with the chat template and its generation prompt) instead of `"prompt"`: the [DPO data format](training.md#preference-tuning) | `preference_accuracy`: the share of pairs whose chosen answer is strictly more likely (a tie is a miss); `mean_margin`: the mean of `log p(chosen) - log p(rejected)` |
 
 The scores are computed the way lm-evaluation-harness computes them:
 
 - A choice is scored as a continuation of its context: the sum of the log-probabilities of its tokens. Spaces at the
   end of the context move to the start of the choice, so `"Q: A"` + `" B"` and `"Q: A "` + `"B"` give the same
-  tokens. A tie goes to the first choice.
+  tokens. A tie goes to the first choice. A preference pair scores both answers the same way.
 - Every sequence starts with the tokenizer's begin-of-sequence token (its end-of-sequence token when it has none), so
   the first token of a text is scored too.
 - A text longer than `--max-length` (default 1024, or the model's context when it is shorter) is scored in
