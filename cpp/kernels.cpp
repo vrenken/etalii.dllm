@@ -87,14 +87,14 @@ void require(bool condition, const char* message) {
     }
 }
 
+// Elementwise F over fixed chunks on the thread pool (dllm::parallel_elementwise): the same bits on any thread count.
 template <float (*F)(float)>
 OwnedFloatArray elementwise(FloatTensor x) {
     float* out;
     auto result = make_array(shape_of(x), &out);
     const float* in = x.data();
-    for (std::size_t i = 0; i < x.size(); ++i) {
-        out[i] = F(in[i]);
-    }
+    nb::gil_scoped_release release;
+    dllm::parallel_elementwise(x.size(), [&](std::size_t i) { out[i] = F(in[i]); });
     return result;
 }
 
@@ -525,11 +525,29 @@ NB_MODULE(_kernels, module) {
     m.def("gelu", &elementwise<dllm::gelu>, nb::arg("x"), "Elementwise exact (erf) GELU.");
     m.def("gelu_tanh", &elementwise<dllm::gelu_tanh>, nb::arg("x"), "Elementwise tanh-approximated GELU.");
     m.def(
+        "swiglu",
+        [](FloatTensor gate, FloatTensor up, int kind) {
+            require(gate.size() == up.size(), "gate and up must have the same size");
+            require(kind == 0 || kind == 2, "kind must be silu (0) or gelu_tanh (2)");
+            float* out;
+            auto result = make_array(shape_of(gate), &out);
+            nb::gil_scoped_release release;
+            if (kind == 0) {
+                dllm::gated_activation<dllm::silu>(gate.data(), up.data(), out, gate.size());
+            } else {
+                dllm::gated_activation<dllm::gelu_tanh>(gate.data(), up.data(), out, gate.size());
+            }
+            return result;
+        },
+        nb::arg("gate"), nb::arg("up"), nb::arg("kind") = 0,
+        "float32 act(gate) * up: silu (0) or gelu_tanh (2), the activation rounded before the multiply.");
+    m.def(
         "softcap",
         [](FloatTensor x, double cap) {
             require(cap > 0.0, "cap must be positive");
             float* out;
             auto result = make_array(shape_of(x), &out);
+            nb::gil_scoped_release release;
             dllm::softcap(x.data(), out, x.size(), cap);
             return result;
         },

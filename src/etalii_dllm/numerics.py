@@ -209,6 +209,17 @@ def silu(x: npt.ArrayLike | Tensor, *, device: str = "cpu") -> Tensor:
     return Tensor(_kernels.silu(_float32(x)))
 
 
+_GATED_ACTIVATIONS = {"silu": 0, "gelu_tanh": 2}
+
+
+def swiglu(gate: npt.ArrayLike | Tensor, up: npt.ArrayLike | Tensor, activation: str = "silu") -> Tensor:
+    """The gated MLP activation ``act(gate) * up`` (``silu`` or ``gelu_tanh``) in one pass: the activation is rounded
+    to float32 before the float32 multiply, so the bits equal ``silu(gate).numpy() * up``."""
+    if activation not in _GATED_ACTIVATIONS:
+        raise ValueError(f"unknown gated activation {activation!r}")
+    return Tensor(_kernels.swiglu(_float32(gate), _float32(up), _GATED_ACTIVATIONS[activation]))
+
+
 def gelu(x: npt.ArrayLike | Tensor, *, approximate: str = "none", device: str = "cpu") -> Tensor:
     """Elementwise GELU; ``approximate="tanh"`` gives the tanh form used by GPT-2 and Gemma."""
     if approximate not in ("none", "tanh"):

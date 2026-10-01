@@ -32,13 +32,12 @@ from etalii_dllm.numerics import (
     QuantizedWeight,
     attention,
     attention_weights,
-    gelu,
     linear,
     rms_norm,
     rope,
     rope_inv_freq,
-    silu,
     softcap,
+    swiglu,
 )
 from etalii_dllm.tensor import Tensor
 
@@ -464,9 +463,8 @@ class Transformer:
             x = observe(layer, "middle", x + out.numpy())
             h = norm(x, p + "mlp_norm.weight") if config.has_pre_norms else x
             gate = linear(h, w[p + "mlp.gate.weight"])
-            gate = (gelu(gate, approximate="tanh") if config.activation == "gelu_tanh" else silu(gate)).numpy()
-            up = linear(h, w[p + "mlp.up.weight"]).numpy()
-            activation = gate * up
+            up = linear(h, w[p + "mlp.up.weight"])
+            activation = swiglu(gate, up, config.activation).numpy()
             if hook is not None:
                 hook.mlp_activation(layer, activation.copy())
             out = linear(activation, w[p + "mlp.down.weight"])

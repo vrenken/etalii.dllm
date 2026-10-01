@@ -97,6 +97,37 @@ def test_quantized_linear_is_identical_on_every_code_path():
         assert out == expected, setting
 
 
+def test_activations_are_identical_for_every_thread_count():
+    """Elementwise kernels run over fixed chunks on the pool; the fused gated activation rounds the activation
+    before the multiply, exactly as the two separate steps do."""
+    gate, up = gaussian(11, 7, 5003) * np.float32(4.0), gaussian(12, 7, 5003)  # several chunks and a ragged end
+    numerics.set_threads(1)
+    expected = {
+        "silu": numerics.silu(gate).numpy().tobytes(),
+        "gelu": numerics.gelu(gate).numpy().tobytes(),
+        "gelu_tanh": numerics.gelu(gate, approximate="tanh").numpy().tobytes(),
+        "softcap": numerics.softcap(gate, 3.0).numpy().tobytes(),
+        "swiglu": (numerics.silu(gate).numpy() * up).tobytes(),
+        "geglu": (numerics.gelu(gate, approximate="tanh").numpy() * up).tobytes(),
+    }
+    single = np.array([numerics.silu(np.array([v], np.float32)).numpy()[0] for v in gate.reshape(-1)[:64]])
+    assert single.tobytes() == numerics.silu(gate).numpy().reshape(-1)[:64].tobytes()
+    for setting in every_setting():
+        actual = {
+            "silu": numerics.silu(gate).numpy().tobytes(),
+            "gelu": numerics.gelu(gate).numpy().tobytes(),
+            "gelu_tanh": numerics.gelu(gate, approximate="tanh").numpy().tobytes(),
+            "softcap": numerics.softcap(gate, 3.0).numpy().tobytes(),
+            "swiglu": numerics.swiglu(gate, up).numpy().tobytes(),
+            "geglu": numerics.swiglu(gate, up, "gelu_tanh").numpy().tobytes(),
+        }
+        assert actual == expected, setting
+    with pytest.raises(ValueError):
+        numerics.swiglu(gate, up, "relu")
+    with pytest.raises(ValueError):
+        numerics.swiglu(gate, up[:, :5])
+
+
 def test_linear_backward_is_identical_for_every_thread_count():
     x, w, dy = gaussian(23, 37, 48), gaussian(24, 40, 48), gaussian(25, 37, 40)
     expected = None

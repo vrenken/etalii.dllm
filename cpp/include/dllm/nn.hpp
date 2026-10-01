@@ -345,11 +345,33 @@ inline void rms_norm(const float* x, const float* weight, float* out, std::size_
     }
 }
 
+// Elementwise work is split into fixed chunks of kElementChunk values, one thread-pool task each. Every output is
+// computed from its own inputs only, so the split never changes a bit; it is fixed so the tasks do not depend on
+// the thread count either.
+constexpr std::size_t kElementChunk = 8192;
+
+template <typename Fn>
+inline void parallel_elementwise(std::size_t n, Fn fn) {
+    const std::size_t chunks = (n + kElementChunk - 1) / kElementChunk;
+    if (chunks <= 1) {
+        for (std::size_t i = 0; i < n; ++i) {
+            fn(i);
+        }
+        return;
+    }
+    parallel_for(chunks, [&](std::size_t c) {
+        const std::size_t end = (c + 1) * kElementChunk < n ? (c + 1) * kElementChunk : n;
+        for (std::size_t i = c * kElementChunk; i < end; ++i) {
+            fn(i);
+        }
+    });
+}
+
 // Logit soft-capping (Gemma 2): cap * tanh(x / cap), in double, rounded once.
 inline void softcap(const float* x, float* out, std::size_t n, double cap) {
-    for (std::size_t i = 0; i < n; ++i) {
+    parallel_elementwise(n, [&](std::size_t i) {
         out[i] = static_cast<float>(cap * dllm::tanh(static_cast<double>(x[i]) / cap));
-    }
+    });
 }
 
 // SiLU (swish): x * sigmoid(x), in double, rounded once.
@@ -371,6 +393,13 @@ inline float gelu_tanh(float x) {
     constexpr double sqrt_2_over_pi = 7.97884560802865355879e-01;
     const double d = x;
     return static_cast<float>(0.5 * d * (1.0 + dllm::tanh(sqrt_2_over_pi * (d + 0.044715 * d * d * d))));
+}
+
+// The gated MLP activation act(gate) * up: the activation rounded to float first, then a float multiply, exactly as
+// computing the two steps separately (and as the CUDA swiglu kernel). Act is silu or gelu_tanh.
+template <float (*Act)(float)>
+inline void gated_activation(const float* gate, const float* up, float* out, std::size_t n) {
+    parallel_elementwise(n, [&](std::size_t i) { out[i] = Act(gate[i]) * up[i]; });
 }
 
 // Rotary position embedding, in place-free form. x is [tokens, heads, head_dim]; positions[t] is token t's absolute
