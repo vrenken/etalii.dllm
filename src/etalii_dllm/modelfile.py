@@ -246,6 +246,7 @@ class ModelFile:
         if not hasattr(self._mmap, "madvise") or not hasattr(mmap, "MADV_DONTNEED"):
             return
         page = mmap.PAGESIZE
+        end = min(end, len(self._data))
         first = -(-(self._data_start + begin) // page) * page  # whole pages inside the range only
         last = (self._data_start + end) // page * page
         if last > first:

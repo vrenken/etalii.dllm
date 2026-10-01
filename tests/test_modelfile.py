@@ -324,3 +324,12 @@ def test_release_is_a_no_op_without_madvise(model_path, monkeypatch):
     model = ModelFile(model_path)
     model.release()
     assert np.array_equal(model.tensors["token_embedding.weight"], weights()["token_embedding.weight"])
+
+
+def test_release_with_large_pages(model_path, monkeypatch):
+    import mmap
+
+    monkeypatch.setattr(mmap, "PAGESIZE", 1 << 16)  # 16 KB pages (macOS arm64) and larger: the file is one partial page
+    model = ModelFile(model_path)
+    model.release()
+    assert np.array_equal(model.tensors["token_embedding.weight"], weights()["token_embedding.weight"])

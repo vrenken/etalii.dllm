@@ -92,6 +92,7 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "sampled": "7a75f8d55b99478a282d601c155df0fd6c5066b613db230b610612abbdc05c37",  # the same answer
         "logits": "cafb17dbac5ba9251af7a494246a70f258d6de372bab1a273897f07e74993404",
         "logits_q8_0": "e599b1133d04f3c72c0e6e32c24f78c9ea4d67db3424e7e8f0f54c05aa6fa831",
+        "logits_q4_0": "67b3cd51a74b369fb4833eaf6392aaf08cd423315df2af9644695e736e3d4925",
     },
     "qwen2.5-1.5b": {
         "import": "626d11f6abd38e28450448eae2574b29de3212825a143f37bdbf145673e8556d",
