@@ -32,6 +32,7 @@ from etalii_dllm.bpe import BpeTokenizer, special_token_text
 from etalii_dllm.chat_template import ChatTemplate
 from etalii_dllm.engine import DllmEngine
 from etalii_dllm.importing import import_model
+from etalii_dllm.modelfile import file_sha256
 from etalii_dllm.numerics import fingerprint
 from etalii_dllm.sampling import GREEDY, SamplingOptions
 from etalii_dllm.transformer import Transformer
@@ -351,6 +352,8 @@ def test_chat_template_matches_reference(model_key):
 def test_import_fingerprint_golden(model_key, imported):
     _, result = imported
     assert result.fingerprint == REFERENCE_MODEL_FINGERPRINTS[model_key]["import"]
+    # The whole file, header included, is the same on every platform (#147).
+    assert file_sha256(result.path) == REFERENCE_MODEL_FINGERPRINTS[model_key].get("file")
 
 
 def _last_logits(model: Transformer, tokenizer: BpeTokenizer) -> str:

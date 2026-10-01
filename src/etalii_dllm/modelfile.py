@@ -131,6 +131,16 @@ def write_model_file(
     return fingerprint
 
 
+def file_sha256(path: str | Path) -> str:
+    """The SHA-256 of a whole file: importing the same checkpoint gives the same model file, byte for byte, on every
+    platform, so this identifies a ``model.dllm`` by itself (its data fingerprint covers only the weights)."""
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(16 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _digest(value: Any) -> str:
     return hashlib.sha256(canonical_json(value)).hexdigest()
 

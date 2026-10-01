@@ -29,6 +29,7 @@ def _import(args: argparse.Namespace) -> int:
     from etalii_dllm.importing import ModelImportError, import_model
     from etalii_dllm.importing.gguf import GgufError
     from etalii_dllm.importing.safetensors import SafetensorsError
+    from etalii_dllm.modelfile import file_sha256
 
     try:
         result = import_model(
@@ -50,6 +51,7 @@ def _import(args: argparse.Namespace) -> int:
     print(f"architecture:       {config.family}, {config.layers} layers, hidden {config.hidden_size}")
     print(f"licence:            {result.licence['spdx']}")
     print(f"system_fingerprint: {result.fingerprint}")
+    print(f"file_sha256:        {file_sha256(result.path)}")
     return 0
 
 
