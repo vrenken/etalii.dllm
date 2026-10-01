@@ -47,6 +47,8 @@ DEVICE_ENVIRONMENT_VARIABLE = "DLLM_DEVICE"
 """Where the served model runs: ``cpu`` (default) or ``cuda``. Never changes the output."""
 PROMPT_CACHE_ENVIRONMENT_VARIABLE = "DLLM_PROMPT_CACHE"
 """How many KV caches the served model keeps for prompt caching (default 4, 0 disables). Never changes the output."""
+PROMPT_CACHE_DIR_ENVIRONMENT_VARIABLE = "DLLM_PROMPT_CACHE_DIR"
+"""A directory that keeps the prompt cache across restarts; in memory only when unset. Never changes the output."""
 STEER_ENVIRONMENT_VARIABLE = "DLLM_STEER"
 """A steering vector file (``dllm steer``) added to the model's residual stream; changes the output."""
 STEER_STRENGTH_ENVIRONMENT_VARIABLE = "DLLM_STEER_STRENGTH"
@@ -182,9 +184,11 @@ class DllmEngine:
         retriever: Retriever | None = None,
         speculate: int = 0,
         draft_model: LanguageModel | None = None,
+        prompt_cache_dir: str | Path | None = None,
     ) -> None:
         """``prompt_cache`` keeps that many KV caches to reuse for prompts sharing a prefix with an earlier one
-        (:mod:`etalii_dllm.prompt_cache`); it saves work and never changes the output. ``speculate`` drafts that many
+        (:mod:`etalii_dllm.prompt_cache`), on disk across restarts with ``prompt_cache_dir``; it saves work and never
+        changes the output. ``speculate`` drafts that many
         tokens per step, with ``draft_model`` or from the text so far, and checks them in one pass
         (:mod:`etalii_dllm.speculative`); that saves work and never changes the output either. ``embedding`` holds an
         embedding model's pooling settings (:attr:`etalii_dllm.modelfile.ModelFile.embedding`). ``retriever`` grounds
@@ -200,7 +204,8 @@ class DllmEngine:
         self.system_fingerprint = system_fingerprint
         """Identifies the exact weights and engine; equal fingerprints plus equal requests give equal output."""
         self.chat_template = chat_template
-        self._generator = Generator(model, tokenizer, stop_tokens, prompt_cache, speculate, draft_model)
+        cache_dir = str(prompt_cache_dir) if prompt_cache_dir else None
+        self._generator = Generator(model, tokenizer, stop_tokens, prompt_cache, speculate, draft_model, cache_dir)
         self._trie: TokenTrie | None = None
 
     @staticmethod
@@ -218,6 +223,7 @@ class DllmEngine:
         embedding_model: str | Path | None = None,
         speculate: int | None = None,
         draft_model: str | Path | None = None,
+        prompt_cache_dir: str | Path | None = None,
     ) -> DllmEngine:
         """An engine for an imported ``model.dllm``: its decoder, BPE tokenizer and chat template. ``quantize``
         (``"q8_0"``) runs the linear layers on quantised weights; that changes the output, and so the
@@ -301,6 +307,7 @@ class DllmEngine:
             retriever=Retriever.open(index, index_top or DEFAULT_TOP, embedding_model) if index else None,
             speculate=speculate or 0,
             draft_model=drafter,
+            prompt_cache_dir=prompt_cache_dir,
         )
 
     @staticmethod
@@ -545,6 +552,7 @@ def use_model_file(
     embedding_model: str | Path | None = None,
     speculate: int | None = None,
     draft_model: str | Path | None = None,
+    prompt_cache_dir: str | Path | None = None,
 ) -> None:
     """Makes the front ends serve ``path`` (sets ``DLLM_MODEL``, and ``DLLM_QUANTIZE``/``DLLM_DEVICE``/
     ``DLLM_PROMPT_CACHE``/``DLLM_ADAPTER`` when ``quantize``/``device``/``prompt_cache``/``adapter`` are given) and
@@ -574,6 +582,8 @@ def use_model_file(
         os.environ[SPECULATE_ENVIRONMENT_VARIABLE] = str(speculate)
     if draft_model:
         os.environ[DRAFT_MODEL_ENVIRONMENT_VARIABLE] = str(draft_model)
+    if prompt_cache_dir:
+        os.environ[PROMPT_CACHE_DIR_ENVIRONMENT_VARIABLE] = str(prompt_cache_dir)
     if threads is not None:
         set_threads(threads)
     default_engine.cache_clear()
@@ -581,8 +591,8 @@ def use_model_file(
 
 def add_runtime_arguments(parser: argparse.ArgumentParser) -> None:
     """The ``--model``, ``--adapter``, ``--quantize``, ``--threads``, ``--device``, ``--steer``, ``--steer-strength``,
-    ``--index``, ``--index-top``, ``--embedding-model``, ``--prompt-cache``, ``--speculate`` and ``--draft-model``
-    options every front end shares."""
+    ``--index``, ``--index-top``, ``--embedding-model``, ``--prompt-cache``, ``--persistent-cache``, ``--speculate``
+    and ``--draft-model`` options every front end shares."""
     parser.add_argument("--model", help="model.dllm file to use (default: $DLLM_MODEL, else the placeholder model)")
     parser.add_argument(
         "--adapter",
@@ -626,6 +636,13 @@ def add_runtime_arguments(parser: argparse.ArgumentParser) -> None:
         metavar="N",
         help="KV caches kept to reuse shared prompt prefixes across requests (default: $DLLM_PROMPT_CACHE, else "
         f"{DEFAULT_PROMPT_CACHE_SIZE}; 0 disables); never changes output",
+    )
+    parser.add_argument(
+        "--persistent-cache",
+        dest="prompt_cache_dir",
+        metavar="DIR",
+        help="keep the prompt cache in DIR across restarts (default: $DLLM_PROMPT_CACHE_DIR, else memory only); "
+        "never changes output",
     )
     parser.add_argument(
         "--speculate",
@@ -733,4 +750,5 @@ def default_engine() -> DllmEngine:
         embedding_model=os.environ.get(EMBEDDING_MODEL_ENVIRONMENT_VARIABLE) or None,
         speculate=configured_speculate(),
         draft_model=os.environ.get(DRAFT_MODEL_ENVIRONMENT_VARIABLE) or None,
+        prompt_cache_dir=os.environ.get(PROMPT_CACHE_DIR_ENVIRONMENT_VARIABLE) or None,
     )

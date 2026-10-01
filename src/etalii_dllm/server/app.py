@@ -327,5 +327,6 @@ def main() -> None:
         embedding_model=args.embedding_model,
         speculate=args.speculate,
         draft_model=args.draft_model,
+        prompt_cache_dir=args.prompt_cache_dir,
     )
     uvicorn.run(app, host=args.host, port=args.port)

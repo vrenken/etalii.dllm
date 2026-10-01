@@ -66,6 +66,12 @@ the same as without it (`tests/test_prompt_cache.py`).
   off. Each cache holds one conversation and takes `2 x layers x kv_heads x head_dim x 4` bytes per token (about
   45 KB per token for SmolLM2-135M, 56 KB for Qwen2.5-1.5B). A cache serves one request at a time; a request whose
   prefix is cached but in use starts afresh. When the pool is full the least recently used cache goes.
+- `--persistent-cache DIR` (or `DLLM_PROMPT_CACHE_DIR`) also keeps the idle caches in `DIR`, so a restarted server
+  still skips the prefixes it has seen: with SmolLM2-135M and a 250-token system prompt, the first request after a
+  restart takes 0.85 s instead of 1.6 s. A stored cache is used only by the same weights (quantisation and steering
+  included) and engine version, and only when its SHA-256 checksum matches, so a damaged file is ignored rather than
+  read. The files hold the prompts' keys and values, from which the prompt text can be partly recovered: keep the
+  directory as private as the conversations.
 
 ## Concurrent requests
 

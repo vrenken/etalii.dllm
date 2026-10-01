@@ -218,5 +218,6 @@ def main(argv: list[str] | None = None) -> None:
         embedding_model=args.embedding_model,
         speculate=args.speculate,
         draft_model=args.draft_model,
+        prompt_cache_dir=args.prompt_cache_dir,
     )
     server.run("stdio")

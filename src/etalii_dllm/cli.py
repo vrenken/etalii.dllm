@@ -283,6 +283,7 @@ def main(argv: list[str] | None = None) -> int:
         embedding_model=args.embedding_model,
         speculate=args.speculate,
         draft_model=args.draft_model,
+        prompt_cache_dir=args.prompt_cache_dir,
     )
     try:
         engine = default_engine()
