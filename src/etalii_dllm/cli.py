@@ -191,6 +191,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     chat.add_argument("--max-tool-rounds", type=int, default=8, help="MCP tool rounds before the answer is cut off")
     chat.add_argument("--receipt", metavar="FILE", help="write the answer's generation receipt to FILE (JSON)")
+    chat.add_argument(
+        "--transcript", metavar="FILE", help="with MCP tools: write the whole agent run to FILE (dllm replay checks it)"
+    )
     for command in (generate, chat):
         command.add_argument("--max-tokens", type=int, default=64 if command is generate else 256)
         command.add_argument("--temperature", type=float, default=0.0)
@@ -205,7 +208,7 @@ def main(argv: list[str] | None = None) -> int:
     evaluate.add_argument("-o", "--output", help="also write the full report (JSON) to this file")
 
     replay = commands.add_parser("replay", help="re-run a generation receipt and check the output is the same")
-    replay.add_argument("receipt", metavar="RECEIPT", help="the receipt file (JSON), or - for standard input")
+    replay.add_argument("receipt", metavar="FILE", help="a receipt or agent transcript (JSON), or - for standard input")
     replay.add_argument("--json", action="store_true", help="print the verification as JSON")
 
     from etalii_dllm.interpret import commands as interpret_commands
@@ -430,6 +433,8 @@ def _replay(engine: DllmEngine, args: argparse.Namespace) -> int:
         receipt = json.loads(text)
         if not isinstance(receipt, dict):
             raise ValueError(f"not a {receipts.FORMAT} receipt")
+        if "transcript" in receipt:
+            return _replay_transcript(engine, receipt, args.json)
         verification = receipts.verify(engine, receipt)
     except (OSError, ValueError, KeyError) as error:
         print(f"dllm replay: {error}", file=sys.stderr)
@@ -445,6 +450,24 @@ def _replay(engine: DllmEngine, args: argparse.Namespace) -> int:
             print(f"differs:            {reason}")
         print("verified: the replay gave the same output, bit for bit" if verification.ok else "NOT verified")
     return 0 if verification.ok else 1
+
+
+def _replay_transcript(engine: DllmEngine, transcript: dict, as_json: bool) -> int:
+    from etalii_dllm import transcripts
+
+    outcome = transcripts.replay(engine, transcript)
+    if as_json:
+        print(json.dumps(outcome.to_json(), indent=2, ensure_ascii=False))
+    else:
+        print(f"transcript:         {transcript.get('id')}  ({len(transcript['rounds'])} rounds)")
+        print(f"model:              {transcript.get('model')}  ({transcript.get('system_fingerprint')})")
+        for note in outcome.notes:
+            print(f"note:               {note}")
+        for reason in outcome.reasons:
+            print(f"differs:            {reason}")
+        verdict = "verified: every round gave the same output, bit for bit"
+        print(verdict if outcome.ok else "NOT verified")
+    return 0 if outcome.ok else 1
 
 
 def _write_receipt(path: str | None, finished: Finished) -> None:
@@ -496,7 +519,7 @@ def _chat(engine: DllmEngine, args: argparse.Namespace, options: SamplingOptions
 def _chat_with_mcp(engine: DllmEngine, args: argparse.Namespace, request: ChatRequest) -> int:
     import anyio
 
-    from etalii_dllm import mcp_host
+    from etalii_dllm import mcp_host, transcripts
     from etalii_dllm.engine import ToolCallEvent
 
     async def run() -> int:
@@ -505,7 +528,12 @@ def _chat_with_mcp(engine: DllmEngine, args: argparse.Namespace, request: ChatRe
         servers += [mcp_host.parse_server(spec) for spec in args.mcp_server]
         async with mcp_host.McpHost(servers) as host:
             print(f"tools: {', '.join(t.name for t in host.tools) or '(none)'}", file=sys.stderr)
+            recorder = None
+            if args.transcript:
+                recorder = transcripts.Recorder(engine, request, host.tools, args.max_tool_rounds, host.servers)
             async for event in mcp_host.chat(engine, request, host, args.max_tool_rounds):
+                if recorder is not None:
+                    recorder.add(event)
                 if isinstance(event, TextDelta):
                     _write(event.text)
                 elif isinstance(event, ToolCallEvent):
@@ -523,6 +551,11 @@ def _chat_with_mcp(engine: DllmEngine, args: argparse.Namespace, request: ChatRe
             file=sys.stderr,
         )
         _write_receipt(args.receipt, finished)  # the last round's request carries the tool results
+        if recorder is not None:
+            transcript = recorder.transcript()
+            text = json.dumps(transcript, indent=2, ensure_ascii=False) + "\n"
+            Path(args.transcript).write_text(text, encoding="utf-8")
+            print(f"transcript: {args.transcript} ({transcript['id']})", file=sys.stderr)
         return 0
 
     try:

@@ -189,6 +189,11 @@ class McpHost:
             schema = dict(tool.input_schema or {}) or {"type": "object", "properties": {}}
             self.tools.append(Tool(exposed, tool.description or "", schema))
 
+    @property
+    def servers(self) -> dict[str, str]:
+        """Each offered tool name and the server it belongs to."""
+        return {exposed: server for exposed, (server, _) in self._routes.items()}
+
     async def call(self, call: ToolCall) -> ToolResult:
         """Runs one tool call. Failures (unknown tool, bad arguments, server errors) become error results the model
         can read, so a chat never stops on a tool."""
