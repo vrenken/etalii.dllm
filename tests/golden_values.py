@@ -191,3 +191,7 @@ EVAL_FINGERPRINTS = {
     "tiny_multiple_choice": "95d8333e39566d7f7442630ebdcd695d78906f66ef08c73bdcc827a1740c1e05",
     "tiny_perplexity": "f7c09b64af3a7e5762bf6f8cc6e393f03464c5efb5e873a157b921e964c43e35",
 }
+
+# SHA-256 of the conformance vectors' manifest.json (`dllm conformance write`, Phase 20). It covers every input and
+# output file's SHA-256, so it pins the bits of every kernel case, the sampler and the two small decoders.
+CONFORMANCE_MANIFEST_SHA256 = "37f2724b3529c3fe343e1b62f3f85c0fc3bc4615c70138bb6f7c33fe91c2f100"

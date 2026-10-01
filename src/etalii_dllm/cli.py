@@ -211,6 +211,11 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser("info", help="show the model id and system fingerprint")
     verify = commands.add_parser("verify", help="one fingerprint to compare with another machine (same bits?)")
     verify.add_argument("--json", action="store_true", help="print the report as JSON")
+    verify.add_argument(
+        "--reference",
+        action="store_true",
+        help="also check the model's answers against the independent reference implementation (slow)",
+    )
 
     generate = commands.add_parser("generate", help="continue a prompt")
     generate.add_argument("--prompt", default="")
@@ -354,6 +359,21 @@ def main(argv: list[str] | None = None) -> int:
     merge.add_argument("--base", help="ties: the model the others were fine-tuned from")
     merge.add_argument("--density", type=float, default=0.2, help="ties: share of each task vector to keep")
 
+    conformance = commands.add_parser(
+        "conformance", help="write or check the conformance vectors that prove an implementation's bits"
+    )
+    conformance_commands = conformance.add_subparsers(dest="conformance_command", required=True)
+    conformance_write = conformance_commands.add_parser("write", help="write the vectors of this build")
+    conformance_write.add_argument("directory")
+    conformance_check = conformance_commands.add_parser("check", help="check an implementation against vectors")
+    conformance_check.add_argument("directory")
+    conformance_check.add_argument(
+        "--implementation",
+        default="kernels",
+        choices=("kernels", "reference"),
+        help="the compiled kernels (default) or the independent reference implementation",
+    )
+
     export = commands.add_parser("export", help="write a model.dllm as Hugging Face safetensors or GGUF (exact)")
     export.add_argument("path", help="the model.dllm file")
     export.add_argument("--format", required=True, choices=("safetensors", "gguf"))
@@ -382,6 +402,8 @@ def main(argv: list[str] | None = None) -> int:
         return _merge(args)
     if args.command == "export":
         return _export(args)
+    if args.command == "conformance":
+        return _conformance(args)
     if args.command == "audit" and not args.local:
         return _audit(None, args)
     if args.command in ("finetune", "distill"):
@@ -440,7 +462,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "verify":
-        return _verify(engine, args.json)
+        return _verify(engine, args.json, args.reference)
 
     if args.command == "audit":
         return _audit(engine, args)
@@ -514,12 +536,23 @@ def _index(args: argparse.Namespace, engine: DllmEngine) -> int:
     return 0
 
 
-def _verify(engine: DllmEngine, as_json: bool) -> int:
+def _verify(engine: DllmEngine, as_json: bool, against_reference: bool = False) -> int:
     from etalii_dllm import verify
 
     report = verify.run(engine)
+    check = None
+    if against_reference:
+        try:
+            check = verify.check_reference(engine)
+        except ValueError as error:
+            print(f"dllm verify: {error}", file=sys.stderr)
+            return 2
+    failed = bool(report.mismatches) or (check is not None and not check.equal)
     if as_json:
-        print(json.dumps(report.as_dict(), indent=2, sort_keys=True))
+        result = report.as_dict()
+        if check is not None:
+            result["reference"] = check.as_dict()
+        print(json.dumps(result, indent=2, sort_keys=True))
     else:
         for name, value in report.environment.items():
             print(f"{name + ':':<20}{value}")
@@ -530,7 +563,13 @@ def _verify(engine: DllmEngine, as_json: bool) -> int:
             print(f"{name + ':':<20}{value[:32]}{note}")
         print(f"\nverify:             {report.fingerprint}")
         print("Equal verify fingerprints (same model and options) mean the two machines give the same bits.")
-    return 1 if report.mismatches else 0
+        if check is not None:
+            print("\nagainst the reference implementation:")
+            for name, value in check.results.items():
+                print(f"{name + ':':<20}{value}")
+            if check.equal:
+                print("This machine computes exactly what the specification says.")
+    return 1 if failed else 0
 
 
 def _evaluate(engine: DllmEngine, args: argparse.Namespace) -> int:
@@ -589,6 +628,26 @@ def _export(args: argparse.Namespace) -> int:
     for path in files:
         print(f"{file_sha256(path)}  {path}")
     return 0
+
+
+def _conformance(args: argparse.Namespace) -> int:
+    from etalii_dllm import conformance
+
+    if args.conformance_command == "write":
+        count, digest = conformance.write(args.directory)
+        print(f"wrote {count} cases to {args.directory}")
+        print(f"manifest_sha256: {digest}")
+        return 0
+    try:
+        result = conformance.check(args.directory, args.implementation)
+    except (ValueError, OSError) as error:
+        print(f"dllm conformance: {error}", file=sys.stderr)
+        return 2
+    for name, reason in result.failed.items():
+        print(f"FAIL {name}: {reason}")
+    print(f"manifest_sha256: {result.manifest_sha256}")
+    print(f"{len(result.passed)} passed, {len(result.failed)} failed ({args.implementation})")
+    return 0 if result.ok else 1
 
 
 def _cache(args: argparse.Namespace) -> int:

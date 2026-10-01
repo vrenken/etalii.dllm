@@ -420,6 +420,8 @@ It runs a fixed workload (every kernel, the Unicode handling, the model's tokeni
 answer) and prints one fingerprint per part plus a combined `verify:` line, together with the environment (Python,
 instruction set, device). The kernel and Unicode parts are also compared with the values of the release, so a single
 machine already shows `(as released)` or `(DIFFERS from release)`; `--json` prints the report as JSON.
+`dllm verify --reference` also checks the model's answers against an independent second implementation on this one
+machine (see section 16).
 
 ## 10. Prove an answer later
 
@@ -497,6 +499,19 @@ dllm distill small.dllm --teacher big.dllm --prompts prompts.txt -o distilled.dl
 Every result is the same file on every platform, and its lineage says how it was made. An export imports back to
 the same weights, and a distillation's training receipt replays with `--teacher`. Details:
 [building models](model-building.md).
+
+## 16. Check that a machine computes what the specification says
+
+```bash
+dllm --model smollm2-135m.dllm verify --reference    # this machine's kernels against the reference implementation
+dllm conformance write vectors/                      # test vectors for an implementation in another language
+dllm conformance check vectors/                      # check this build (or --implementation reference) against them
+```
+
+`--reference` runs the prompt through the compiled kernels and through a second implementation written in plain
+Python, and prints `equal` for the logits and for a greedy and a sampled answer (it takes about a minute for
+SmolLM2-135M). A difference means this machine's kernels (a SIMD path, the GPU, the compiler) do not compute what the
+[determinism specification](specification.md) says.
 
 ## What does not work yet
 

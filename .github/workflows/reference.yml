@@ -77,3 +77,12 @@ jobs:
         run: |
           python -c "from etalii_dllm import numerics; print('instruction set:', numerics.instruction_set())"
           pytest tests/test_reference_models.py -v -rs -k golden
+      - name: Against the independent reference implementation (Phase 20)
+        shell: bash
+        run: |
+          snapshot=$(ls -d "$DLLM_REFERENCE_MODELS"/HuggingFaceTB/SmolLM2-135M-Instruct/*/ | head -1)
+          dllm import "$snapshot" -o smollm2.dllm --repo HuggingFaceTB/SmolLM2-135M-Instruct --licence Apache-2.0
+          dllm --model smollm2.dllm verify --reference
+          dllm --model smollm2.dllm --quantize q8_0 verify --reference
+          dllm conformance write conformance
+          dllm conformance check conformance

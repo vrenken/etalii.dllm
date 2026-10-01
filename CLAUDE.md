@@ -55,7 +55,9 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
   `docs/provenance.md`; model lineage lives in `modelfile`, training receipts in `training/receipt.py`), `serving` (exact
   response cache, coalescing of identical in-flight requests, `--audit-every`/`GET /v1/audit`, `dllm audit`, `dllm cache`;
   `docs/serving.md`; `chat_stream(fresh=True)` bypasses both and is what replays use), `merging`/`exporting`
-  (`dllm merge`, `dllm export` to safetensors/GGUF; distillation in `training/distill.py`; `docs/model-building.md`), `evaluation` (`dllm eval`,
+  (`dllm merge`, `dllm export` to safetensors/GGUF; distillation in `training/distill.py`; `docs/model-building.md`),
+  `reference` (an independent second implementation of `docs/specification.md` in Python/elementwise NumPy that must
+  give the kernels' bits; `dllm verify --reference`) and `conformance` (`dllm conformance write|check` test vectors), `evaluation` (`dllm eval`,
   `docs/evaluation.md`), `retrieval` (exact document index, `dllm index`, chats
   grounded with `--index`, embedding-model pooling in `engine.embed`; `docs/retrieval.md`).
   Tests compare against the reference packages `gguf`, `safetensors` and `tokenizers` (dev dependencies).

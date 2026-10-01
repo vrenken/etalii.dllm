@@ -11,7 +11,8 @@ requirement instead of a best-effort hint:
 That holds regardless of server load, batch composition or thread scheduling, and across machines: x86-64 and arm64
 CPUs on Linux, Windows and macOS, every SIMD path, and NVIDIA GPUs give the same bits, float32 or Q8_0 alike
 (checked in CI with the real models on all five release platforms). `dllm verify` prints one fingerprint to
-compare two machines. What it takes: [portable determinism](docs/kernels.md#portable-determinism).
+compare two machines. What it takes: [portable determinism](docs/kernels.md#portable-determinism). Exactly which
+bits: the [determinism specification](docs/specification.md), checked by an independent second implementation.
 
 The model speaks the protocols the rest of the ecosystem already uses (the OpenAI, Anthropic and Ollama HTTP APIs, with
 streaming, tool calling and JSON-schema structured output, and the Model Context Protocol), so existing clients and
@@ -176,6 +177,7 @@ module map), with Mermaid diagrams.
 | 17. Verifiable models ✅ | ✅ Model lineage in every model file (#145); ✅ training receipts that replay a fine-tune bit for bit (#146); ✅ byte-identical model files on every platform (#147); ✅ signed receipts, transcripts and models (#148). See [verifiable models](docs/provenance.md) |
 | 18. Deterministic serving at scale ✅ | ✅ An exact response cache that answers repeated requests with the same bits (#151); ✅ identical requests in flight share one generation (#152); ✅ `dllm audit` to check that servers agree, and a self-audit at `GET /v1/audit` (#153). See [serving at scale](docs/serving.md) |
 | 19. Reproducible model building ✅ | ✅ Exact model merges recorded in the lineage (`dllm merge`: linear, SLERP, TIES, #156); ✅ exports back to safetensors and GGUF that import to the same weights (`dllm export`, #157); ✅ distillation on a teacher's answers that replays bit for bit (`dllm distill`, #158). See [building models](docs/model-building.md) |
+| 20. Independent verification ✅ | ✅ A second, independent implementation that gives the same bits (#161); ✅ `dllm verify --reference` to check a machine against it (#162); ✅ conformance vectors for other implementations (`dllm conformance`, #163); ✅ a written determinism specification (#164). See [specification](docs/specification.md) |
 
 ## Working with Claude Code
 
