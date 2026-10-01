@@ -102,6 +102,7 @@ REFERENCE_MODEL_FINGERPRINTS = {
     },
     "qwen2.5-1.5b": {
         "import": "626d11f6abd38e28450448eae2574b29de3212825a143f37bdbf145673e8556d",
+        "file": "bc8dfb5ea86f37e14ee25033baf06400024d11f2a5532a4a039ea3a7172cd1f9",
         # The same answer tokens as Qwen2.5-0.5B ("The capital of France is Paris."), so the same fingerprint.
         "chat": "7a75f8d55b99478a282d601c155df0fd6c5066b613db230b610612abbdc05c37",
         "sampled": "7a75f8d55b99478a282d601c155df0fd6c5066b613db230b610612abbdc05c37",
@@ -112,6 +113,7 @@ REFERENCE_MODEL_FINGERPRINTS = {
     },
     "qwen3": {  # greedy chat rendered with enable_thinking=False
         "import": "c34b4666335e7e0dbe110ee9b9fc78936b84391a57a420688fd78036ad6df5b7",
+        "file": "4499bf801c7716d9667ae367c34085bcd2b280264e73a5c7dbca5032e6f9cfc4",
         "chat": "109ee1a8513bf1dad8a34b0483a0f3045fe18cbf7c03820e4e359cc20912201c",
         "sampled": "109ee1a8513bf1dad8a34b0483a0f3045fe18cbf7c03820e4e359cc20912201c",  # the same answer
         "logits": "54400823b346fbacdb126d5ccca19e12f7e8d3c0d04a94ee546abfa840d1523a",
@@ -121,6 +123,7 @@ REFERENCE_MODEL_FINGERPRINTS = {
     },
     "tinyllama": {
         "import": "b02b4f3085396f3a0b20e07f5b875c9e4a0fbf996dcbc954953bc7d7346b4a4e",
+        "file": "5988a45fedbe2602f678679addbfcd9f3dfc19a772bc0afe77d91ac960504cd4",
         "chat": "12608d6f03ed2ea7892990ed181b39a3d0df693637f168ca34008af1403d4bc3",
         "sampled": "12608d6f03ed2ea7892990ed181b39a3d0df693637f168ca34008af1403d4bc3",
         "logits": "1b40cd4dc37c6179feee4abb69e05b42edc3468200e98390685965d893241a1b",
@@ -130,6 +133,7 @@ REFERENCE_MODEL_FINGERPRINTS = {
     },
     "olmo2": {
         "import": "183baa6ee6dcc08d855a34f1531b7e5cd1d918c21c6e8bef4cebde7ec675d118",
+        "file": "288559f7f1493ae13e14b4e61dda68f53158e4ee19a5170d4bcf674b56e1fc1d",
         "chat": "28bbe79bdd0ca41816a367ee7bb30120cb7072991d1eefa2e0cb16a1f1ca8767",
         "sampled": "28bbe79bdd0ca41816a367ee7bb30120cb7072991d1eefa2e0cb16a1f1ca8767",
         "logits": "41db902b34618b95d3c185d772cf1f10fa58ee3fbd4094a6fb257252528eb5ba",
@@ -139,6 +143,7 @@ REFERENCE_MODEL_FINGERPRINTS = {
     },
     "llama3.2": {
         "import": "1abe366cb3879f73b5fc2c1a6ad191eab99a70b943942bcb98788eff17010f41",
+        "file": "8cbc643239199085a3e6a800f0f767385fbf7d0682c63b16c7c3ed826ff7109e",
         # "The capital of France is Paris." in the Llama 3 vocabulary, which OLMo 2 shares: the same fingerprint.
         "chat": "28bbe79bdd0ca41816a367ee7bb30120cb7072991d1eefa2e0cb16a1f1ca8767",
         "sampled": "28bbe79bdd0ca41816a367ee7bb30120cb7072991d1eefa2e0cb16a1f1ca8767",
@@ -149,6 +154,7 @@ REFERENCE_MODEL_FINGERPRINTS = {
     },
     "gemma3": {  # the licence text is the Gemma terms link (the repository has no licence file)
         "import": "b03e32d2236a67ff0f06e85c69285df2067ec6951bd3f52c502f13f00915e5e9",
+        "file": "ce37a2274fb5048598caee95782b0dd9ef7ba8a9060c2ac26c1da51d7a924c78",
         "chat": "1d3dbbe6c3c890ff1f1215cbd59962f2ced76b538b394b00e1c8d1c97444907f",  # "The capital of France is Paris."
         "sampled": "1d3dbbe6c3c890ff1f1215cbd59962f2ced76b538b394b00e1c8d1c97444907f",  # the same answer
         "logits": "38a0996f57e80c1602e23e89b2897b0cca5422ab49b212e0ee38dfb4886d5360",
