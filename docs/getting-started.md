@@ -78,12 +78,13 @@ dllm import hf:Qwen/Qwen2.5-1.5B-Instruct -o qwen2.5-1.5b.dllm
 dllm --model qwen2.5-1.5b.dllm --quantize q8_0 chat "What is the capital of France?"
 ```
 
-Qwen3-0.6B (Apache 2.0, about 1.5 GB download, 3 GB converted) is verified too. Qwen3 thinks before it answers:
-the reply starts with a `<think>...</think>` block. Add `/no_think` to a message to get a direct answer:
+Qwen3-0.6B (Apache 2.0, about 1.5 GB download, 3 GB converted) is verified too. Qwen3 thinks before it answers;
+its thinking is printed on stderr after `thinking:` and the answer on stdout. `--no-think` gets a direct answer, and
+`--max-reasoning-tokens N` caps the thinking (see [§20](#20-reasoning-models)):
 
 ```bash
 dllm import hf:Qwen/Qwen3-0.6B -o qwen3-0.6b.dllm
-dllm --model qwen3-0.6b.dllm chat "What is the capital of France? /no_think"
+dllm --model qwen3-0.6b.dllm chat "What is the capital of France?" --no-think
 ```
 
 TinyLlama-1.1B-Chat (Apache 2.0, about 2.2 GB download, 4.4 GB converted) is verified too; it is a Llama 2 model
@@ -550,6 +551,17 @@ A prompt that does not fit the model's context window is refused instead of sile
 answer with finish `length`. `--truncate` drops the oldest turns until the prompt fits. `--context-overflow roll`
 keeps generating on a rolled window (the first 4 tokens and the latest half), and every token is still exactly what a
 fresh run over those tokens gives. The HTTP API has both: [long conversations](api.md#long-conversations).
+
+## 20. Reasoning models
+
+```bash
+dllm --model qwen3-0.6b.dllm chat "Is 391 prime?" --max-reasoning-tokens 200
+dllm --model qwen3-0.6b.dllm chat "Is 391 prime?" --no-think
+```
+
+A thinking model's `<think>` block is kept apart from its answer: on the command line it goes to stderr, and the HTTP
+APIs return it in their own reasoning fields. `--max-reasoning-tokens` closes the thinking after exactly that many
+tokens and lets the model answer, and the result is the same on every machine. Details: [reasoning](api.md#reasoning).
 
 ## What does not work yet
 

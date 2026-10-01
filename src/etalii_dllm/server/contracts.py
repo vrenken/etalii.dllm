@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -114,6 +115,12 @@ class ChatCompletionRequest(BaseModel):
     """Extension (as in the Responses API): ``auto`` drops the oldest messages that do not fit the context window."""
     context_overflow: Literal["stop", "roll"] | None = None
     """Extension: ``roll`` keeps generating past a full context window (docs/api.md#long-conversations)."""
+    reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] | None = None
+    """For thinking models: ``none`` switches thinking off, any other effort on (docs/api.md#reasoning)."""
+    chat_template_kwargs: dict[str, Any] | None = None
+    """Extension (as in vLLM): ``{"enable_thinking": false}`` switches thinking off."""
+    max_reasoning_tokens: int | None = None
+    """Extension: the most tokens a thinking model's ``<think>`` block may take (docs/api.md#reasoning)."""
 
 
 DECODING_CONTROLS = (
@@ -129,9 +136,31 @@ DECODING_CONTROLS = (
     "context_overflow",
     "truncate",
     "shift",
+    "reasoning_effort",
+    "chat_template_kwargs",
+    "max_reasoning_tokens",
+    "reasoning",
+    "think",
+    "thinking",
 )
 """Request fields added since Phase 21: left out of the payloads ids are derived from while unset, so the ids of
 requests without them did not change."""
+
+
+def thinking_switch(effort: str | None, template_kwargs: Mapping[str, Any] | None) -> bool | None:
+    """The thinking switch of an OpenAI-style request: ``chat_template_kwargs.enable_thinking`` wins over
+    ``reasoning_effort`` (``none`` is off, any other effort on); ``None`` keeps the model's default."""
+    kwargs = dict(template_kwargs or {})
+    unknown = sorted(set(kwargs) - {"enable_thinking"})
+    if unknown:
+        raise ValueError(f"chat_template_kwargs supports only enable_thinking, not {', '.join(unknown)}")
+    if "enable_thinking" in kwargs:
+        if not isinstance(kwargs["enable_thinking"], bool):
+            raise ValueError("chat_template_kwargs.enable_thinking must be true or false")
+        return kwargs["enable_thinking"]
+    if effort is None:
+        return None
+    return effort != "none"
 
 
 def id_payload(dumped: dict[str, Any]) -> dict[str, Any]:
@@ -160,6 +189,8 @@ class ChoiceLogprobs(BaseModel):
 
 
 class AssistantMessage(BaseModel):
+    model_config = ConfigDict(extra="allow")  # ``reasoning_content`` when a thinking model thought
+
     role: Literal["assistant"] = "assistant"
     content: str | None
     tool_calls: list[ToolCallModel] | None = None
@@ -181,6 +212,8 @@ class PromptTokensDetails(BaseModel):
 
 
 class ChatCompletionUsage(BaseModel):
+    model_config = ConfigDict(extra="allow")  # ``completion_tokens_details`` when a thinking model thought
+
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
@@ -212,6 +245,8 @@ class DeltaToolCall(BaseModel):
 
 
 class ChunkDelta(BaseModel):
+    model_config = ConfigDict(extra="allow")  # ``reasoning_content`` in a thinking model's reasoning chunks
+
     role: Literal["assistant"] | None = None
     content: str | None = None
     tool_calls: list[DeltaToolCall] | None = None

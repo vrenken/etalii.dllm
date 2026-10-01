@@ -31,6 +31,7 @@ from etalii_dllm.engine import (
     ChatStream,
     DllmEngine,
     Finished,
+    ReasoningDelta,
     ResponseFormat,
     TextDelta,
     ToolCallEvent,
@@ -113,6 +114,10 @@ class _GenerateBase(BaseModel):
     """Drop the oldest messages that do not fit the context window (off unless asked for)."""
     shift: bool | None = None
     """Keep generating past a full context window on a rolled context (off unless asked for)."""
+    think: bool | Literal["low", "medium", "high"] | None = None
+    """For thinking models: ``false`` switches thinking off, ``true`` or an effort on (docs/api.md#reasoning)."""
+    max_reasoning_tokens: int | None = None
+    """Extension: the most tokens a thinking model's ``<think>`` block may take."""
 
 
 class ChatBody(_GenerateBase):
@@ -241,6 +246,8 @@ def _chat_request(body: ChatBody, engine: DllmEngine) -> ChatRequest:
         previous_receipt=body.previous_receipt,
         truncation="auto" if body.truncate else "disabled",
         context_overflow="roll" if body.shift else "stop",
+        thinking=None if body.think is None else body.think is not False,
+        max_reasoning_tokens=body.max_reasoning_tokens,
     )
 
 
@@ -267,6 +274,8 @@ def _generate_request(body: GenerateBody, engine: DllmEngine) -> ChatRequest:
         prompt=(body.prompt or "") if body.raw else None,
         truncation="auto" if body.truncate else "disabled",
         context_overflow="roll" if body.shift else "stop",
+        thinking=None if body.think is None else body.think is not False,
+        max_reasoning_tokens=body.max_reasoning_tokens,
     )
 
 
@@ -315,6 +324,11 @@ def _chunks(
             if logprobs:
                 body["logprobs"] = _logprobs(engine, event.logprobs)
             yield {**head, **body, "done": False}
+        elif isinstance(event, ReasoningDelta):
+            if chat:
+                yield {**head, "message": {"role": "assistant", "content": "", "thinking": event.text}, "done": False}
+            else:
+                yield {**head, "response": "", "thinking": event.text, "done": False}
         elif isinstance(event, ToolCallEvent):
             call = {"function": {"name": event.call.name, "arguments": _arguments(event.call)}}
             yield {**head, "message": {"role": "assistant", "content": "", "tool_calls": [call]}, "done": False}
@@ -327,12 +341,17 @@ def _chunks(
 def _collect(chunks: Iterator[dict[str, Any]], chat: bool) -> dict[str, Any]:
     """The non-streamed response: the streamed objects merged."""
     text: list[str] = []
+    thinking: list[str] | None = None
     calls: list[dict[str, Any]] = []
     logprobs: list[dict[str, Any]] = []
     final: dict[str, Any] = {}
     for chunk in chunks:
         if chunk["done"]:
             final = chunk
+            continue
+        part = chunk["message"].get("thinking") if chat else chunk.get("thinking")
+        if part is not None:
+            thinking = [*(thinking or []), part]
             continue
         if chat:
             text.append(chunk["message"]["content"])
@@ -342,11 +361,15 @@ def _collect(chunks: Iterator[dict[str, Any]], chat: bool) -> dict[str, Any]:
         logprobs.extend(chunk.get("logprobs", ()))
     if chat:
         message: dict[str, Any] = {"role": "assistant", "content": "".join(text)}
+        if thinking is not None:
+            message["thinking"] = "".join(thinking)
         if calls:
             message["tool_calls"] = calls
         final["message"] = message
     else:
         final["response"] = "".join(text)
+        if thinking is not None:
+            final["thinking"] = "".join(thinking)
     if logprobs:
         final["logprobs"] = logprobs
     return final

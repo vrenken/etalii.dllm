@@ -53,6 +53,12 @@ class OutputConfig(BaseModel):
     format: OutputFormat | None = None
 
 
+class ThinkingConfig(BaseModel):
+    type: Literal["enabled", "disabled", "adaptive"]
+    budget_tokens: int | None = None
+    """With ``enabled``: the most tokens the thinking may take (an exact token count here)."""
+
+
 class MessagesRequest(BaseModel):
     model: str | None = None
     max_tokens: int
@@ -74,6 +80,9 @@ class MessagesRequest(BaseModel):
     """Extension: add a ``receipt`` to the response (see docs/receipts.md)."""
     previous_receipt: str | None = None
     """Extension: the receipt id of the conversation's previous turn, recorded as the new receipt's ``previous``."""
+    thinking: ThinkingConfig | None = None
+    """For thinking models: ``enabled`` (with ``budget_tokens``), ``adaptive`` or ``disabled``
+    (docs/api.md#reasoning)."""
 
 
 class CountTokensRequest(BaseModel):
@@ -87,6 +96,13 @@ class CountTokensRequest(BaseModel):
 class TextBlock(BaseModel):
     type: Literal["text"] = "text"
     text: str
+
+
+class ThinkingBlock(BaseModel):
+    type: Literal["thinking"] = "thinking"
+    thinking: str
+    signature: str
+    """A hash of the thinking (derived from content; nothing to verify with Anthropic)."""
 
 
 class ToolUseBlock(BaseModel):
@@ -111,7 +127,7 @@ class MessageResponse(BaseModel):
     id: str
     type: Literal["message"] = "message"
     role: Literal["assistant"] = "assistant"
-    content: list[TextBlock | ToolUseBlock]
+    content: list[ThinkingBlock | TextBlock | ToolUseBlock]
     model: str
     stop_reason: str | None
     stop_sequence: str | None

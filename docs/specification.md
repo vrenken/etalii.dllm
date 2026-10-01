@@ -266,6 +266,28 @@ Otherwise the token is appended and fed. The answer also ends after `max_tokens`
   the tool messages directly after it. When only system messages and the last message are left, the prompt is refused
   as above.
 
+### Reasoning
+
+A thinking model is one whose chat template contains `<think>`. For its chat answers (not raw prompts, structured
+output or forced tool calls, which constrain the answer from its first token), the output text is split by fixed
+text matching (the text is the decoded output bytes, without a trailing incomplete UTF-8 sequence):
+
+- The output **starts in thinking** when the prompt, without trailing whitespace, ends with `<think>`. Otherwise it
+  thinks when its text, without leading whitespace, starts with `<think>`.
+- The thinking runs to the first `</think>`. The **reasoning** is the text in between without surrounding whitespace;
+  the **answer** is the rest without leading whitespace. When `</think>` never comes, there is no answer. An output
+  that does not think is all answer, unchanged.
+- **Switch.** `thinking = true/false` renders the template with `enable_thinking` set. When thinking is off and that
+  gives the same prompt as thinking on (the template ignores it), the engine appends `\n</think>\n\n` to a prompt
+  that starts the output in thinking, else `<think>\n\n</think>\n\n`.
+- **Budget.** A generated token counts toward the budget when the block is open after it and was not closed before
+  it: from the first output token when the output starts in thinking, else from the token that completes `<think>`,
+  to the token that completes `</think>`, included. Before a token is sampled, when the block is open and has counted
+  `max_reasoning_tokens` tokens, the engine appends the tokens of `\n</think>\n\n` (without the `\n` in front when
+  the text ends with one), encoded by the model's tokenizer, as output tokens: the sampler records them (penalties)
+  and they count toward `max_tokens` and the context window, whichever ends first. Sampling then continues.
+  Usage reports the counted tokens as `reasoning_tokens`.
+
 Not covered here, but just as fixed:
 
 - tokenization: byte-level BPE and SentencePiece-style tokenizers, with Unicode handling pinned to version 15.1
@@ -278,7 +300,8 @@ Not covered here, but just as fixed:
 **On one machine.** `dllm --model m.dllm verify --reference` compares this machine's compiled kernels (whatever
 SIMD path, thread count or GPU is in use) with the reference implementation. It checks the prompt's logits and a
 greedy, a sampled and a controlled 16-token answer (every logit adjustment and `min_p` at once) and a greedy answer in a window just
-longer than the prompt, which rolls it ([the context window](#the-context-window)), and prints `equal` for each part, or where the two first differ. CI runs it
+longer than the prompt, which rolls it ([the context window](#the-context-window)), and a greedy answer that starts in a
+thinking block with a budget of 2 tokens ([reasoning](#reasoning)), and prints `equal` for each part, or where the two first differ. CI runs it
 for SmolLM2-135M on every release platform and SIMD path, in float32 and Q8_0.
 
 **Elsewhere.** `dllm conformance write DIR` writes the vectors:

@@ -240,6 +240,36 @@ curl -s localhost:5080/v1/chat/completions -H 'content-type: application/json' -
 }'
 ```
 
+## Reasoning
+
+Thinking models (Qwen3 and others whose chat template writes `<think>` blocks) get their reasoning separated from the
+answer, by a fixed rule ([specification](specification.md#reasoning)), in streamed and non-streamed responses alike:
+
+| | OpenAI chat | Responses | Anthropic | Ollama | CLI (`chat`) |
+| --- | --- | --- | --- | --- | --- |
+| The reasoning | `message.reasoning_content`, streamed as `delta.reasoning_content` | a `reasoning` output item (`reasoning_text`), streamed as `response.reasoning_text.delta` | a `thinking` content block, streamed as `thinking_delta` | `message.thinking` (`thinking` for `/api/generate`) | on stderr after `thinking:` |
+| Thinking off | `reasoning_effort: "none"` or `chat_template_kwargs: {"enable_thinking": false}` | `reasoning: {"effort": "none"}` | `thinking: {"type": "disabled"}` | `think: false` | `--no-think` |
+| Thinking on | any other `reasoning_effort` | any other effort | `enabled` or `adaptive` | `think: true` or an effort | `--think` |
+| Budget | `max_reasoning_tokens` (extension) | `max_reasoning_tokens` (extension) | `thinking.budget_tokens` | `max_reasoning_tokens` (extension) | `--max-reasoning-tokens N` |
+| Usage | `completion_tokens_details.reasoning_tokens` | `output_tokens_details.reasoning_tokens` | part of `output_tokens` | part of `eval_count` | |
+
+- Without a switch the model does what its template does by default (Qwen3 thinks). Switching thinking off goes
+  through the model's own template (`enable_thinking`), so the prompt is exactly what the model's authors render.
+- A budget is a token count, never a time: when the thinking has taken `max_reasoning_tokens` tokens, the engine
+  closes the block with fixed tokens and the answer follows, so the same request gives the same bits everywhere.
+- Structured output and forced tool calls answer at once (their grammar applies from the first token), so they are not
+  split; switch thinking off for them on models that think by default.
+- The reasoning is not part of the conversation history (Qwen3's template drops it too). Receipts record the switch
+  and the budget and hash the reasoning, so `dllm replay` repeats them. Anthropic's `signature` is a hash of the
+  thinking, derived from content. Responses without reasoning are unchanged, field for field.
+
+```bash
+curl -s localhost:5080/v1/chat/completions -H 'content-type: application/json' -d '{
+  "messages": [{"role": "user", "content": "Is 391 prime?"}],
+  "max_tokens": 512, "max_reasoning_tokens": 256
+}'
+```
+
 ## Long conversations
 
 A prompt and its answer never hold more tokens than the model's context window (`context_length` in `dllm inspect`).

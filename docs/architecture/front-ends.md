@@ -153,6 +153,15 @@ otherwise as Hermes-style instructions in the system message. The model writes c
 tool and that its arguments are valid under the tool's JSON schema. While tools are offered, the stream only
 releases text that is certainly part of the answer, never the beginning of a call.
 
+### Reasoning
+
+For a thinking model (its template writes `<think>` blocks) `DllmEngine._events` splits the output by the fixed rule
+in `reasoning.py`: `ReasoningDelta` events carry the block's text and `TextDelta` events the answer, and only text
+that every continuation keeps is released (`reasoning.streamable`), so streamed and non-streamed answers match. Each
+front end maps `ReasoningDelta` to its own field. `reasoning.Tracker` follows the block token by token inside the
+generator, which closes it with fixed tokens when `max_reasoning_tokens` is spent; tool calls are parsed from the
+answer part only.
+
 ## The MCP host loop
 
 ```mermaid

@@ -74,10 +74,12 @@ def _logprobs(value: Sequence[Any]) -> TokenLogprobs:
 
 def event_json(event: ChatEvent) -> dict[str, Any]:
     """An event as JSON, floats as exact hex strings."""
-    from etalii_dllm.engine import TextDelta, ToolCallEvent
+    from etalii_dllm.engine import ReasoningDelta, TextDelta, ToolCallEvent
 
     if isinstance(event, TextDelta):
         return {"text": event.text, "logprobs": [_logprobs_json(item) for item in event.logprobs]}
+    if isinstance(event, ReasoningDelta):
+        return {"reasoning": event.text, "logprobs": [_logprobs_json(item) for item in event.logprobs]}
     if isinstance(event, ToolCallEvent):
         call = event.call
         return {"tool_call": {"index": event.index, "id": call.id, "name": call.name, "arguments": call.arguments}}
@@ -88,16 +90,19 @@ def event_json(event: ChatEvent) -> dict[str, Any]:
             "completion_tokens": event.completion_tokens,
             "fingerprint": event.fingerprint,
             "receipt": event.receipt,
+            **({"reasoning_tokens": event.reasoning_tokens} if event.reasoning_tokens else {}),
         }
     }
 
 
 def event_from_json(value: Mapping[str, Any]) -> ChatEvent:
     """The inverse of :func:`event_json`."""
-    from etalii_dllm.engine import Finished, TextDelta, ToolCallEvent
+    from etalii_dllm.engine import Finished, ReasoningDelta, TextDelta, ToolCallEvent
 
     if "text" in value:
         return TextDelta(value["text"], tuple(_logprobs(item) for item in value["logprobs"]))
+    if "reasoning" in value:
+        return ReasoningDelta(value["reasoning"], tuple(_logprobs(item) for item in value["logprobs"]))
     if "tool_call" in value:
         call = value["tool_call"]
         return ToolCallEvent(int(call["index"]), ToolCall(call["id"], call["name"], call["arguments"]))
@@ -108,6 +113,7 @@ def event_from_json(value: Mapping[str, Any]) -> ChatEvent:
         int(done["completion_tokens"]),
         done["fingerprint"],
         done["receipt"],
+        int(done.get("reasoning_tokens", 0)),
     )
 
 

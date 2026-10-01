@@ -8,6 +8,7 @@ are refused.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Iterator
 from typing import Annotated, Any
@@ -21,6 +22,7 @@ from etalii_dllm.engine import (
     ChatStream,
     DllmEngine,
     Finished,
+    ReasoningDelta,
     ResponseFormat,
     TextDelta,
     ToolCallEvent,
@@ -34,11 +36,13 @@ from etalii_dllm.server.anthropic_contracts import (
     MessagesRequest,
     RequestBlock,
     TextBlock,
+    ThinkingBlock,
     ToolChoiceModel,
     ToolDefinition,
     ToolUseBlock,
     Usage,
 )
+from etalii_dllm.server.contracts import id_payload
 from etalii_dllm.tools import Tool, ToolChoice
 
 Engine = Annotated[DllmEngine, Depends(default_engine)]
@@ -130,8 +134,15 @@ def _chat_request(request: MessagesRequest, engine: DllmEngine) -> ChatRequest:
     output = output or request.output_format
     response_format = ResponseFormat("json_schema", output.json_schema) if output else ResponseFormat()
     request_id = engine.derive_id(
-        "msg_", request.model_dump(mode="json", exclude={"stream", "receipt", "previous_receipt"})
+        "msg_", id_payload(request.model_dump(mode="json", exclude={"stream", "receipt", "previous_receipt"}))
     )
+    thinking, budget = None, None
+    if request.thinking is not None:
+        thinking = request.thinking.type != "disabled"
+        if request.thinking.type == "enabled":
+            if request.thinking.budget_tokens is None:
+                raise ValueError("thinking of type 'enabled' needs budget_tokens")
+            budget = request.thinking.budget_tokens
     return ChatRequest(
         messages=_messages(request.system, request.messages),
         max_tokens=request.max_tokens,
@@ -143,6 +154,8 @@ def _chat_request(request: MessagesRequest, engine: DllmEngine) -> ChatRequest:
         call_id_prefix="toolu_",
         request_id=request_id,
         previous_receipt=request.previous_receipt,
+        thinking=thinking,
+        max_reasoning_tokens=budget,
     )
 
 
@@ -162,7 +175,10 @@ def messages(request: MessagesRequest, engine: Engine) -> MessageResponse | JSON
         result = engine.chat_completion(chat)
     except ValueError as problem:
         return error(str(problem))
-    content: list[TextBlock | ToolUseBlock] = [TextBlock(text=result.content)] if result.content else []
+    content: list[ThinkingBlock | TextBlock | ToolUseBlock] = []
+    if result.reasoning is not None:
+        content.append(ThinkingBlock(thinking=result.reasoning, signature=_signature(result.reasoning)))
+    content += [TextBlock(text=result.content)] if result.content else []
     content += [ToolUseBlock(id=c.id, name=c.name, input=_input(c)) for c in result.tool_calls]
     return MessageResponse(
         id=chat.request_id,
@@ -177,6 +193,10 @@ def messages(request: MessagesRequest, engine: Engine) -> MessageResponse | JSON
         ),
         **({"receipt": result.receipt} if request.receipt else {}),
     )
+
+
+def _signature(thinking: str) -> str:
+    return "dllm-" + hashlib.sha256(thinking.encode()).hexdigest()
 
 
 def _input(call: ToolCall) -> dict[str, Any]:
@@ -207,7 +227,24 @@ def _events(engine: DllmEngine, chat: ChatRequest, stream: ChatStream, receipt: 
     yield _event("message_start", {"message": start})
     index = -1
     text_open = False
+    thought: list[str] | None = None
     for event in stream:
+        if isinstance(event, ReasoningDelta):
+            if thought is None:
+                index += 1
+                thought = []
+                block = {"type": "thinking", "thinking": "", "signature": ""}
+                yield _event("content_block_start", {"index": index, "content_block": block})
+            thought.append(event.text)
+            if event.text:
+                delta = {"type": "thinking_delta", "thinking": event.text}
+                yield _event("content_block_delta", {"index": index, "delta": delta})
+            continue
+        if thought is not None:
+            delta = {"type": "signature_delta", "signature": _signature("".join(thought))}
+            yield _event("content_block_delta", {"index": index, "delta": delta})
+            yield _event("content_block_stop", {"index": index})
+            thought = None
         if isinstance(event, TextDelta):
             if not event.text:
                 continue

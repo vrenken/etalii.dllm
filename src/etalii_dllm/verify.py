@@ -28,6 +28,8 @@ from etalii_dllm.sampling import GREEDY, SamplingOptions
 PROMPT = "The capital of France is"
 MAX_TOKENS = 16
 ROLLED_ROOM = 3
+THINKING_BUDGET = 2
+"""Tokens of thinking the budgeted check allows before the block is closed."""
 """Tokens the rolled check's context window holds beyond the prompt."""
 SAMPLED = SamplingOptions(temperature=0.8, seed=7)
 CONTROLLED = SamplingOptions(
@@ -187,8 +189,8 @@ class ReferenceCheck:
     """``dllm verify --reference``: the engine against the independent reference implementation (issue #162)."""
 
     results: dict[str, str]
-    """``logits``, ``greedy``, ``sampled``, ``controlled`` and ``rolled``: ``"equal"``, or where the two first
-    differ."""
+    """``logits``, ``greedy``, ``sampled``, ``controlled``, ``rolled`` and ``budgeted``: ``"equal"``, or where the
+    two first differ."""
 
     @property
     def equal(self) -> bool:
@@ -219,6 +221,7 @@ def check_reference(engine: Any, max_tokens: int = MAX_TOKENS) -> ReferenceCheck
     says on this machine."""
     from etalii_dllm import reference
     from etalii_dllm.generation import Generator
+    from etalii_dllm.reasoning import Tracker
     from etalii_dllm.transformer import Transformer
 
     if not isinstance(engine.model, Transformer):
@@ -245,4 +248,11 @@ def check_reference(engine: Any, max_tokens: int = MAX_TOKENS) -> ReferenceCheck
     answer = rolling.generate(PROMPT, max_tokens, GREEDY, overflow="roll")
     tokens, _ = twin.generate(context, max_tokens, reference.sampler(GREEDY), stops, overflow="roll", window=window)
     results["rolled"] = _first_difference(answer.tokens, tokens)
+    # The answer as if the prompt had opened a <think> block with a budget of a few tokens, so it is closed with
+    # fixed tokens (docs/specification.md#reasoning) and the rest follows them.
+    plain = Generator(engine.model, engine.tokenizer, stops)
+    answer = plain.generate(PROMPT, max_tokens, GREEDY, reasoning=Tracker(True, THINKING_BUDGET))
+    budget = reference.ThinkingBudget(THINKING_BUDGET, True, engine.tokenizer.decode_bytes, engine.tokenizer.encode)
+    tokens, _ = twin.generate(context, max_tokens, reference.sampler(GREEDY), stops, thinking=budget)
+    results["budgeted"] = _first_difference(answer.tokens, tokens)
     return ReferenceCheck(results)

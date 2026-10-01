@@ -80,6 +80,8 @@ def request_record(request: ChatRequest) -> dict[str, Any]:
         "request_id": request.request_id,
         **({"truncation": request.truncation} if request.truncation != "disabled" else {}),
         **({"context_overflow": request.context_overflow} if request.context_overflow != "stop" else {}),
+        **({"thinking": request.thinking} if request.thinking is not None else {}),
+        **({"max_reasoning_tokens": request.max_reasoning_tokens} if request.max_reasoning_tokens is not None else {}),
     }
 
 
@@ -115,6 +117,8 @@ def request_from_record(record: Mapping[str, Any]) -> ChatRequest:
         prompt=record["prompt"],
         truncation=record.get("truncation", "disabled"),
         context_overflow=record.get("context_overflow", "stop"),
+        thinking=record.get("thinking"),
+        max_reasoning_tokens=record.get("max_reasoning_tokens"),
     )
 
 
@@ -125,7 +129,10 @@ def output_record(
     finish_reason: str,
     prompt_tokens: int,
     completion_tokens: int,
+    reasoning: str | None = None,
 ) -> dict[str, Any]:
+    """``reasoning`` (a thinking model's ``<think>`` block) is recorded only when there is one, so other receipts
+    keep their bytes."""
     calls = [{"id": c.id, "name": c.name, "arguments": c.arguments} for c in tool_calls]
     return {
         "tokens": token_fingerprint,
@@ -134,6 +141,7 @@ def output_record(
         "finish_reason": finish_reason,
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
+        **({"reasoning": _sha256(reasoning)} if reasoning is not None else {}),
     }
 
 

@@ -40,7 +40,8 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
   style reassociation flags or `-ffp-contract=fast`.
 - `src/etalii_dllm/`: `tensor` (aligned float32 `Tensor`), `numerics` (thin wrappers over `_kernels`, fingerprints),
   `sampling`, `tokenization`, `models`, `generation` (also the context window: `ContextLengthError`, rolling;
-  truncation is `engine.fit_messages`, `docs/api.md#long-conversations`), `prompt_cache` (KV caches reused across requests),
+  truncation is `engine.fit_messages`, `docs/api.md#long-conversations`), `reasoning` (thinking models: `<think>` split, the
+  thinking switch and budget; `docs/api.md#reasoning`), `prompt_cache` (KV caches reused across requests),
   `batching` (concurrent generations share `forward_batch` steps), `chat`, `engine` (`DllmEngine`, the facade shared by every front
   end; `DLLM_MODEL`/`--model` selects a `model.dllm`), `transformer` (Llama/Qwen2/Qwen3 decoder + KV cache), `bpe`, `unicode` (Unicode tables pinned to one version) and
   `chat_template` (the model's own tokenizer and Jinja template), `sampling` (logit bias, penalties, top-k/top-p/

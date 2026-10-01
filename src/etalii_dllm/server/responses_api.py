@@ -34,6 +34,7 @@ from etalii_dllm.engine import (
     ChatStream,
     DllmEngine,
     Finished,
+    ReasoningDelta,
     ResponseFormat,
     TextDelta,
     ToolCallEvent,
@@ -41,7 +42,7 @@ from etalii_dllm.engine import (
 )
 from etalii_dllm.generation import ContextLengthError, TokenLogprobs
 from etalii_dllm.sampling import SamplingOptions
-from etalii_dllm.server.contracts import id_payload
+from etalii_dllm.server.contracts import id_payload, thinking_switch
 from etalii_dllm.tools import Tool, ToolChoice
 
 Engine = Annotated[DllmEngine, Depends(default_engine)]
@@ -105,6 +106,13 @@ class TextConfig(BaseModel):
     format: TextFormat | None = None
 
 
+class ReasoningConfig(BaseModel):
+    effort: Literal["none", "minimal", "low", "medium", "high"] | None = None
+    """For thinking models: ``none`` switches thinking off, any other effort on (docs/api.md#reasoning)."""
+    summary: str | None = None
+    """Accepted; the reasoning is returned in full (``reasoning_text``), never summarised."""
+
+
 class ResponsesRequest(BaseModel):
     model: str | None = None
     input: str | list[InputItem] = ""
@@ -131,6 +139,9 @@ class ResponsesRequest(BaseModel):
     truncation: Literal["auto", "disabled"] | None = None
     context_overflow: Literal["stop", "roll"] | None = None
     """Extension: ``roll`` keeps generating past a full context window (docs/api.md#long-conversations)."""
+    reasoning: ReasoningConfig | None = None
+    max_reasoning_tokens: int | None = None
+    """Extension: the most tokens a thinking model's ``<think>`` block may take (docs/api.md#reasoning)."""
 
 
 def error(message: str, status: int = 400) -> JSONResponse:
@@ -279,6 +290,8 @@ def _prepare(request: ResponsesRequest, engine: DllmEngine) -> tuple[ChatRequest
         previous_receipt=previous_receipt,
         truncation=request.truncation or "disabled",
         context_overflow=request.context_overflow or "stop",
+        thinking=thinking_switch(request.reasoning.effort if request.reasoning else None, None),
+        max_reasoning_tokens=request.max_reasoning_tokens,
     )
     return chat, conversation
 
@@ -356,10 +369,27 @@ class _Events:
         yield self._event("response.in_progress", response=json.loads(json.dumps(self.response)))
         output: list[dict[str, Any]] = self.response["output"]
         message: dict[str, Any] | None = None
+        thought: dict[str, Any] | None = None
+        """The open reasoning item (a thinking model's ``<think>`` block comes before everything else)."""
+        thinking: list[str] = []
         text: list[str] = []
         logprobs: list[dict[str, Any]] = []
         response_id = self.chat.request_id
         for event in self.stream:
+            if isinstance(event, ReasoningDelta):
+                if thought is None:
+                    thought = {"id": _item_id("rs_", response_id, len(output)), "type": "reasoning", "summary": [],
+                               "content": [], "status": "in_progress"}  # fmt: skip
+                    output.append(thought)
+                    yield self._event("response.output_item.added", output_index=len(output) - 1, item=dict(thought))
+                thinking.append(event.text)
+                if event.text:
+                    index = output.index(thought)
+                    yield self._event("response.reasoning_text.delta", item_id=thought["id"], output_index=index,
+                                      content_index=0, delta=event.text)  # fmt: skip
+                continue
+            if thought is not None and thought["status"] == "in_progress":
+                yield from self._close_reasoning(thought, output.index(thought), "".join(thinking))
             if isinstance(event, TextDelta):
                 entries = _logprobs(self.engine, event.logprobs) if self.chat.top_logprobs is not None else []
                 if not event.text and not entries:
@@ -382,6 +412,12 @@ class _Events:
                 if message is not None:
                     yield from self._close_message(message, output.index(message), "".join(text), logprobs)
                 yield self._finish(event)
+
+    def _close_reasoning(self, item: dict[str, Any], index: int, text: str) -> Iterator[dict[str, Any]]:
+        yield self._event("response.reasoning_text.done", item_id=item["id"], output_index=index, content_index=0,
+                          text=text)  # fmt: skip
+        item.update(content=[{"type": "reasoning_text", "text": text}], status="completed")
+        yield self._event("response.output_item.done", output_index=index, item=item)
 
     def _open_message(self, message: dict[str, Any], index: int) -> Iterator[dict[str, Any]]:
         yield self._event("response.output_item.added", output_index=index, item={**message, "content": []})
@@ -420,7 +456,7 @@ class _Events:
             "input_tokens": prompt,
             "input_tokens_details": {"cached_tokens": cached},
             "output_tokens": event.completion_tokens,
-            "output_tokens_details": {"reasoning_tokens": 0},
+            "output_tokens_details": {"reasoning_tokens": event.reasoning_tokens},
             "total_tokens": prompt + event.completion_tokens,
         }
         if event.finish_reason == "length":
