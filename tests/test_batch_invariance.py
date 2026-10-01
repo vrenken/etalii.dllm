@@ -87,6 +87,28 @@ def test_attention_is_identical_on_every_code_path():
         assert out == expected, setting
 
 
+@pytest.mark.parametrize(
+    ("q_len", "kv_len", "q_heads", "kv_heads", "window", "softcap", "causal"),
+    [
+        (1, 1, 1, 1, 0, 0.0, True),  # decode, one key
+        (9, 40, 8, 2, 0, 0.0, True),  # group 4: one tile per (query, kv head)
+        (7, 7, 9, 3, 0, 0.0, True),  # group 3: tiles span queries with different causal spans
+        (13, 30, 4, 4, 5, 0.0, True),  # group 1, sliding window: different first keys in a tile
+        (6, 50, 14, 2, 0, 30.0, True),  # group 7, soft-capping
+        (5, 11, 6, 3, 0, 0.0, False),  # not causal
+        (3, 2, 2, 1, 0, 0.0, True),  # keys from the cache only partly visible (q_offset 0 below)
+    ],
+)
+def test_tiled_attention_equals_the_row_reference(q_len, kv_len, q_heads, kv_heads, window, softcap, causal):
+    q = gaussian(21, q_len, q_heads, 16) * np.float32(3.0)
+    k, v = gaussian(22, kv_len, kv_heads, 16), gaussian(23, kv_len, kv_heads, 24)
+    q_offset = 0 if kv_len < q_len else kv_len - q_len
+    arguments = (q, k, v, 0.25, causal, q_offset, window, softcap)
+    expected = _kernels.attention(*arguments, reference=True).tobytes()
+    for setting in every_setting():
+        assert _kernels.attention(*arguments).tobytes() == expected, setting
+
+
 def test_quantized_linear_is_identical_on_every_code_path():
     weight = QuantizedWeight(gaussian(8, 50, 96))
     x = gaussian(9, 67, 96)

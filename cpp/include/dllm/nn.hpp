@@ -440,9 +440,48 @@ inline void rope(const float* x, const std::int64_t* positions, const double* in
     }
 }
 
+// The softmax and value sum of one attention row whose scaled scores[0, visible) are ready: a positive softcap
+// (Gemma 2) maps each score s to softcap * tanh(s / softcap), in double; the maximum is subtracted, exponentials
+// and their total run over keys ascending, then the value sum over keys ascending, divided by the total once.
+DLLM_ALWAYS_INLINE void attention_finish(double* scores, const float* v, float* oh, double* acc, std::size_t visible,
+                                         std::size_t kv_heads, std::size_t kvh, std::size_t value_dim,
+                                         double softcap) {
+    std::size_t j = 0;
+    if (softcap > 0.0) {
+        for (j = 0; j < visible; ++j) {
+            scores[j] = softcap * dllm::tanh(scores[j] / softcap);
+        }
+    }
+    double max = scores[0];
+    for (j = 1; j < visible; ++j) {
+        if (scores[j] > max) {
+            max = scores[j];
+        }
+    }
+    double total = 0.0;
+    for (j = 0; j < visible; ++j) {
+        scores[j] = dllm::exp(scores[j] - max);
+        total += scores[j];
+    }
+    for (std::size_t i = 0; i < value_dim; ++i) {
+        acc[i] = 0.0;
+    }
+    for (j = 0; j < visible; ++j) {
+        const float* vj = v + (j * kv_heads + kvh) * value_dim;
+        const double p = scores[j];
+        for (std::size_t i = 0; i < value_dim; ++i) {
+            acc[i] += p * static_cast<double>(vj[i]);
+        }
+    }
+    const double inv = 1.0 / total;
+    for (std::size_t i = 0; i < value_dim; ++i) {
+        oh[i] = static_cast<float>(acc[i] * inv);
+    }
+}
+
 // One (query, head) row of attention(): writes oh[value_dim]. Four keys are scored at a time, each with its own
-// accumulator, so the order inside every dot product is unchanged. A positive softcap (Gemma 2) maps each scaled
-// score s to softcap * tanh(s / softcap), in double.
+// accumulator, so the order inside every dot product is unchanged; attention_finish() does the rest. This is the
+// plain statement of a row; attention() computes the same bits with attention_tile().
 DLLM_ALWAYS_INLINE void attention_row(const float* qh, const float* k, const float* v, float* oh, double* scores,
                                       double* acc, std::size_t visible, std::size_t kv_heads, std::size_t kvh,
                                       std::size_t head_dim, std::size_t value_dim, double scale, double softcap) {
@@ -483,67 +522,117 @@ DLLM_ALWAYS_INLINE void attention_row(const float* qh, const float* k, const flo
         }
         scores[j] = dotp * scale;
     }
-    if (softcap > 0.0) {
-        for (j = 0; j < visible; ++j) {
-            scores[j] = softcap * dllm::tanh(scores[j] / softcap);
+    attention_finish(scores, v, oh, acc, visible, kv_heads, kvh, value_dim, softcap);
+}
+
+// Up to kQueryTile rows that read the same key/value head, computed together: lane l of every score accumulator
+// belongs to row l, so SIMD registers hold different rows while each lane sums its own dot product over head_dim
+// ascending in double, exactly as attention_row(). The rows may see different keys (causal masks, windows): scores
+// are computed for the union of their spans and each row's softmax and value sum (attention_finish) use only its
+// own span, so a row's bits never depend on the rows it is tiled with.
+constexpr std::size_t kQueryTile = 4;
+
+struct AttentionTile {
+    const float* q[kQueryTile];
+    float* out[kQueryTile];
+    std::size_t first[kQueryTile];
+    std::size_t count[kQueryTile];
+    std::size_t lanes;
+};
+
+DLLM_ALWAYS_INLINE void attention_tile(const AttentionTile& tile, const float* k, const float* v, double* scores,
+                                       double* acc, float* qt, std::size_t kv_len, std::size_t kv_heads,
+                                       std::size_t kvh, std::size_t head_dim, std::size_t value_dim, double scale,
+                                       double softcap) {
+    std::size_t u0 = kv_len;
+    std::size_t u1 = 0;
+    for (std::size_t l = 0; l < tile.lanes; ++l) {
+        if (tile.count[l] == 0) {
+            continue;
+        }
+        u0 = tile.first[l] < u0 ? tile.first[l] : u0;
+        u1 = tile.first[l] + tile.count[l] > u1 ? tile.first[l] + tile.count[l] : u1;
+    }
+    // Queries transposed to qt[head_dim][kQueryTile]; unused lanes are zero and their scores are never read.
+    for (std::size_t i = 0; i < head_dim; ++i) {
+        for (std::size_t l = 0; l < kQueryTile; ++l) {
+            qt[i * kQueryTile + l] = l < tile.lanes ? tile.q[l][i] : 0.0f;
         }
     }
-    double max = scores[0];
-    for (j = 1; j < visible; ++j) {
-        if (scores[j] > max) {
-            max = scores[j];
+    const std::size_t key_stride = kv_heads * head_dim;
+    std::size_t j = u0;
+    for (; j + 4 <= u1; j += 4) {
+        const float* k0 = k + (j * kv_heads + kvh) * head_dim;
+        double a[4][kQueryTile] = {};
+        for (std::size_t i = 0; i < head_dim; ++i) {
+            const float* qi = qt + i * kQueryTile;
+            for (std::size_t b = 0; b < 4; ++b) {
+                const double kb = k0[b * key_stride + i];
+                for (std::size_t l = 0; l < kQueryTile; ++l) {
+                    a[b][l] += static_cast<double>(qi[l]) * kb;
+                }
+            }
+        }
+        for (std::size_t b = 0; b < 4; ++b) {
+            for (std::size_t l = 0; l < kQueryTile; ++l) {
+                scores[l * kv_len + j + b] = a[b][l] * scale;
+            }
         }
     }
-    double total = 0.0;
-    for (j = 0; j < visible; ++j) {
-        scores[j] = dllm::exp(scores[j] - max);
-        total += scores[j];
-    }
-    for (std::size_t i = 0; i < value_dim; ++i) {
-        acc[i] = 0.0;
-    }
-    for (j = 0; j < visible; ++j) {
-        const float* vj = v + (j * kv_heads + kvh) * value_dim;
-        const double p = scores[j];
-        for (std::size_t i = 0; i < value_dim; ++i) {
-            acc[i] += p * static_cast<double>(vj[i]);
+    for (; j < u1; ++j) {
+        const float* kj = k + (j * kv_heads + kvh) * head_dim;
+        double a[kQueryTile] = {};
+        for (std::size_t i = 0; i < head_dim; ++i) {
+            const double ki = kj[i];
+            for (std::size_t l = 0; l < kQueryTile; ++l) {
+                a[l] += static_cast<double>(qt[i * kQueryTile + l]) * ki;
+            }
+        }
+        for (std::size_t l = 0; l < kQueryTile; ++l) {
+            scores[l * kv_len + j] = a[l] * scale;
         }
     }
-    const double inv = 1.0 / total;
-    for (std::size_t i = 0; i < value_dim; ++i) {
-        oh[i] = static_cast<float>(acc[i] * inv);
+    for (std::size_t l = 0; l < tile.lanes; ++l) {
+        if (tile.count[l] == 0) {
+            for (std::size_t i = 0; i < value_dim; ++i) {
+                tile.out[l][i] = 0.0f;
+            }
+            continue;
+        }
+        attention_finish(scores + l * kv_len + tile.first[l], v + tile.first[l] * kv_heads * value_dim, tile.out[l],
+                         acc, tile.count[l], kv_heads, kvh, value_dim, softcap);
     }
 }
 
-using AttentionRowFn = void (*)(const float*, const float*, const float*, float*, double*, double*, std::size_t,
-                                std::size_t, std::size_t, std::size_t, std::size_t, double, double);
+using AttentionTileFn = void (*)(const AttentionTile&, const float*, const float*, double*, double*, float*,
+                                 std::size_t, std::size_t, std::size_t, std::size_t, std::size_t, double, double);
 
-inline void attention_row_portable(const float* qh, const float* k, const float* v, float* oh, double* scores,
-                                   double* acc, std::size_t visible, std::size_t kv_heads, std::size_t kvh,
-                                   std::size_t head_dim, std::size_t value_dim, double scale, double softcap) {
-    attention_row(qh, k, v, oh, scores, acc, visible, kv_heads, kvh, head_dim, value_dim, scale, softcap);
+inline void attention_tile_portable(const AttentionTile& tile, const float* k, const float* v, double* scores,
+                                    double* acc, float* qt, std::size_t kv_len, std::size_t kv_heads,
+                                    std::size_t kvh, std::size_t head_dim, std::size_t value_dim, double scale,
+                                    double softcap) {
+    attention_tile(tile, k, v, scores, acc, qt, kv_len, kv_heads, kvh, head_dim, value_dim, scale, softcap);
 }
 
 #ifdef DLLM_X86_DISPATCH
-DLLM_TARGET_AVX2 inline void attention_row_avx2(const float* qh, const float* k, const float* v, float* oh,
-                                                double* scores, double* acc, std::size_t visible,
-                                                std::size_t kv_heads, std::size_t kvh, std::size_t head_dim,
-                                                std::size_t value_dim, double scale, double softcap) {
-    attention_row(qh, k, v, oh, scores, acc, visible, kv_heads, kvh, head_dim, value_dim, scale, softcap);
+DLLM_TARGET_AVX2 inline void attention_tile_avx2(const AttentionTile& tile, const float* k, const float* v,
+                                                 double* scores, double* acc, float* qt, std::size_t kv_len,
+                                                 std::size_t kv_heads, std::size_t kvh, std::size_t head_dim,
+                                                 std::size_t value_dim, double scale, double softcap) {
+    attention_tile(tile, k, v, scores, acc, qt, kv_len, kv_heads, kvh, head_dim, value_dim, scale, softcap);
 }
-
 #endif
 
-inline AttentionRowFn attention_row_kernel() {
+inline AttentionTileFn attention_tile_kernel() {
 #ifdef DLLM_X86_DISPATCH
     switch (active_isa()) {
         case Isa::avx2:
-            return attention_row_avx2;
+            return attention_tile_avx2;
         default:
             break;
     }
 #endif
-    return attention_row_portable;
+    return attention_tile_portable;
 }
 
 // The keys query t attends to: first .. first + count - 1 (see attention()).
@@ -580,20 +669,54 @@ inline void attention(const float* q, const float* k, const float* v, float* out
         throw std::invalid_argument("q_heads must be a multiple of kv_heads");
     }
     const std::size_t group = q_heads / kv_heads;
-    const AttentionRowFn kernel = attention_row_kernel();
-    // One task per (query, head) row; the rows are independent.
-    parallel_for(q_len * q_heads, [&](std::size_t task) {
-        const std::size_t t = task / q_heads;
-        const std::size_t h = task % q_heads;
-        const AttentionSpan span = attention_span(t, kv_len, causal, q_offset, window);
+    const AttentionTileFn kernel = attention_tile_kernel();
+    // The rows of each key/value head, in (query, head) order, cut into tiles of kQueryTile: one task per tile.
+    const std::size_t rows = q_len * group;
+    const std::size_t tiles = (rows + kQueryTile - 1) / kQueryTile;
+    parallel_for(kv_heads * tiles, [&](std::size_t task) {
+        const std::size_t kvh = task / tiles;
+        const std::size_t r0 = (task % tiles) * kQueryTile;
+        AttentionTile tile{};
+        tile.lanes = r0 + kQueryTile <= rows ? kQueryTile : rows - r0;
+        for (std::size_t l = 0; l < tile.lanes; ++l) {
+            const std::size_t t = (r0 + l) / group;
+            const std::size_t h = kvh * group + (r0 + l) % group;
+            const AttentionSpan span = attention_span(t, kv_len, causal, q_offset, window);
+            tile.q[l] = q + (t * q_heads + h) * head_dim;
+            tile.out[l] = out + (t * q_heads + h) * value_dim;
+            tile.first[l] = span.first;
+            tile.count[l] = span.count;
+        }
         thread_local std::vector<double> scores;
         thread_local std::vector<double> acc;
-        scores.resize(kv_len > 0 ? kv_len : 1);
+        thread_local std::vector<float> qt;
+        scores.resize(kQueryTile * (kv_len > 0 ? kv_len : 1));
         acc.resize(value_dim > 0 ? value_dim : 1);
-        kernel(q + (t * q_heads + h) * head_dim, k + span.first * kv_heads * head_dim,
-               v + span.first * kv_heads * value_dim, out + (t * q_heads + h) * value_dim, scores.data(), acc.data(),
-               span.count, kv_heads, h / group, head_dim, value_dim, scale, softcap);
+        qt.resize(kQueryTile * (head_dim > 0 ? head_dim : 1));
+        kernel(tile, k, v, scores.data(), acc.data(), qt.data(), kv_len, kv_heads, kvh, head_dim, value_dim, scale,
+               softcap);
     });
+}
+
+// attention() row by row with attention_row(), on one thread: the plain statement of the order, for tests.
+inline void attention_reference(const float* q, const float* k, const float* v, float* out, std::size_t q_len,
+                                std::size_t kv_len, std::size_t q_heads, std::size_t kv_heads,
+                                std::size_t head_dim, std::size_t value_dim, double scale, bool causal,
+                                std::size_t q_offset, std::size_t window = 0, double softcap = 0.0) {
+    if (kv_heads == 0 || q_heads % kv_heads != 0) {
+        throw std::invalid_argument("q_heads must be a multiple of kv_heads");
+    }
+    const std::size_t group = q_heads / kv_heads;
+    std::vector<double> scores(kv_len > 0 ? kv_len : 1);
+    std::vector<double> acc(value_dim > 0 ? value_dim : 1);
+    for (std::size_t t = 0; t < q_len; ++t) {
+        const AttentionSpan span = attention_span(t, kv_len, causal, q_offset, window);
+        for (std::size_t h = 0; h < q_heads; ++h) {
+            attention_row(q + (t * q_heads + h) * head_dim, k + span.first * kv_heads * head_dim,
+                          v + span.first * kv_heads * value_dim, out + (t * q_heads + h) * value_dim, scores.data(),
+                          acc.data(), span.count, kv_heads, h / group, head_dim, value_dim, scale, softcap);
+        }
+    }
 }
 
 }  // namespace dllm

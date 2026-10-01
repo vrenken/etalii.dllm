@@ -574,7 +574,7 @@ NB_MODULE(_kernels, module) {
     m.def(
         "attention",
         [](FloatTensor q, FloatTensor k, FloatTensor v, double scale, bool causal, std::int64_t q_offset,
-           std::size_t window, double softcap) {
+           std::size_t window, double softcap, bool reference) {
             require(q.ndim() == 3 && k.ndim() == 3 && v.ndim() == 3, "q, k and v must be [length, heads, dim]");
             const std::size_t q_len = q.shape(0);
             const std::size_t kv_len = k.shape(0);
@@ -588,12 +588,15 @@ NB_MODULE(_kernels, module) {
             float* out;
             auto result = make_array({q_len, q.shape(1), v.shape(2)}, &out);
             nb::gil_scoped_release release;
-            dllm::attention(q.data(), k.data(), v.data(), out, q_len, kv_len, q.shape(1), k.shape(1), q.shape(2),
-                            v.shape(2), scale, causal, static_cast<std::size_t>(q_offset), window, softcap);
+            const auto run = reference ? dllm::attention_reference : dllm::attention;
+            run(q.data(), k.data(), v.data(), out, q_len, kv_len, q.shape(1), k.shape(1), q.shape(2), v.shape(2), scale,
+                causal, static_cast<std::size_t>(q_offset), window, softcap);
             return result;
         },
         nb::arg("q"), nb::arg("k"), nb::arg("v"), nb::arg("scale"), nb::arg("causal") = true,
-        nb::arg("q_offset") = -1, nb::arg("window") = 0, nb::arg("softcap") = 0.0, "Scaled dot-product attention with grouped-query heads and a fixed order.");
+        nb::arg("q_offset") = -1, nb::arg("window") = 0, nb::arg("softcap") = 0.0, nb::arg("reference") = false,
+        "Scaled dot-product attention with grouped-query heads and a fixed order; reference=True computes it row by "
+        "row on one thread (attention_reference), with the same bits.");
 
     m.def(
         "attention_weights",
