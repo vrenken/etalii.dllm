@@ -16,11 +16,12 @@ difference between an edited and an unedited model is exactly the edit.
 | Logit lens | `dllm lens` | `etalii_dllm.interpret.logit_lens` | ✅ |
 | Attention maps | `dllm attention` | `trace(...).attention` | ✅ |
 | Embedding explorer and word clouds | `dllm neighbours` | `etalii_dllm.interpret.neighbours` | ✅ |
-| Steering vectors | `dllm steer`, `--steer` | | planned ([#112](https://github.com/vrenken/etalii.dllm/issues/112)) |
-| Model editing (ROME) | `dllm edit` | | planned ([#113](https://github.com/vrenken/etalii.dllm/issues/113)) |
-| Sparse autoencoders | `dllm sae` | | planned ([#114](https://github.com/vrenken/etalii.dllm/issues/114)) |
+| Steering vectors | `dllm steer`, `--steer` | `etalii_dllm.interpret.steering` | ✅ |
+| Model editing (ROME) | `dllm edit` | `etalii_dllm.interpret.editing` | ✅ |
+| Sparse autoencoders | `dllm sae` | `etalii_dllm.interpret.sae` | ✅ |
 
-The commands take the usual `--model` option (or `DLLM_MODEL`) before the command name and run on the CPU.
+The commands take the usual `--model` option (or `DLLM_MODEL`) before the command name and run on the CPU
+(`dllm edit` takes the model file as its argument, like `dllm finetune`).
 
 ## Activation tracing
 
@@ -108,9 +109,102 @@ of several tokens is the mean of their vectors. The query's own tokens and speci
 `--svg` writes a word cloud (bigger is more similar) and `--html` a page with the cloud and the table. The cloud is
 laid out along a spiral computed with the portable `sin`/`cos` kernels, so it is the same file on every machine.
 
+## Steering vectors
+
+Activation steering adds a direction to the residual stream while the model runs. `dllm steer` finds one by
+contrast: the mean residual stream after a layer over prompts that show a behaviour, minus the mean over prompts that
+show its opposite.
+
+```bash
+dllm --model smollm2-135m.dllm steer \
+    --positive "I love this. It is wonderful, beautiful and joyful." \
+    --positive "What a delightful, happy day full of love." \
+    --negative "I hate this. It is terrible, ugly and miserable." \
+    --negative "What an awful, sad day full of hate." -o love.json
+dllm --model smollm2-135m.dllm --steer love.json generate --prompt "I think that you are" --max-tokens 25
+dllm --model smollm2-135m.dllm --steer love.json --steer-strength 8 chat "Describe your morning."
+```
+
+`--layer` picks the layer (1-based, default a third of the way in), `--positive-file`/`--negative-file` read more
+prompts (one per line) and `--strength` sets the default multiplier stored in the file. `--steer FILE` and
+`--steer-strength S` (or `DLLM_STEER` and `DLLM_STEER_STRENGTH`) work on every front end: the CLI, the HTTP server,
+MCP and Docker. The vector is added after its layer at every position, prompt and answer alike, as one float32
+multiply and add per element, so a steered model keeps the KV cache, prompt caching and batching bit-exact. It is a
+different model, though: its `system_fingerprint` includes the vector's bits.
+
+The file is JSON (`"format": "dllm-steering"`) with the layer, strength, the prompts it was built from, the
+fingerprint of the model and the vector, each float32 value written as its exact double so loading changes nothing.
+
+## Model editing (ROME)
+
+`dllm edit` changes one fact with a rank-one update of one MLP, following
+[ROME](https://rome.baulab.info/) (Meng et al., 2022), and writes a new model file:
+
+```bash
+dllm edit smollm2-135m.dllm --prompt "The Eiffel Tower is located in the city of" \
+    --subject "Eiffel Tower" --target " Rome" -o smollm2-rome.dllm
+dllm --model smollm2-rome.dllm generate --prompt "The Eiffel Tower is located in the city of" --max-tokens 6
+dllm inspect smollm2-rome.dllm     # lists the edit
+```
+
+```text
+edited:             layer 7, 10 steps
+p(target):          0.0002 -> 0.9517
+```
+
+On SmolLM2-135M the edited model continues with " Rome, Italy" while "The Louvre is located in the city of" and "The
+capital of France is" still give Paris. How it works:
+
+1. The key `k` is the input of layer `l`'s MLP down projection (`act(gate) * up`) at the subject's last token.
+   `--context PREFIX` (repeatable) averages it over the prompt with prefixes.
+2. A change `delta` of the MLP's output there is found by AdamW on the target's cross-entropy (plus a small L2
+   penalty), with gradients from the fine-tuning kernels; it stops at a fixed loss or after `--steps`.
+3. The down projection becomes `W + delta u^T / (u . k)` with `u = C^-1 k`, where `C` is the covariance of keys over a
+   corpus (a built-in set of plain sentences, or `--corpus FILE`), normalised and regularised
+   (`--regularisation`, default 0.1), and solved by a Cholesky kernel. The edited projection maps `k` to its old
+   value plus `delta`; keys unlike `k` change as little as possible.
+
+The output file records the edit in its `edits` list (prompt, subject, target, layer, base fingerprint, optimiser
+and covariance settings, the target probability before and after) and notes the modification in its licence
+attribution. Edits stack: editing an edited file appends to the list. Equal edits of equal files write byte-identical
+files. Editing needs the gradient support of fine-tuning, so it works for the Llama, Mistral, Qwen2 and Qwen3
+families. `--layer` picks the MLP (1-based, default a quarter of the way in); ROME's authors found early-middle
+layers work best for facts.
+
+## Sparse autoencoders
+
+A sparse autoencoder (SAE) rewrites the residual stream after one layer as a sparse, non-negative mix of learned
+directions ("features"), which are often far easier to name than single neurons:
+
+```bash
+dllm --model smollm2-135m.dllm sae train --corpus my-text.txt --layer 15 --features 1024 --steps 600 \
+    --batch-size 128 --learning-rate 2e-3 -o smollm2-l15.sae
+dllm --model smollm2-135m.dllm sae features smollm2-l15.sae --corpus my-text.txt --count 10 --top-k 4
+dllm --model smollm2-135m.dllm sae steer smollm2-l15.sae --feature 783 -o macos.json   # a feature as a steering vector
+```
+
+```text
+feature 783: active on 2.3%, max 13.432
+    13.432  '4, Windows, Linux and' [' mac'] 'OS,'
+    13.335  ' and across Linux, Windows and' [' mac'] 'OS on'
+feature 73: active on 2.1%, max 13.650
+    13.650  ' a small cached model (Sm' ['ol'] 'LM2'
+    13.240  ' The recommended first model is Sm' ['ol'] 'LM2'
+```
+
+The corpus is a text file with one passage per line. Training collects the residual stream at every position,
+leaves out the few rows whose squared norm is more than ten times the median (the "attention sink" on the first
+tokens, which would otherwise take over every feature), scales the rest so their mean squared norm is the hidden
+size, and minimises `mean ||x - x_hat||^2 + l1 * mean sum f` (`--l1`, default 5) with AdamW, keeping the decoder's
+columns at unit length. Batches follow a seeded shuffle (`--seed`) and the decoder starts from the seeded Gaussian
+generator, so equal runs write byte-identical files (safetensors with the settings in the metadata). `sae features`
+lists the features with the largest activations (or the ones given with `--feature`), how often each is active and
+the contexts that activate it most; `--json` prints the same as JSON.
+
 ## Reproducibility
 
-Everything above is covered by `tests/test_interpret.py`: a trace of each tiny model family equals a golden
+Everything above is covered by `tests/test_interpret.py`, `tests/test_editing.py` and `tests/test_sae.py`: a trace of each tiny model family equals a golden
 fingerprint on every SIMD path and thread count, the traced logits equal the untraced ones, the lens of the last
-layer equals the model's prediction, and the HTML and SVG views are byte-identical across runs. Rankings break ties
+layer equals the model's prediction, the HTML and SVG views are byte-identical across runs, steered models keep the KV cache and batch invariance, the
+residual and SAE gradients match finite differences, and repeated edits and SAE runs write byte-identical files. Rankings break ties
 on the lower token id (a total order), and the HTML and SVG writers use fixed number formats.

@@ -105,7 +105,7 @@ def write_model_file(
         "fingerprint": _FINGERPRINT_PLACEHOLDER,
         **{key: metadata.get(key) for key in ("source", "licence", "tokenizer", "chat_template")},
     }
-    for section in ("fine_tuning", "adapter"):  # only fine-tuned models and merged adapters carry these
+    for section in ("fine_tuning", "adapter", "edits"):  # only fine-tuned, adapted and edited models carry these
         if metadata.get(section) is not None:
             header[section] = metadata[section]
     header_bytes = canonical_json(header)
@@ -216,6 +216,11 @@ class ModelFile:
     def adapter(self) -> dict[str, Any] | None:
         """The LoRA adapter merged into the weights, when the file was written by an adapter import."""
         return self.header.get("adapter")
+
+    @property
+    def edits(self) -> list[dict[str, Any]]:
+        """The model edits (``dllm edit``) applied to the weights, oldest first; empty for unedited files."""
+        return list(self.header.get("edits") or [])
 
     def verify(self) -> None:
         """Re-hashes the tensor data and checks it against the recorded fingerprint."""

@@ -77,6 +77,11 @@ def _inspect(args: argparse.Namespace) -> int:
             f"adapter:            LoRA rank {lora['rank']} alpha {lora['alpha']} on {','.join(lora['targets'])},"
             f" merged into {model.adapter['base_fingerprint'][:16]}"
         )
+    for edit in model.edits:
+        print(
+            f"edited:             {edit['method']} at layer {edit['layer']}: {edit['prompt']!r} -> {edit['target']!r}"
+            f" (from {edit['base_fingerprint'][:16]})"
+        )
     print(f"system_fingerprint: {model.fingerprint}")
     return 0
 
@@ -236,11 +241,22 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "finetune":
         return _finetune(args)
+    if args.command == "edit":
+        return interpret_commands.run_edit(args)
     if args.command == "import":
         return _import(args)
     if args.command == "inspect":
         return _inspect(args)
-    use_model_file(args.model, args.quantize, args.threads, args.device, args.prompt_cache, args.adapter)
+    use_model_file(
+        args.model,
+        args.quantize,
+        args.threads,
+        args.device,
+        args.prompt_cache,
+        args.adapter,
+        steer=args.steer,
+        steer_strength=args.steer_strength,
+    )
     try:
         engine = default_engine()
     except cuda.CudaUnavailableError as error:

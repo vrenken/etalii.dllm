@@ -38,8 +38,8 @@ class Trace:
     """``[L, heads, n, n]``: attention probabilities (query position, key position), or ``None`` when not traced."""
     hidden: np.ndarray
     """``[n, hidden]``: the final-norm hidden states."""
-    logits: np.ndarray
-    """``[n, vocabulary]``: the next-token logits after every position."""
+    logits: np.ndarray | None
+    """``[n, vocabulary]``: the next-token logits after every position, or ``None`` when not traced."""
 
     def arrays(self) -> Iterator[tuple[str, np.ndarray]]:
         """The captured arrays by name, in a fixed order."""
@@ -48,7 +48,8 @@ class Trace:
             if values is not None:
                 yield name, values
         yield "hidden", self.hidden
-        yield "logits", self.logits
+        if self.logits is not None:
+            yield "logits", self.logits
 
     def fingerprint(self) -> str:
         """SHA-256 over the tokens and the exact bits of every array; equal fingerprints mean identical traces."""
@@ -89,9 +90,10 @@ class _Recorder(LayerHook):
         self.mlp_outputs.append(out)
 
 
-def trace(model: Transformer, tokens: Sequence[int], *, attention: bool = True) -> Trace:
+def trace(model: Transformer, tokens: Sequence[int], *, attention: bool = True, logits: bool = True) -> Trace:
     """Runs ``tokens`` through ``model`` (on the CPU) and returns every intermediate activation. ``attention=False``
-    skips the attention probabilities, which take a second pass over the keys."""
+    skips the attention probabilities, which take a second pass over the keys; ``logits=False`` skips the LM head
+    over every position (the largest matrix of a small model)."""
     recorder = _Recorder(model.config.layers, attention)
     hidden = model.run_hooked(tokens, recorder)
     return Trace(
@@ -103,5 +105,5 @@ def trace(model: Transformer, tokens: Sequence[int], *, attention: bool = True) 
         mlp_output=np.stack(recorder.mlp_outputs),
         attention=np.stack(recorder.attention_maps) if attention else None,
         hidden=hidden,
-        logits=model.logits_from_hidden(hidden),
+        logits=model.logits_from_hidden(hidden) if logits else None,
     )
