@@ -293,6 +293,15 @@ def main(argv: list[str] | None = None) -> int:
 
     interpret_commands.add_commands(commands)
 
+    batch = commands.add_parser(
+        "batch", help="run an OpenAI batch file: the same output bytes at any concurrency, resumable"
+    )
+    batch.add_argument("input", metavar="INPUT", help="a .jsonl batch input file (custom_id, method, url, body)")
+    batch.add_argument("-o", "--output", required=True, help="the results (.jsonl); an unfinished one is resumed")
+    batch.add_argument("--workers", type=int, default=1, help="requests run at once; never changes the output")
+    batch.add_argument("--verify", action="store_true", help="re-run lines and check OUTPUT bit for bit instead")
+    batch.add_argument("--sample", type=int, help="with --verify: re-run this many evenly spread lines (default: all)")
+
     index = commands.add_parser("index", help="build or search a document index (retrieval, embedding models)")
     index_commands = index.add_subparsers(dest="index_command", required=True)
     build = index_commands.add_parser("build", help="chunk and embed documents with --model into an index file")
@@ -492,6 +501,8 @@ def main(argv: list[str] | None = None) -> int:
         return interpret_commands.run(args, engine)
     if args.command == "index":
         return _index(args, engine)
+    if args.command == "batch":
+        return _batch(args, engine)
 
     try:
         options = _sampling_options(args)
@@ -552,6 +563,42 @@ def _index_model(path: str) -> str | None:
         return Index.load(path).model.get("path")
     except RetrievalError:
         return None  # reported by the search itself
+
+
+def _batch(args: argparse.Namespace, engine: DllmEngine) -> int:
+    from etalii_dllm import batch_jobs
+    from etalii_dllm.server.batches_api import handler
+
+    try:
+        input_data = Path(args.input).read_bytes()
+    except OSError as error:
+        print(f"dllm batch: {error}", file=sys.stderr)
+        return 2
+    output = Path(args.output)
+    job = batch_jobs.Batch(batch_jobs.read_lines(input_data), engine.system_fingerprint, handler(engine))
+    if args.verify:
+        if not output.exists():
+            print(f"dllm batch: {output} does not exist", file=sys.stderr)
+            return 2
+        check = batch_jobs.verify(job, input_data, output, args.sample)
+        print(f"re-ran {len(check.checked)} of {len(job.lines)} requests: ", end="")
+        print("all equal" if not check.differing else f"lines {[i + 1 for i in check.differing]} differ")
+        for problem in check.problems:
+            print(f"problem: {problem}")
+        return 0 if check.ok else 1
+    try:
+        summary = job.run(output, workers=args.workers)
+    except batch_jobs.BatchError as error:
+        print(f"dllm batch: {error}", file=sys.stderr)
+        return 2
+    record = batch_jobs.digest(input_data, output.read_bytes(), engine.system_fingerprint, summary)
+    if engine.signer is not None:
+        record = engine.signer.sign(record)
+    batch_jobs.digest_path(output).write_bytes((json.dumps(record, indent=2) + "\n").encode())
+    resumed = f" ({summary.resumed} kept from an earlier run)" if summary.resumed else ""
+    print(f"{summary.total} requests: {summary.completed} completed, {summary.failed} failed{resumed}")
+    print(f"digest: {record['digest']}  output_sha256: {record['output_sha256']}")
+    return 0
 
 
 def _index(args: argparse.Namespace, engine: DllmEngine) -> int:
