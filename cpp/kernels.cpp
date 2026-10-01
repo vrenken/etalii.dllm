@@ -17,6 +17,7 @@
 #include "dllm/cuda.hpp"
 #include "dllm/fpenv.hpp"
 #include "dllm/grad.hpp"
+#include "dllm/interp.hpp"
 #include "dllm/math.hpp"
 #include "dllm/nn.hpp"
 #include "dllm/parallel.hpp"
@@ -575,6 +576,66 @@ NB_MODULE(_kernels, module) {
         },
         nb::arg("q"), nb::arg("k"), nb::arg("v"), nb::arg("scale"), nb::arg("causal") = true,
         nb::arg("q_offset") = -1, nb::arg("window") = 0, nb::arg("softcap") = 0.0, "Scaled dot-product attention with grouped-query heads and a fixed order.");
+
+    m.def(
+        "attention_weights",
+        [](FloatTensor q, FloatTensor k, double scale, bool causal, std::int64_t q_offset, std::size_t window,
+           double softcap) {
+            require(q.ndim() == 3 && k.ndim() == 3, "q and k must be [length, heads, dim]");
+            const std::size_t q_len = q.shape(0);
+            const std::size_t kv_len = k.shape(0);
+            require(q.shape(2) == k.shape(2), "q and k must have the same head_dim");
+            require(k.shape(1) > 0 && q.shape(1) % k.shape(1) == 0, "q heads must be a multiple of kv heads");
+            if (q_offset < 0) {
+                q_offset = static_cast<std::int64_t>(kv_len) - static_cast<std::int64_t>(q_len);
+            }
+            require(q_offset >= 0, "q_offset must be non-negative");
+            float* out;
+            auto result = make_array({q_len, q.shape(1), kv_len}, &out);
+            nb::gil_scoped_release release;
+            dllm::attention_weights(q.data(), k.data(), out, q_len, kv_len, q.shape(1), k.shape(1), q.shape(2), scale,
+                                    causal, static_cast<std::size_t>(q_offset), window, softcap);
+            return result;
+        },
+        nb::arg("q"), nb::arg("k"), nb::arg("scale"), nb::arg("causal") = true, nb::arg("q_offset") = -1,
+        nb::arg("window") = 0, nb::arg("softcap") = 0.0,
+        "The attention probabilities [q_len, heads, kv_len] of attention(), in its exact order.");
+
+    m.def(
+        "cosine_similarity",
+        [](FloatMatrix matrix, FloatVector query) {
+            require(matrix.shape(1) == query.shape(0), "query length must equal the matrix width");
+            float* out;
+            auto result = make_array({matrix.shape(0)}, &out);
+            nb::gil_scoped_release release;
+            dllm::cosine_similarity(matrix.data(), query.data(), out, matrix.shape(0), matrix.shape(1));
+            return result;
+        },
+        nb::arg("matrix"), nb::arg("query"), "Cosine similarity of every row of matrix with query; fixed order.");
+
+    m.def(
+        "column_mean",
+        [](FloatMatrix x) {
+            float* out;
+            auto result = make_array({x.shape(1)}, &out);
+            nb::gil_scoped_release release;
+            dllm::column_mean(x.data(), out, x.shape(0), x.shape(1));
+            return result;
+        },
+        nb::arg("x"), "Mean of each column, rows summed ascending in double.");
+
+    m.def(
+        "cholesky_solve",
+        [](FloatMatrix a, FloatMatrix b) {
+            require(a.shape(0) == a.shape(1), "a must be square");
+            require(b.shape(0) == a.shape(0), "b must have as many rows as a");
+            float* out;
+            auto result = make_array({b.shape(0), b.shape(1)}, &out);
+            nb::gil_scoped_release release;
+            dllm::cholesky_solve(a.data(), b.data(), out, a.shape(0), b.shape(1));
+            return result;
+        },
+        nb::arg("a"), nb::arg("b"), "Solves a x = b for symmetric positive definite a; fixed order, double.");
 
     m.def(
         "linear_backward",

@@ -444,3 +444,50 @@ def sum_squares(values: npt.ArrayLike | Tensor) -> float:
 
 
 adamw_step = _kernels.adamw_step
+
+
+# Interpretability and editing kernels (cpp/include/dllm/interp.hpp).
+
+
+def attention_weights(
+    q: npt.ArrayLike | Tensor,
+    k: npt.ArrayLike | Tensor,
+    *,
+    scale: float | None = None,
+    causal: bool = True,
+    q_offset: int | None = None,
+    window: int | None = None,
+    softcap: float | None = None,
+) -> Tensor:
+    """The attention probabilities ``[q_len, heads, kv_len]`` that :func:`attention` with the same arguments applies
+    to the values, computed in its exact order; keys a query cannot see get 0."""
+    qa = _float32(q)
+    if qa.ndim != 3:
+        raise ValueError("q must be [length, heads, head_dim]")
+    if q_offset is not None and q_offset < 0:
+        raise ValueError("q_offset must be non-negative")
+    if softcap is not None and not softcap > 0:
+        raise ValueError("softcap must be positive")
+    s = 1.0 / math.sqrt(qa.shape[2]) if scale is None else float(scale)
+    offset = -1 if q_offset is None else q_offset
+    return Tensor(_kernels.attention_weights(qa, _float32(k), s, causal, offset, _window(window), softcap or 0.0))
+
+
+def cosine_similarity(matrix: npt.ArrayLike | Tensor, query: npt.ArrayLike | Tensor) -> FloatArray:
+    """Cosine similarity of every row of ``matrix[rows, dim]`` with ``query[dim]`` (double sums over ``dim``
+    ascending); a zero row or query gives 0."""
+    return np.asarray(_kernels.cosine_similarity(_float32(matrix), _float32(query)))
+
+
+def column_mean(x: npt.ArrayLike | Tensor) -> FloatArray:
+    """The mean of each column of ``x[rows, cols]``: rows summed ascending in double, divided once."""
+    return np.asarray(_kernels.column_mean(_float32(x)))
+
+
+def cholesky_solve(a: npt.ArrayLike | Tensor, b: npt.ArrayLike | Tensor) -> FloatArray:
+    """``x`` with ``a @ x = b`` for a symmetric positive definite ``a[n, n]`` and ``b[n]`` or ``b[n, m]``, through a
+    Cholesky factorisation in double with a fixed order."""
+    ba = _float32(b)
+    matrix = ba.reshape(ba.shape[0], -1) if ba.ndim == 1 else ba
+    x = np.asarray(_kernels.cholesky_solve(_float32(a), np.ascontiguousarray(matrix)))
+    return x.reshape(ba.shape)

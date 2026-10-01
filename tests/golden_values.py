@@ -137,3 +137,16 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "logits_q8_0": "7546cc1c60e56ed7cc4efd617b81c11ac7f7ebfa8f23e843313be6f850eb864b",
     },
 }
+
+# Trace.fingerprint() of the tiny models over tests/test_interpret.py's PROMPT (every activation, attention included).
+TINY_TRACE_FINGERPRINT = {
+    "gemma2": "16130094ba98c9b7964034335d783e07f530d6585db8dee7edc52f24db9c2f05",
+    "gemma3": "577417f6982891d5594e8ddd516b3c58f01c6f9671e1e00875ad3264c450d401",
+    "granite": "e0a5d1d85e59b0c5bce76764395e049a74bd0c496615166e36be998d6c3e8344",
+    "llama": "da34729c5b292e870374a74bbece8ef2f3a8373ce49b5f23a1b65c3244edb396",
+    "mistral": "8685056d21ed7865b0a41709c6a3619779a4b693d20b27fbe250be557dc00d5a",
+    "olmo2": "62dec42fc42006e22c42ea02b756ff9bd7aa668dbcd19d40188dfc0703f69495",
+    "phi3": "c6c900b68cd750245988c3f88f0885dd0bb16c3d92b043fc8fb9d87baa02f6b1",
+    "qwen2": "9049474d08a5d8987fcbf8ae06f19e0c3f96aa63c7afcccf5343110654cb369c",
+    "qwen3": "ae441bb1809c65a97d4b36d0ed01c25cc2454c9439b2da2798c6173309c5cc25",
+}

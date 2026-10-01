@@ -251,3 +251,18 @@ element, a fixed order, one rounding.
 - **`embedding_backward`**: rows grouped per token id by a counting sort that keeps positions ascending, then
   summed in double.
 - **`sum_squares`** and **`adamw_step`**: see [training](training.md).
+
+## Interpretability kernels
+
+`interp.hpp` holds the kernels behind the [interpretability tools](interpretability.md), with the same rules: one
+double accumulator per output element, a fixed order, one rounding; threads split outputs.
+
+- **`attention_weights`**: the probabilities of [attention](#attention), written out instead of applied: steps 1 and 2
+  above in the same order, then `p_j * (1 / Z)` rounded once to float. Keys a query cannot see (causal horizon,
+  window) get 0. Output `[q_len, heads, kv_len]`.
+- **`cosine_similarity`**: for every row `r` of `matrix[rows, dim]`, `(sum_i m_ri q_i) / (sqrt(sum_i m_ri^2) *
+  sqrt(sum_i q_i^2))`, each sum over `i` ascending in double; a zero row or query gives 0.
+- **`column_mean`**: `(sum_r x[r, c]) / rows`, rows ascending in double.
+- **`cholesky_solve`**: solves `a x = b` for a symmetric positive definite `a` (lower triangle read), single-threaded
+  in double: the factor `L` column by column with every inner sum ascending, then forward and back substitution
+  row by row, rounded to float once at the end (for [model editing](interpretability.md)).

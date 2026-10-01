@@ -434,6 +434,11 @@ class BpeTokenizer:
             return apply
         raise TokenizerError(f"post-processor {spec.get('type')!r} is not supported")
 
+    @property
+    def special_ids(self) -> frozenset[int]:
+        """Ids of the special (control) tokens, which :meth:`decode` skips."""
+        return self._special_ids
+
     def token_to_id(self, token: str) -> int | None:
         return self._vocab.get(token)
 

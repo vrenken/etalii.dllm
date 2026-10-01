@@ -190,6 +190,10 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("--top-p", type=float, default=1.0)
         command.add_argument("--seed", type=int, default=0)
 
+    from etalii_dllm.interpret import commands as interpret_commands
+
+    interpret_commands.add_commands(commands)
+
     importer = commands.add_parser("import", help="convert an open-weight model to model.dllm")
     importer.add_argument("source", help="checkpoint directory, .gguf file, or hf:org/name[@revision]")
     importer.add_argument("-o", "--output", required=True, help="the model.dllm file to write")
@@ -253,6 +257,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "verify":
         return _verify(engine, args.json)
+
+    if args.command in interpret_commands.COMMANDS:
+        return interpret_commands.run(args, engine)
 
     options = SamplingOptions(temperature=args.temperature, top_k=args.top_k, top_p=args.top_p, seed=args.seed)
     if args.command == "chat":
