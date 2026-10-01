@@ -28,7 +28,7 @@ KERNEL_FINGERPRINTS = {
 # the container layout and the exact bf16 -> fp32 conversion; the HF and GGUF imports of those weights both match it.
 TINY_IMPORT_FINGERPRINT = "1585fbbfe689fd0d52dc36a4b3668f3af07babda2f72c8bfd33d9849dbabc71e"
 # The whole model.dllm of that import: the same bytes on every platform (Phase 17).
-TINY_IMPORT_FILE_SHA256 = "83382e7fce1a2a9a3f316b5f390e6594be58c8573df1901a8b8e990044295bbe"
+TINY_IMPORT_FILE_SHA256 = "a5a1dee96237d9eb18af573ae679a2e43265aac500be85b721e29f8068de4362"
 
 # fingerprint() of the decoder's next-token logits for tests/test_transformer.py::PROMPT on the tiny imported models.
 TINY_LOGITS_FINGERPRINT = {

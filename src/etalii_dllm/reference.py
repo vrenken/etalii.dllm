@@ -32,6 +32,8 @@ F64 = np.float64
 F32 = np.float32
 _MATRICES = tuple(f".{m}.weight" for m in ("q", "k", "v", "o", "gate", "up", "down"))
 _INF = math.inf
+ROLL_SINK = 4
+"""Tokens a rolled context window keeps from its start (docs/specification.md#the-context-window)."""
 
 
 def _f64(x: npt.ArrayLike) -> np.ndarray:
@@ -788,23 +790,45 @@ class ReferenceTransformer:
         return logits
 
     def generate(
-        self, context: Sequence[int], max_tokens: int, sampler: Sampler, stop_tokens: Sequence[int] = ()
+        self,
+        context: Sequence[int],
+        max_tokens: int,
+        sampler: Sampler,
+        stop_tokens: Sequence[int] = (),
+        *,
+        overflow: str = "stop",
+        window: int | None = None,
     ) -> tuple[list[int], list[np.ndarray]]:
         """Generates from ``context`` (a fresh context) until a stop token or ``max_tokens``; returns the tokens
-        (without the stop token) and the logits each was chosen from."""
+        (without the stop token) and the logits each was chosen from.
+
+        The context window (``window``, else ``config.context_length``) is the specification's: a full window ends
+        the generation (``overflow="stop"``) or rolls it (``"roll"``): the first :data:`ROLL_SINK` tokens and the
+        latest half window are kept and computed afresh, while the sampler keeps the whole history."""
+        window = window or self.config.context_length
+        sequence = list(context)
+        if window and len(sequence) >= window:
+            raise ValueError(f"the prompt has {len(sequence)} tokens; the context window holds {window}")
         self.reset()
-        sampler.begin(context)
+        sampler.begin(sequence)
         tokens: list[int] = []
         steps: list[np.ndarray] = []
-        logits = self.forward(list(context))
-        for _ in range(max_tokens):
+        logits = self.forward(list(sequence))
+        while len(tokens) < max_tokens:
+            if window and len(sequence) >= window:
+                if overflow != "roll":
+                    break
+                sequence = sequence[:ROLL_SINK] + sequence[-(window // 2) :]
+                self.reset()
+                logits = self.forward(list(sequence))
             token = sampler.sample(logits)
             steps.append(logits)
             if token in stop_tokens:
                 break
             sampler.accept(token)
             tokens.append(token)
-            if len(tokens) == max_tokens:
-                break
+            sequence.append(token)
+            if len(tokens) == max_tokens or (window and len(sequence) >= window):
+                continue  # these logits would never be used
             logits = self.forward([token])
         return tokens, steps

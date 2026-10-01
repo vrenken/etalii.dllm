@@ -250,6 +250,22 @@ For new tokens at positions `start …`, all in float32 unless stated:
 token (the tokenizer's end of sequence or the model's own end ids) ends the answer and is not part of it.
 Otherwise the token is appended and fed. The answer also ends after `max_tokens` tokens.
 
+### The context window
+
+`W` is the model's `context_length`. The sequence (prompt and answer so far) never holds more than `W` tokens:
+
+- A prompt of `W` tokens or more is refused (the API's `context_length_exceeded` error).
+- When the sequence reaches `W` tokens, the answer ends with finish reason `length` (`overflow = stop`, the default),
+  or the window **rolls** (`overflow = roll`): the sequence becomes its first 4 tokens followed by its last `floor(W /
+  2)` tokens, the cache is emptied and the kept tokens are fed afresh from position 0. The next token is sampled from
+  the last position's logits, so every token after a roll is exactly what a fresh generation over the kept tokens
+  would choose. The sampler is not reset: the penalties keep counting over the whole history (prompt and every answer
+  token, rolled away or not). A window of 8 tokens or fewer cannot roll.
+- Truncation (`truncation = auto`) happens before tokenization, on messages: while the rendered prompt holds `W`
+  tokens or more, the earliest message that is neither a system message nor the last message is dropped, together with
+  the tool messages directly after it. When only system messages and the last message are left, the prompt is refused
+  as above.
+
 Not covered here, but just as fixed:
 
 - tokenization: byte-level BPE and SentencePiece-style tokenizers, with Unicode handling pinned to version 15.1
@@ -261,7 +277,8 @@ Not covered here, but just as fixed:
 
 **On one machine.** `dllm --model m.dllm verify --reference` compares this machine's compiled kernels (whatever
 SIMD path, thread count or GPU is in use) with the reference implementation. It checks the prompt's logits and a
-greedy, a sampled and a controlled 16-token answer (every logit adjustment and `min_p` at once), and prints `equal` for each part, or where the two first differ. CI runs it
+greedy, a sampled and a controlled 16-token answer (every logit adjustment and `min_p` at once) and a greedy answer in a window just
+longer than the prompt, which rolls it ([the context window](#the-context-window)), and prints `equal` for each part, or where the two first differ. CI runs it
 for SmolLM2-135M on every release platform and SIMD path, in float32 and Q8_0.
 
 **Elsewhere.** `dllm conformance write DIR` writes the vectors:

@@ -500,7 +500,7 @@ def test_phi3_without_rope_scaling_rotates_whole_heads(tmp_path):
 
     plain = {**tiny_config("phi3"), "rope_scaling": None, "partial_rotary_factor": 1.0}
     config = hf_config(plain)
-    assert config.rotary_dim is None and config.rope_scaling is None and config.context_length == 128
+    assert config.rotary_dim is None and config.rope_scaling is None and config.context_length == 2048
     assert "rotary_dim" not in config.to_dict()
 
 

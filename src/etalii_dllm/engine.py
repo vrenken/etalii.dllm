@@ -25,7 +25,7 @@ from etalii_dllm import tools as tooling
 from etalii_dllm.chat import TOOL_CALL_OPEN, ChatMessage, ToolCall, render
 from etalii_dllm.chat_template import ChatTemplate
 from etalii_dllm.cuda import DEVICES
-from etalii_dllm.generation import Generation, GenerationResult, Generator, TokenLogprobs
+from etalii_dllm.generation import OVERFLOWS, Generation, GenerationResult, Generator, TokenLogprobs
 from etalii_dllm.grammar import Grammar, TokenConstraint, TokenTrie
 from etalii_dllm.models import BigramModel, LanguageModel
 from etalii_dllm.numerics import QUANTIZATIONS, linear, set_threads, sum_squares
@@ -41,6 +41,7 @@ from etalii_dllm.tools import AUTO, Tool, ToolChoice
 DEFAULT_MODEL_SEED = 42
 MAX_CHOICES = 16
 """Most choices one request may ask for (``n``)."""
+TRUNCATIONS = ("disabled", "auto")
 MODEL_ENVIRONMENT_VARIABLE = "DLLM_MODEL"
 """Path of a ``model.dllm`` file for the front ends to serve; the placeholder bigram model when unset."""
 ADAPTER_ENVIRONMENT_VARIABLE = "DLLM_ADAPTER"
@@ -133,6 +134,18 @@ class ChatRequest:
     previous_receipt: str | None = None
     """The receipt id of the conversation's previous turn: recorded as the receipt's ``previous`` (a receipt chain,
     :func:`etalii_dllm.receipts.verify_chain`); it never changes the output."""
+    truncation: str = "disabled"
+    """``auto`` drops the oldest messages of a conversation too long for the context window
+    (:func:`etalii_dllm.engine.fit_messages`); ``disabled`` refuses it."""
+    context_overflow: str = "stop"
+    """``stop`` ends an answer that fills the context window (``length``); ``roll`` keeps going on a rolled
+    context (:meth:`etalii_dllm.generation.Generation._roll`)."""
+
+    def __post_init__(self) -> None:
+        if self.truncation not in TRUNCATIONS:
+            raise ValueError(f"truncation must be one of {', '.join(TRUNCATIONS)}")
+        if self.context_overflow not in OVERFLOWS:
+            raise ValueError(f"context_overflow must be one of {', '.join(OVERFLOWS)}")
 
 
 @dataclass(frozen=True)
@@ -373,13 +386,20 @@ class DllmEngine:
         return self._generator.generate(prompt, max_tokens, options)
 
     def complete_stream(
-        self, prompt: str, max_tokens: int, options: SamplingOptions, *, regex: str | None = None
+        self,
+        prompt: str,
+        max_tokens: int,
+        options: SamplingOptions,
+        *,
+        regex: str | None = None,
+        overflow: str = "stop",
     ) -> Generation:
-        """Continues ``prompt``; ``regex`` restricts the continuation to text matching it in full."""
+        """Continues ``prompt``; ``regex`` restricts the continuation to text matching it in full and ``overflow``
+        says what happens at a full context window (docs/api.md#long-conversations)."""
         constraint = None
         if regex is not None:
             constraint = TokenConstraint(Grammar.regex(regex), self._token_trie())
-        return self._generator.stream(prompt, max_tokens, options, constraint=constraint)
+        return self._generator.stream(prompt, max_tokens, options, constraint=constraint, overflow=overflow)
 
     def count_tokens(self, text: str) -> int:
         return len(self.tokenizer.encode(text))
@@ -392,6 +412,25 @@ class DllmEngine:
         return prefix + digest[:24]
 
     # -- chat ---------------------------------------------------------------------------------------------------
+
+    def fit_messages(self, messages: Sequence[ChatMessage], tools: Sequence[Tool] = ()) -> list[ChatMessage]:
+        """``messages`` without their oldest ones, until the rendered prompt leaves room in the context window:
+        the earliest message that is neither a system message nor the last message goes first, together with the
+        tool results that directly follow it. Unchanged when it already fits or the model has no window; may still
+        not fit when only the system messages and the last message are left."""
+        window = self._generator.context_length
+        kept = list(messages)
+        if window is None:
+            return kept
+        while len(self.tokenizer.encode(self.render_chat(kept, tools))) >= window:
+            first = next((i for i, m in enumerate(kept[:-1]) if m.role != "system"), None)
+            if first is None:
+                break
+            end = first + 1
+            while end < len(kept) - 1 and kept[end].role == "tool":
+                end += 1
+            del kept[first:end]
+        return kept
 
     def render_chat(self, messages: Iterable[ChatMessage], tools: Sequence[Tool] = ()) -> str:
         """The prompt for a conversation: the model's own chat template when it has one. Tools are presented by
@@ -470,6 +509,8 @@ class DllmEngine:
         messages = request.messages
         if self.retriever is not None and request.prompt is None:
             messages, _ = self.retriever.ground(messages)
+        if request.prompt is None and request.truncation == "auto":
+            messages = self.fit_messages(messages, tools)
         prompt = request.prompt if request.prompt is not None else self.render_chat(messages, tools)
         generation = self._generator.stream(
             prompt,
@@ -479,6 +520,7 @@ class DllmEngine:
             constraint=constraint,
             top_logprobs=request.top_logprobs,
             new_text=request.prompt is None,
+            overflow=request.context_overflow,
         )
         return _ChatGeneration(
             generation.prompt_tokens, generation.cached_tokens, self._events(generation, request, tools)

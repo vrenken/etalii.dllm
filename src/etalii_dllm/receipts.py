@@ -78,6 +78,8 @@ def request_record(request: ChatRequest) -> dict[str, Any]:
         "top_logprobs": request.top_logprobs,
         "call_id_prefix": request.call_id_prefix,
         "request_id": request.request_id,
+        **({"truncation": request.truncation} if request.truncation != "disabled" else {}),
+        **({"context_overflow": request.context_overflow} if request.context_overflow != "stop" else {}),
     }
 
 
@@ -111,6 +113,8 @@ def request_from_record(record: Mapping[str, Any]) -> ChatRequest:
         call_id_prefix=record["call_id_prefix"],
         request_id=record["request_id"],
         prompt=record["prompt"],
+        truncation=record.get("truncation", "disabled"),
+        context_overflow=record.get("context_overflow", "stop"),
     )
 
 

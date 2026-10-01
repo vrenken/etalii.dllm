@@ -539,6 +539,18 @@ is the same bytes whatever `--workers` says. If the run is interrupted, the same
 file. `--verify` re-runs the requests and checks every line. The server has the OpenAI Files and Batches API too.
 Details: [batch jobs](batches.md).
 
+## 19. Long conversations
+
+```bash
+dllm --model smollm2-135m.dllm generate --prompt "Once upon a time" --max-tokens 20000 --context-overflow roll
+dllm --model smollm2-135m.dllm chat "Summarise our talk" --truncate
+```
+
+A prompt that does not fit the model's context window is refused instead of silently cut, and a full window ends the
+answer with finish `length`. `--truncate` drops the oldest turns until the prompt fits. `--context-overflow roll`
+keeps generating on a rolled window (the first 4 tokens and the latest half), and every token is still exactly what a
+fresh run over those tokens gives. The HTTP API has both: [long conversations](api.md#long-conversations).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,

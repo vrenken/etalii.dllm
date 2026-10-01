@@ -23,6 +23,14 @@ from etalii_dllm.speculative import Drafter, DraftModel, PromptLookup
 from etalii_dllm.tokenization import Tokenizer
 
 MAX_TOP_LOGPROBS = 20
+OVERFLOWS = ("stop", "roll")
+"""What happens when a generation fills the model's context window: it ends (``length``), or it rolls on."""
+ROLL_SINK = 4
+"""Tokens at the start of the sequence a rolled context keeps (attention sinks)."""
+
+
+class ContextLengthError(ValueError):
+    """The prompt does not fit in the model's context window."""
 
 
 @dataclass(frozen=True)
@@ -105,8 +113,12 @@ class Generation:
         constraint: TokenConstraint | None,
         top_logprobs: int | None,
         new_text: bool = False,
+        overflow: str = "stop",
     ) -> None:
         self.prompt_tokens = len(context)
+        self._overflow = overflow
+        self.rolls = 0
+        """How often the context rolled (``overflow="roll"``)."""
         # Models with a KV cache reuse it across steps; by construction that gives the same logits as forward().
         # With a prompt cache the KV cache may come from an earlier request that shares a prefix with this one.
         new_cache = getattr(generator.model, "new_cache", None)
@@ -129,7 +141,8 @@ class Generation:
         # A new text (a chat message) drops the leading space SentencePiece-style tokens start words with, as the
         # tokenizer's own decoder does; a completion keeps it, since it continues the prompt's text.
         self._strip_leading_space = new_text and bool(getattr(generator.tokenizer, "strips_leading_space", False))
-        self._steps = self._run(generator, context, cache, max_tokens, options, stop, constraint, top_logprobs)
+        self._cache = cache
+        self._steps = self._run(generator, context, max_tokens, options, stop, constraint, top_logprobs)
 
     def __iter__(self) -> Iterator[Step]:
         return self._steps
@@ -146,7 +159,6 @@ class Generation:
         self,
         generator: Generator,
         context: list[int],
-        cache: Any,
         max_tokens: int,
         options: SamplingOptions,
         stop: Sequence[str],
@@ -154,16 +166,15 @@ class Generation:
         top_logprobs: int | None,
     ) -> Iterator[Step]:
         try:
-            yield from self._loop(generator, context, cache, max_tokens, options, stop, constraint, top_logprobs)
+            yield from self._loop(generator, context, max_tokens, options, stop, constraint, top_logprobs)
         finally:
-            if generator.prompt_cache is not None and cache is not None:
-                generator.prompt_cache.release(cache)
+            if generator.prompt_cache is not None and self._cache is not None:
+                generator.prompt_cache.release(self._cache)
 
     def _loop(
         self,
         generator: Generator,
         context: list[int],
-        cache: Any,
         max_tokens: int,
         options: SamplingOptions,
         stop: Sequence[str],
@@ -171,6 +182,8 @@ class Generation:
         top_logprobs: int | None,
     ) -> Iterator[Step]:
         model, tokenizer = generator.model, generator.tokenizer
+        cache = self._cache
+        window = generator.context_length
         stop = [s for s in stop if s]
         sampler = Sampler(options, context)
         data = bytearray()
@@ -188,8 +201,15 @@ class Generation:
             if constraint is not None and constraint.finished:
                 finish_reason = "stop"
                 break
+            if window is not None and len(context) >= window:
+                if self._overflow != "roll":
+                    break  # finish_reason stays "length"
+                cache = self._roll(generator, context, window)
+                draft, pending = [], []
             if not pending:
                 room = max_tokens - len(self._tokens) - 1
+                if window is not None:
+                    room = min(room, window - len(context) - 1)  # drafted tokens are fed: stay inside the window
                 draft = self._draft(drafter, context, generator.speculate, room, vocabulary)
                 if cache is None:
                     pending = [model.forward(context)]
@@ -240,6 +260,19 @@ class Generation:
         self._text = bytes(data).decode("utf-8", errors="replace")
         self._finish_reason = finish_reason
         yield Step(None, self._text[len(emitted) :], None, finish_reason)
+
+    def _roll(self, generator: Generator, context: list[int], window: int) -> Any:
+        """Keeps the first :data:`ROLL_SINK` tokens and the latest ``window // 2`` of ``context`` (in place) and
+        returns a new, empty KV cache: the next forward pass computes the kept tokens afresh, so every token after a
+        roll is exactly what a new generation over the kept tokens would choose."""
+        context[:] = context[:ROLL_SINK] + context[-(window // 2) :]
+        self.rolls += 1
+        if self._cache is None:
+            return None
+        if generator.prompt_cache is not None:
+            generator.prompt_cache.release(self._cache)  # still a valid cache for the tokens it holds
+        self._cache = generator.model.new_cache()  # type: ignore[attr-defined]
+        return self._cache
 
     def _draft(
         self, drafter: Drafter | None, context: list[int], speculate: int, room: int, vocabulary: int
@@ -312,6 +345,8 @@ class Generator:
         self.model = model
         self.tokenizer = tokenizer
         self.stop_tokens = frozenset(t for t in [tokenizer.end_of_sequence, *stop_tokens] if t >= 0)
+        self.context_length: int | None = getattr(getattr(model, "config", None), "context_length", None) or None
+        """The model's context window: prompt and answer together never hold more tokens (``None``: no limit)."""
         new_cache = getattr(model, "new_cache", None)
         self.batcher = Batcher(model) if hasattr(model, "forward_batch") else None  # type: ignore[arg-type]
         self.prompt_cache: PromptCache | None = None
@@ -340,12 +375,17 @@ class Generator:
         constraint: TokenConstraint | None = None,
         top_logprobs: int | None = None,
         new_text: bool = False,
+        overflow: str = "stop",
     ) -> Generation:
         """Starts a generation. ``stop`` ends it at the first occurrence of any of the strings (which are not part
         of the text); ``constraint`` restricts the tokens (structured output, tool calls); ``top_logprobs``
         (0 to 20) records each token's log-probability and that many alternatives. ``new_text`` says the output
         starts a new text (a chat message) rather than continuing the prompt, so a SentencePiece-style tokenizer's
-        leading space is dropped from it."""
+        leading space is dropped from it. ``overflow`` says what happens when the sequence fills the model's
+        context window: the generation ends with ``length`` (``stop``), or the context rolls (``roll``, see
+        :meth:`Generation._roll`). A prompt that leaves no room raises :class:`ContextLengthError`."""
+        if overflow not in OVERFLOWS:
+            raise ValueError(f"overflow must be one of {', '.join(OVERFLOWS)}")
         if max_tokens < 0:
             raise ValueError("max_tokens must be non-negative")
         if top_logprobs is not None and not 0 <= top_logprobs <= MAX_TOP_LOGPROBS:
@@ -354,7 +394,14 @@ class Generator:
         if vocabulary is not None and any(token >= vocabulary for token, _ in options.logit_bias):
             raise ValueError(f"logit_bias token ids must be below the vocabulary size {vocabulary}")
         context = self.tokenizer.encode(prompt) if isinstance(prompt, str) else list(prompt)
-        return Generation(self, context, max_tokens, options, stop, constraint, top_logprobs, new_text)
+        window = self.context_length
+        if window is not None and len(context) >= window:
+            raise ContextLengthError(
+                f"the prompt has {len(context)} tokens; the model's context window holds {window}, answer included"
+            )
+        if overflow == "roll" and window is not None and window <= 2 * ROLL_SINK:
+            raise ValueError(f"a context window of {window} tokens is too small to roll")
+        return Generation(self, context, max_tokens, options, stop, constraint, top_logprobs, new_text, overflow)
 
     def generate(
         self,
@@ -365,7 +412,8 @@ class Generator:
         stop: Sequence[str] = (),
         constraint: TokenConstraint | None = None,
         top_logprobs: int | None = None,
+        overflow: str = "stop",
     ) -> GenerationResult:
         return self.stream(
-            prompt, max_tokens, options, stop=stop, constraint=constraint, top_logprobs=top_logprobs
+            prompt, max_tokens, options, stop=stop, constraint=constraint, top_logprobs=top_logprobs, overflow=overflow
         ).result()

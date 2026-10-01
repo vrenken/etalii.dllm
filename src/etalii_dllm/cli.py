@@ -23,6 +23,7 @@ from etalii_dllm.engine import (
     default_engine,
     use_model_file,
 )
+from etalii_dllm.generation import OVERFLOWS
 from etalii_dllm.sampling import SamplingOptions
 
 
@@ -243,6 +244,9 @@ def main(argv: list[str] | None = None) -> int:
         metavar="NAME[=ARG]",
         help="a built-in deterministic tool the model may call (repeatable): calculator, files=DIR, documents",
     )
+    chat.add_argument(
+        "--truncate", action="store_true", help="drop the oldest messages when the prompt does not fit the window"
+    )
     chat.add_argument("--max-tool-rounds", type=int, default=8, help="MCP tool rounds before the answer is cut off")
     chat.add_argument("--receipt", metavar="FILE", help="write the answer's generation receipt to FILE (JSON)")
     chat.add_argument(
@@ -265,6 +269,12 @@ def main(argv: list[str] | None = None) -> int:
             "--logit-bias", action="append", default=[], metavar="TOKEN=BIAS", help="add BIAS to a token (repeatable)"
         )
         command.add_argument("--regex", help="only produce text matching this regular expression in full")
+        command.add_argument(
+            "--context-overflow",
+            choices=OVERFLOWS,
+            default="stop",
+            help="at a full context window: stop (finish 'length') or roll (keep the start and the recent half)",
+        )
 
     evaluate = commands.add_parser("eval", help="score the model on a task file: perplexity or multiple choice")
     evaluate.add_argument("task", metavar="TASK", help=".jsonl ({'context','choices','answer'} or {'text'}) or .txt")
@@ -519,7 +529,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"--- choice {index} (seed {options.for_choice(index).seed})", file=sys.stderr)
         try:
             generation = engine.complete_stream(
-                args.prompt, args.max_tokens, options.for_choice(index), regex=args.regex
+                args.prompt,
+                args.max_tokens,
+                options.for_choice(index),
+                regex=args.regex,
+                overflow=args.context_overflow,
             )
         except ValueError as error:
             print(f"error: {error}", file=sys.stderr)
@@ -998,7 +1012,12 @@ def _chat(engine: DllmEngine, args: argparse.Namespace, options: SamplingOptions
         response_format = ResponseFormat("regex", pattern=args.regex)
     messages = [ChatMessage("system", args.system)] if args.system else []
     request = ChatRequest(
-        [*messages, ChatMessage("user", args.message)], args.max_tokens, options, response_format=response_format
+        [*messages, ChatMessage("user", args.message)],
+        args.max_tokens,
+        options,
+        response_format=response_format,
+        truncation="auto" if args.truncate else "disabled",
+        context_overflow=args.context_overflow,
     )
     if args.mcp_config or args.mcp_server or args.tool:
         return _chat_with_mcp(engine, args, request)

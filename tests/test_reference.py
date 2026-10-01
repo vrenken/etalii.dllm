@@ -225,6 +225,7 @@ def test_reference_generation_matches_the_engine(tmp_path):
         "greedy": "equal",
         "sampled": "equal",
         "controlled": "equal",
+        "rolled": "equal",
     }
 
 

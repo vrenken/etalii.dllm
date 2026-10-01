@@ -34,7 +34,7 @@ from etalii_dllm.engine import (
     default_engine,
     use_model_file,
 )
-from etalii_dllm.generation import TokenLogprobs
+from etalii_dllm.generation import ContextLengthError, TokenLogprobs
 from etalii_dllm.sampling import SamplingOptions
 from etalii_dllm.server import anthropic_api, batches_api, ollama_api, responses_api
 from etalii_dllm.server.contracts import (
@@ -76,8 +76,14 @@ app.include_router(responses_api.router)
 app.include_router(batches_api.router)
 
 
-def _error(message: str) -> JSONResponse:
-    return JSONResponse(status_code=400, content={"error": {"message": message, "type": "invalid_request_error"}})
+CONTEXT_LENGTH_EXCEEDED = "context_length_exceeded"
+
+
+def _error(message: str, code: str | None = None) -> JSONResponse:
+    content: dict = {"message": message, "type": "invalid_request_error"}
+    if code is not None:  # OpenAI's code for a prompt that does not fit, which clients match on
+        content.update(param="messages", code=code)
+    return JSONResponse(status_code=400, content={"error": content})
 
 
 @app.exception_handler(RequestValidationError)
@@ -178,6 +184,8 @@ def _chat_request(request: ChatCompletionRequest, engine: DllmEngine) -> ChatReq
         call_id_prefix="call_",
         request_id=request_id,
         previous_receipt=request.previous_receipt,
+        truncation=request.truncation or "disabled",
+        context_overflow=request.context_overflow or "stop",
     )
 
 
@@ -212,6 +220,8 @@ def chat_completions(
                 media_type="text/event-stream",
             )
         results = engine.chat_choices(chat, n)
+    except ContextLengthError as error:
+        return _error(str(error), CONTEXT_LENGTH_EXCEEDED)
     except ValueError as error:
         return _error(str(error))
 
