@@ -108,7 +108,7 @@ def write_model_file(
         **{key: metadata.get(key) for key in ("source", "licence", "tokenizer", "chat_template")},
     }
     # Only fine-tuned, adapted, edited and embedding models carry these; files written by an import carry a lineage.
-    for section in ("fine_tuning", "adapter", "edits", "embedding", "lineage"):
+    for section in ("fine_tuning", "adapter", "edits", "embedding", "merge", "lineage"):
         if metadata.get(section) is not None:
             header[section] = metadata[section]
     header_bytes = canonical_json(header)
@@ -162,13 +162,16 @@ def adapter_step(adapter: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def fine_tune_step(fine_tuning: Mapping[str, Any]) -> dict[str, Any]:
-    return {
+    step = {
         "step": "fine_tune",
         "input": fine_tuning["base_fingerprint"],
         "data": fine_tuning["data_fingerprint"],
         "steps": fine_tuning["steps_completed"],
         "run": _digest(fine_tuning["run"]),
     }
+    if fine_tuning.get("distillation"):  # the data are a teacher's answers
+        step["teacher"] = fine_tuning["distillation"]["teacher"]
+    return step
 
 
 def edit_step(edit: Mapping[str, Any]) -> dict[str, Any]:

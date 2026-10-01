@@ -175,6 +175,7 @@ module map), with Mermaid diagrams.
 | 16. Reproducible agents ✅ | ✅ Agent transcripts of MCP tool loops (#139); ✅ offline replay of an agent run with the recorded tool results (#140); ✅ built-in deterministic tools (#141); ✅ receipt chains for whole conversations (#142). See [reproducible agents](docs/agents.md) |
 | 17. Verifiable models ✅ | ✅ Model lineage in every model file (#145); ✅ training receipts that replay a fine-tune bit for bit (#146); ✅ byte-identical model files on every platform (#147); ✅ signed receipts, transcripts and models (#148). See [verifiable models](docs/provenance.md) |
 | 18. Deterministic serving at scale ✅ | ✅ An exact response cache that answers repeated requests with the same bits (#151); ✅ identical requests in flight share one generation (#152); ✅ `dllm audit` to check that servers agree, and a self-audit at `GET /v1/audit` (#153). See [serving at scale](docs/serving.md) |
+| 19. Reproducible model building ✅ | ✅ Exact model merges recorded in the lineage (`dllm merge`: linear, SLERP, TIES, #156); ✅ exports back to safetensors and GGUF that import to the same weights (`dllm export`, #157); ✅ distillation on a teacher's answers that replays bit for bit (`dllm distill`, #158). See [building models](docs/model-building.md) |
 
 ## Working with Claude Code
 

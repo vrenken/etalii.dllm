@@ -599,6 +599,24 @@ _GGUF_PRE: dict[str, tuple[dict[str, Any] | None, dict[str, Any], bool]] = {
     ),
 }
 
+GGUF_PRE_TOKENIZERS = tuple(_GGUF_PRE)
+"""The ``tokenizer.ggml.pre`` values this reader understands."""
+
+
+def without_offsets(value: Any) -> Any:
+    """A normalizer or pre-tokenizer description without ``trim_offsets``, which only moves offsets, never ids."""
+    if isinstance(value, dict):
+        return {k: without_offsets(v) for k, v in value.items() if k != "trim_offsets"}
+    if isinstance(value, list):
+        return [without_offsets(v) for v in value]
+    return value
+
+
+def gguf_pre_tokenizer(pre: str) -> tuple[Any, Any]:
+    """``(normalizer, pre-tokenizer)`` of a ``tokenizer.ggml.pre`` value, without ``trim_offsets``."""
+    normalizer, pre_tokenizer, _ = _GGUF_PRE[pre]
+    return without_offsets(normalizer), without_offsets(pre_tokenizer)
+
 
 def spec_from_gguf(metadata: Mapping[str, Any]) -> dict[str, Any]:
     """A ``tokenizer.json``-shaped description from GGUF ``tokenizer.ggml.*`` metadata (BPE models only)."""

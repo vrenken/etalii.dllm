@@ -135,6 +135,8 @@ class FineTuner:
             self.params = init_adapters(config, self.lora, run.seed)
         self.optimizer = AdamW(run.optimizer, shapes)
         self.step = 0
+        self.distillation: dict[str, Any] | None = None
+        """Where the training data came from when it is a teacher's answers (:mod:`etalii_dllm.training.distill`)."""
         self.losses: list[float] = []
         self._gradients = DecoderGradients(config)
 
@@ -229,6 +231,8 @@ class FineTuner:
             "steps_completed": self.step,
             "final_loss": self.losses[-1] if self.losses else None,
         }
+        if self.distillation is not None:
+            metadata["fine_tuning"]["distillation"] = self.distillation
         step = fine_tune_step(metadata["fine_tuning"])
         metadata["lineage"] = extend_lineage(self.metadata["lineage"], self.base_fingerprint, step)
         tensors = {

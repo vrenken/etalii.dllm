@@ -236,6 +236,53 @@ inline double cos(double x) {
     }
 }
 
+// atan from a fixed Taylor polynomial: |x| > 1 uses atan(x) = pi/2 - atan(1/x), and x above tan(pi/12) uses
+// atan(x) = pi/6 + atan((sqrt(3) x - 1) / (sqrt(3) + x)), so the series only sees |r| <= 2 - sqrt(3) (about 0.268),
+// where the first omitted term is below 1e-19.
+inline double atan(double x) {
+    if (x != x) {
+        return x;
+    }
+    if (x < 0) {
+        return -atan(-x);
+    }
+    constexpr double half_pi = 1.57079632679489661923;
+    constexpr double sixth_pi = 0.52359877559829887308;
+    constexpr double sqrt3 = 1.73205080756887729353;
+    constexpr double tan_twelfth_pi = 0.26794919243112270647;
+    if (x > 1.0) {
+        return half_pi - atan(1.0 / x);
+    }
+    double offset = 0.0;
+    double r = x;
+    if (x > tan_twelfth_pi) {
+        offset = sixth_pi;
+        r = (sqrt3 * x - 1.0) / (sqrt3 + x);
+    }
+    const double r2 = r * r;
+    double p = -1.0 / 35.0;
+    for (int n = 16; n >= 1; --n) {  // Horner in r^2: sum of (-1)^n r^(2n+1) / (2n+1), n = 1..17
+        p = p * r2 + ((n % 2) ? -1.0 : 1.0) / (2.0 * n + 1.0);
+    }
+    return offset + (r + r * r2 * p);
+}
+
+// acos(x) = 2 atan(sqrt((1 - x) / (1 + x))) on [-1, 1]; NaN outside.
+inline double acos(double x) {
+    if (!(x >= -1.0 && x <= 1.0)) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    if (x == -1.0) {
+        return 3.14159265358979323846;
+    }
+#ifdef __CUDACC_RTC__
+    const double root = __dsqrt_rn((1.0 - x) / (1.0 + x));  // NVRTC has no <cmath>; both are the IEEE square root
+#else
+    const double root = std::sqrt((1.0 - x) / (1.0 + x));
+#endif
+    return 2.0 * atan(root);
+}
+
 // tanh from exp: tanh(x) = sign(x) * (1 - 2 / (e^(2|x|) + 1)); a Taylor polynomial near 0 avoids cancellation.
 inline double tanh(double x) {
     if (x != x) {

@@ -160,6 +160,7 @@ AdamW from `grad.hpp`.
 | `receipts.py` | Generation receipts: the engine request and hashes of the output as content-addressed JSON, and `verify`, which replays a receipt (`dllm replay`, `POST /v1/receipts/verify`); [receipts](../receipts.md). |
 | `transcripts.py`, `builtin_tools.py` | Agent transcripts and their offline replay; deterministic built-in tools ([reproducible agents](../agents.md)). |
 | `signing.py` | Deterministic Ed25519 signatures on receipts, transcripts and model files (`dllm sign`, `--sign-key`, `--trust`); [verifiable models](../provenance.md#signatures). |
+| `merging.py`, `exporting.py` | Exact model merges (`dllm merge`: linear, SLERP, TIES) and exports to Hugging Face safetensors and GGUF (`dllm export`); distillation lives in `training/distill.py` (`dllm distill`). [Building models](../model-building.md). |
 | `serving.py` | Deterministic serving at scale: the exact response cache (`--response-cache`), coalescing of identical in-flight requests, the self-audit (`--audit-every`, `GET /v1/audit`) and `dllm audit`; [serving at scale](../serving.md). |
 | `retrieval.py` | Exact document retrieval: fixed chunking, the `dllm index` file (vectors plus chunks in safetensors), cosine search with a total order, and the `Retriever` that grounds chats (`--index`); [retrieval](../retrieval.md). |
 | `training/` | Gradients of the decoder, AdamW, fixed data order and checkpoints that resume bit for bit (`dllm finetune`), for all parameters or LoRA adapters; training receipts that replay a run (`training/receipt.py`). |

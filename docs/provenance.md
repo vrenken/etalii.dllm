@@ -30,6 +30,7 @@ The `lineage` section of the header lists every step, oldest first:
 | `adapter` | a digest of the `adapter` section (`dllm import ADAPTER --base BASE`) |
 | `fine_tune` | the data fingerprint, the number of steps and a digest of the run settings (`dllm finetune`) |
 | `edit` | the method and a digest of the edit record (`dllm edit`) |
+| `merge` | the method and a digest of the `merge` section, which holds every input's fingerprint and lineage (`dllm merge`, [building models](model-building.md)) |
 
 Every step after the import names the weights it started from (`input`). Every step except the last names the
 weights it produced (`output`). The last step produced the file's own fingerprint. `dllm inspect` reports any step
