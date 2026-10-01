@@ -9,6 +9,7 @@ tensor data section is the model's fingerprint, used as the OpenAI-style ``syste
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import math
 import mmap
@@ -106,8 +107,8 @@ def write_model_file(
         "fingerprint": _FINGERPRINT_PLACEHOLDER,
         **{key: metadata.get(key) for key in ("source", "licence", "tokenizer", "chat_template")},
     }
-    # Only fine-tuned, adapted, edited and embedding models carry these.
-    for section in ("fine_tuning", "adapter", "edits", "embedding"):
+    # Only fine-tuned, adapted, edited and embedding models carry these; files written by an import carry a lineage.
+    for section in ("fine_tuning", "adapter", "edits", "embedding", "lineage"):
         if metadata.get(section) is not None:
             header[section] = metadata[section]
     header_bytes = canonical_json(header)
@@ -128,6 +129,79 @@ def write_model_file(
         fingerprint = digest.hexdigest()
         _replace_placeholder(stream, header_bytes, fingerprint)
     return fingerprint
+
+
+def _digest(value: Any) -> str:
+    return hashlib.sha256(canonical_json(value)).hexdigest()
+
+
+# -- lineage ----------------------------------------------------------------------------------------------------------
+# How the weights were made, oldest step first: the import, then every adapter merge, fine-tune and edit. Each step
+# after the import names the weights it started from (``input``) and every step but the last the weights it gave
+# (``output``); the last step's output is the file's own fingerprint. Details are digests of the file's own sections
+# (or of the step's record), so the lineage is short and an edited section shows.
+
+
+def import_step(source: Mapping[str, Any]) -> dict[str, Any]:
+    """The first step: the checkpoint files the weights were converted from (the ``source`` section)."""
+    return {"step": "import", "format": source.get("format"), "source": _digest(source)}
+
+
+def adapter_step(adapter: Mapping[str, Any]) -> dict[str, Any]:
+    return {"step": "adapter", "input": adapter["base_fingerprint"], "adapter": _digest(adapter)}
+
+
+def fine_tune_step(fine_tuning: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "step": "fine_tune",
+        "input": fine_tuning["base_fingerprint"],
+        "data": fine_tuning["data_fingerprint"],
+        "steps": fine_tuning["steps_completed"],
+        "run": _digest(fine_tuning["run"]),
+    }
+
+
+def edit_step(edit: Mapping[str, Any]) -> dict[str, Any]:
+    return {"step": "edit", "input": edit["base_fingerprint"], "method": edit["method"], "edit": _digest(edit)}
+
+
+def lineage(header: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The steps a header records. Files written before lineages existed get the steps their other sections show
+    (the import, then any adapter, fine-tune and edits), each step's output inferred from the next one's input."""
+    if header.get("lineage") is not None:
+        return [dict(step) for step in header["lineage"]]
+    steps = [import_step(header.get("source") or {})]
+    if header.get("adapter"):
+        steps.append(adapter_step(header["adapter"]))
+    if header.get("fine_tuning"):
+        steps.append(fine_tune_step(header["fine_tuning"]))
+    steps.extend(edit_step(edit) for edit in header.get("edits") or [])
+    for step, following in itertools.pairwise(steps):
+        step["output"] = following["input"]
+    return steps
+
+
+def extend_lineage(steps: list[dict[str, Any]], base_fingerprint: str, step: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """``steps`` (the lineage of the weights ``base_fingerprint``) followed by ``step``."""
+    if not steps:
+        return [dict(step)]
+    return [*steps[:-1], {**steps[-1], "output": base_fingerprint}, dict(step)]
+
+
+def lineage_problems(steps: list[Mapping[str, Any]]) -> list[str]:
+    """Why the steps do not form one chain (each step starting from the weights the step before gave), if they do
+    not."""
+    problems = []
+    if not steps or steps[0].get("step") != "import":
+        problems.append("the lineage does not start with an import")
+    for index in range(1, len(steps)):
+        before, step = steps[index - 1], steps[index]
+        if step.get("input") != before.get("output"):
+            problems.append(
+                f"step {index} ({step.get('step')}) starts from {step.get('input')}, "
+                f"but step {index - 1} gave {before.get('output')}"
+            )
+    return problems
 
 
 def data_fingerprint(tensors: Mapping[str, np.ndarray]) -> str:
@@ -218,6 +292,13 @@ class ModelFile:
     @property
     def fine_tuning(self) -> dict[str, Any] | None:
         return self.header.get("fine_tuning")
+
+    @property
+    def lineage(self) -> list[dict[str, Any]]:
+        """How the weights were made, oldest step first, the last step's output being this file's fingerprint."""
+        steps = lineage(self.header)
+        steps[-1]["output"] = self.fingerprint
+        return steps
 
     @property
     def adapter(self) -> dict[str, Any] | None:

@@ -28,7 +28,16 @@ import numpy as np
 
 from etalii_dllm.architecture import TransformerConfig
 from etalii_dllm.lora import LoraConfig, adapter_gradients, adapter_shapes, init_adapters, merged_weights, write_peft
-from etalii_dllm.modelfile import ModelFile, TensorSource, canonical_json, tensor_order, write_model_file
+from etalii_dllm.modelfile import (
+    ModelFile,
+    TensorSource,
+    canonical_json,
+    extend_lineage,
+    fine_tune_step,
+    lineage,
+    tensor_order,
+    write_model_file,
+)
 from etalii_dllm.numerics import FloatArray
 from etalii_dllm.training.backprop import DecoderGradients
 from etalii_dllm.training.data import TrainingData
@@ -113,6 +122,7 @@ class FineTuner:
         self.run = run
         self.base_fingerprint = base_fingerprint
         self.metadata = {key: metadata.get(key) for key in _METADATA_KEYS}
+        self.metadata["lineage"] = lineage(metadata)
         self.lora = run.lora
         self.base: Mapping[str, np.ndarray] | None = None
         if self.lora is None:
@@ -219,6 +229,8 @@ class FineTuner:
             "steps_completed": self.step,
             "final_loss": self.losses[-1] if self.losses else None,
         }
+        step = fine_tune_step(metadata["fine_tuning"])
+        metadata["lineage"] = extend_lineage(self.metadata["lineage"], self.base_fingerprint, step)
         tensors = {
             name: TensorSource(tuple(values.shape), lambda values=values: values)
             for name, values in self.weights().items()

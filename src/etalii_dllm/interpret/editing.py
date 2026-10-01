@@ -27,7 +27,7 @@ from typing import Any
 import numpy as np
 
 from etalii_dllm.interpret.trace import trace
-from etalii_dllm.modelfile import ModelFile, TensorSource, write_model_file
+from etalii_dllm.modelfile import ModelFile, TensorSource, edit_step, extend_lineage, lineage, write_model_file
 from etalii_dllm.numerics import cholesky_solve, column_mean, dot, linear, softmax, sum_, sum_squares
 from etalii_dllm.tokenization import Tokenizer
 from etalii_dllm.transformer import Transformer
@@ -244,7 +244,9 @@ def _target_probability(model: Transformer, tokens: list[int], target: list[int]
 
 def write_edited_model(base: ModelFile, result: EditResult, path: str | Path) -> str:
     """Writes the edited weights as a new ``model.dllm`` with the edit appended to its ``edits`` list; returns the
-    new fingerprint."""
+    new fingerprint. ``result`` must have been computed from ``base``'s weights."""
+    if result.record["base_fingerprint"] != base.fingerprint:
+        raise ValueError("the edit was computed from other weights than the model it is written onto")
     metadata: dict[str, Any] = dict(base.header)
     licence = dict(metadata.get("licence") or {})
     if licence.get("attribution"):
@@ -256,6 +258,7 @@ def write_edited_model(base: ModelFile, result: EditResult, path: str | Path) ->
         licence["attribution"] = attribution if attribution.endswith(note) else attribution + note
         metadata["licence"] = licence
     metadata["edits"] = [*(base.header.get("edits") or []), result.record]
+    metadata["lineage"] = extend_lineage(lineage(base.header), base.fingerprint, edit_step(result.record))
     tensors: Mapping[str, TensorSource] = {
         name: TensorSource(tuple(values.shape), lambda values=values: values) for name, values in result.weights.items()
     }

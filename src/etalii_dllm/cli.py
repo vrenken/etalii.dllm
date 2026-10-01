@@ -54,7 +54,7 @@ def _import(args: argparse.Namespace) -> int:
 
 
 def _inspect(args: argparse.Namespace) -> int:
-    from etalii_dllm.modelfile import ModelFile, ModelFileError
+    from etalii_dllm.modelfile import ModelFile, ModelFileError, lineage_problems
 
     try:
         model = ModelFile(args.path, verify=not args.no_verify)
@@ -85,6 +85,11 @@ def _inspect(args: argparse.Namespace) -> int:
             f"edited:             {edit['method']} at layer {edit['layer']}: {edit['prompt']!r} -> {edit['target']!r}"
             f" (from {edit['base_fingerprint'][:16]})"
         )
+    for index, step in enumerate(model.lineage):
+        details = ", ".join(f"{k} {str(v)[:16]}" for k, v in step.items() if k not in ("step", "input", "output"))
+        print(f"lineage {index}:          {step['step']} ({details}) -> {str(step.get('output'))[:16]}")
+    for problem in lineage_problems(model.lineage):
+        print(f"lineage problem:    {problem}")
     print(f"system_fingerprint: {model.fingerprint}")
     return 0
 

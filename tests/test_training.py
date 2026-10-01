@@ -367,6 +367,11 @@ def test_runs_are_byte_identical_and_resume_bit_for_bit(model_file, tmp_path):
     assert "modified weights" in tuned.licence["attribution"]
     assert "otherwise unmodified" not in tuned.licence["attribution"]
     assert tuned.fingerprint != model_file.fingerprint
+    imported, tuned_step = tuned.lineage
+    assert imported["step"] == "import" and imported["output"] == model_file.fingerprint
+    assert tuned_step["step"] == "fine_tune" and tuned_step["input"] == model_file.fingerprint
+    assert (tuned_step["data"], tuned_step["steps"], tuned_step["output"]) == (data.fingerprint, 6, fingerprint)
+    assert model_file.lineage == [{**imported, "output": model_file.fingerprint}]
 
 
 def test_checkpoint_rejects_other_data_and_corruption(model_file, tmp_path):

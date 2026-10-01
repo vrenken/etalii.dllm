@@ -147,6 +147,8 @@ def test_lora_runs_are_byte_identical_and_resume_bit_for_bit(base, tmp_path):
     assert model.adapter["lora"] == LORA.to_dict() and model.adapter["base_fingerprint"] == base.fingerprint
     assert "LoRA adapter first-adapter, licensed under MIT" in model.licence["attribution"]
     assert "otherwise unmodified" not in model.licence["attribution"]
+    assert [step["step"] for step in model.lineage] == ["import", "adapter"]
+    assert model.lineage[1]["input"] == base.fingerprint and model.lineage[1]["output"] == fingerprint
     # ... and so does applying it at load time.
     assert data_fingerprint(lora_module.apply_adapter(base.config, base.tensors, tmp_path / "first-adapter")[0]) == (
         fingerprint

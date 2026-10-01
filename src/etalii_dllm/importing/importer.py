@@ -26,7 +26,15 @@ from etalii_dllm.importing.gguf import GgufFile
 from etalii_dllm.importing.licences import PERMISSIVE, STANDARD_TEXTS
 from etalii_dllm.importing.safetensors import open_checkpoint
 from etalii_dllm.lora import ADAPTER_CONFIG, AdapterError, adapter_files, apply_adapter
-from etalii_dllm.modelfile import ModelFile, TensorSource, write_model_file
+from etalii_dllm.modelfile import (
+    ModelFile,
+    TensorSource,
+    adapter_step,
+    extend_lineage,
+    import_step,
+    lineage,
+    write_model_file,
+)
 from etalii_dllm.numerics import log
 
 
@@ -717,6 +725,7 @@ def import_model(
             "tokenizer": converted.tokenizer,
             "chat_template": converted.chat_template,
             "embedding": converted.embedding,
+            "lineage": [import_step(source_record)],
         },
     )
     return ImportResult(Path(output), fingerprint, converted.config, source_record, licence_record)
@@ -773,6 +782,7 @@ def _import_adapter(
     metadata = {key: base.header.get(key) for key in ("source", "tokenizer", "chat_template", "fine_tuning")}
     metadata["licence"] = record
     metadata["adapter"] = adapter
+    metadata["lineage"] = extend_lineage(lineage(base.header), base.fingerprint, adapter_step(adapter))
     tensors = {
         name: TensorSource(tuple(values.shape), lambda values=values: values) for name, values in weights.items()
     }
