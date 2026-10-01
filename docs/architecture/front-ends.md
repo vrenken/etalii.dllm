@@ -110,6 +110,15 @@ Mainstream APIs put random ids and timestamps in every response. Here the respon
 id, the output fingerprint and the call's index. `created` is always 0 (Ollama's `created_at` is the Unix epoch and its durations are 0). A response is therefore a pure function of
 the model and the request, byte for byte.
 
+### Receipts
+
+Because a response is a pure function of the weights and the request, the engine can describe it completely: on
+`Finished`, `_events` builds a [receipt](../receipts.md) (`receipts.make_receipt`) from the engine request, the
+system fingerprint and hashes of the tokens, text and tool calls. Every front end only decides whether to show it
+(`"receipt": true`), and leaves it out of `derive_id`, so asking for one changes no id. `receipts.verify` replays
+the recorded request through `chat_completion` and compares the hashes; `dllm replay`, `POST /v1/receipts/verify`
+and the MCP `verify_receipt` tool are thin wrappers around it.
+
 ### Conversations without server state
 
 The Responses API can continue a conversation by `previous_response_id`. The server keeps the most recent responses

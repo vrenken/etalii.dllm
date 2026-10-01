@@ -93,6 +93,8 @@ class ChatCompletionRequest(BaseModel):
     response_format: ResponseFormatModel | None = None
     logprobs: bool | None = None
     top_logprobs: int | None = None
+    receipt: bool | None = None
+    """Extension: add a ``receipt`` to the response (see docs/receipts.md)."""
 
 
 class TopLogprob(BaseModel):
@@ -136,6 +138,8 @@ class ChatCompletionUsage(BaseModel):
 
 
 class ChatCompletionResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")  # ``receipt`` when requested
+
     id: str
     object: Literal["chat.completion"] = "chat.completion"
     created: int
@@ -171,6 +175,8 @@ class ChunkChoice(BaseModel):
 
 
 class ChatCompletionChunk(BaseModel):
+    model_config = ConfigDict(extra="allow")  # ``receipt`` on the finishing chunk when requested
+
     id: str
     object: Literal["chat.completion.chunk"] = "chat.completion.chunk"
     created: int = 0

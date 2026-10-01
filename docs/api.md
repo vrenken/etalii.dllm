@@ -15,6 +15,7 @@ what the CLI and the MCP server use, so all front ends give the same answer for 
 | `POST /api/chat`, `POST /api/generate` | Ollama | Streaming (NDJSON, the default), tools, `format` (JSON or a schema), logprobs, `raw` prompts. See [Ollama API](#ollama-api) |
 | `POST /api/embed`, `POST /api/embeddings` | Ollama | Same vectors as `/v1/embeddings` |
 | `GET /api/tags`, `POST /api/show`, `GET /api/ps`, `GET /api/version` | Ollama | The served model, its template and architecture |
+| `POST /v1/receipts/verify` | Extension | Re-runs a [generation receipt](receipts.md) and returns `{"ok", "reasons", "notes", "receipt"}` |
 | `GET /` | Browser | A chat page over the streamed `/v1/chat/completions`, with temperature, seed and system prompt; it marks a regenerated answer that is identical to the earlier one. Self-contained, nothing loaded from elsewhere |
 
 ## Determinism guarantees
@@ -31,6 +32,9 @@ what the CLI and the MCP server use, so all front ends give the same answer for 
   [Prompt caching](#prompt-caching)), which say how much work earlier requests saved; start the server with
   `--prompt-cache 0` to have those always 0 as well.
 - `system_fingerprint` (OpenAI) identifies the exact weights.
+- Every chat endpoint returns a [receipt](receipts.md) when the request says `"receipt": true`: the engine request and
+  hashes of the output, which anyone with the same weights can replay (`dllm replay`, `POST /v1/receipts/verify`).
+  Asking for one changes neither the answer nor the response id.
 
 ## Defaults and differences
 

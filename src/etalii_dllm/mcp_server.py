@@ -18,6 +18,7 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
+from etalii_dllm import receipts
 from etalii_dllm.chat import ChatMessage
 from etalii_dllm.engine import (
     MODEL_ENVIRONMENT_VARIABLE,
@@ -51,18 +52,34 @@ def chat(
     temperature: float = 0.0,
     seed: int = 0,
     json_schema: dict[str, Any] | None = None,
+    receipt: bool = False,
 ) -> str:
     """Answers a conversation with the EtAlii deterministic LLM, using the model's own chat template.
 
     ``messages`` is a list of {"role": "system" | "user" | "assistant", "content": "..."}. With ``json_schema`` the
     answer is JSON valid under that schema (constrained decoding). The same arguments always return the same text.
+    With ``receipt`` the result is JSON {"content", "receipt"}: the receipt lets anyone re-run and check the answer
+    (``verify_receipt``, ``dllm replay``).
     """
     conversation = [ChatMessage(m.get("role", "user"), m.get("content", "")) for m in messages]
     response_format = ResponseFormat("json_schema", json_schema) if json_schema is not None else ResponseFormat()
     request = ChatRequest(
         conversation, max_tokens, SamplingOptions(temperature=temperature, seed=seed), response_format=response_format
     )
-    return default_engine().chat_completion(request).content
+    result = default_engine().chat_completion(request)
+    if receipt:
+        return json.dumps({"content": result.content, "receipt": result.receipt}, ensure_ascii=False, indent=2)
+    return result.content
+
+
+@server.tool(name="verify_receipt", annotations=_DETERMINISTIC)
+def verify_receipt(receipt: dict[str, Any]) -> str:
+    """Re-runs the request a generation receipt records and checks that the output is the same, bit for bit.
+
+    Returns JSON {"ok", "reasons", "notes", "receipt"}: ``reasons`` says why a receipt does not verify (it was
+    edited, made with other weights, or the output differs), ``receipt`` is the one the replay produced.
+    """
+    return json.dumps(receipts.verify(default_engine(), receipt).to_json(), ensure_ascii=False, indent=2)
 
 
 @server.tool(name="search_documents", annotations=_DETERMINISTIC)
@@ -90,13 +107,14 @@ def model_info() -> str:
 DETERMINISM = """\
 # Determinism
 
-EtAlii.Dllm produces bit-identical output on every run on the same hardware: the same weights (identified by the
-system fingerprint), the same prompt or conversation and the same options (max_tokens, temperature, seed, schema)
+EtAlii.Dllm produces bit-identical output on every run and every supported machine: the same weights (identified by
+the system fingerprint), the same prompt or conversation and the same options (max_tokens, temperature, seed, schema)
 always give the same text, regardless of load, batching or thread scheduling.
 
 - Temperature 0 is greedy decoding; with a temperature above 0 the seed selects the one reproducible sample.
 - Every reduction (matmul, softmax, norms, attention) runs in a fixed, documented order with double accumulation.
-- Results can differ between different CPUs or operating systems; compare fingerprints on the same machine.
+- Results are the same on every supported machine (x86-64 and arm64 CPUs, every SIMD path, NVIDIA GPUs).
+- A chat answer can carry a receipt (``receipt: true``) that anyone can re-run and check (``verify_receipt``).
 - Ids and fingerprints in the answers are derived from the request and the weights, never from a clock.
 """
 

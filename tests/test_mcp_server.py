@@ -90,7 +90,7 @@ def run_session() -> dict[int, dict]:
 def test_mcp_server_lists_and_runs_tools_deterministically():
     first = run_session()
     tools = {t["name"]: t for t in first[2]["result"]["tools"]}
-    assert set(tools) == {"chat", "generate", "model_info", "search_documents"}
+    assert set(tools) == {"chat", "generate", "model_info", "search_documents", "verify_receipt"}
     assert tools["generate"]["annotations"]["idempotentHint"] is True
 
     second = run_session()

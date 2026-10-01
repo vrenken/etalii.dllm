@@ -192,8 +192,9 @@ per platform.
 
 - Asking the same question twice, through any front end, gives the same answer, including the same code, the same
   tool calls and the same response ids.
-- A bug report is reproducible: the request plus the `system_fingerprint` and the machine is enough to get the exact
-  same output again.
+- A bug report is reproducible: the request plus the `system_fingerprint` is enough to get the exact same output
+  again, on any supported machine. A [receipt](../receipts.md) packs exactly that, plus hashes of the output, into
+  one JSON document that `dllm replay` checks.
 - Determinism is not robustness. The model is as sensitive to its input as any LLM: a different file in the
   context, a timestamp in a tool result or a reworded question can change everything after it. And a wrong answer
   is wrong every time.

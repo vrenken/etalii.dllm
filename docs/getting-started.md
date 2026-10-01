@@ -419,6 +419,19 @@ answer) and prints one fingerprint per part plus a combined `verify:` line, toge
 instruction set, device). The kernel and Unicode parts are also compared with the values of the release, so a single
 machine already shows `(as released)` or `(DIFFERS from release)`; `--json` prints the report as JSON.
 
+## 10. Prove an answer later
+
+Any answer can come with a receipt: the request and hashes of the output, enough for anyone with the same model to
+re-run it and check every bit.
+
+```bash
+dllm --model smollm2-135m.dllm chat "Name three colours." --receipt colours.json
+dllm --model smollm2-135m.dllm replay colours.json      # "verified: the replay gave the same output, bit for bit"
+```
+
+The server front ends return one when the request says `"receipt": true`, and `POST /v1/receipts/verify` (or the MCP
+`verify_receipt` tool) checks one. Details: [receipts](receipts.md).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,

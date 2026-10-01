@@ -129,7 +129,7 @@ def _chat_request(request: MessagesRequest, engine: DllmEngine) -> ChatRequest:
     output = request.output_config.format if request.output_config else None
     output = output or request.output_format
     response_format = ResponseFormat("json_schema", output.json_schema) if output else ResponseFormat()
-    request_id = engine.derive_id("msg_", request.model_dump(mode="json", exclude={"stream"}))
+    request_id = engine.derive_id("msg_", request.model_dump(mode="json", exclude={"stream", "receipt"}))
     return ChatRequest(
         messages=_messages(request.system, request.messages),
         max_tokens=request.max_tokens,
@@ -154,7 +154,8 @@ def messages(request: MessagesRequest, engine: Engine) -> MessageResponse | JSON
     try:
         chat = _chat_request(request, engine)
         if request.stream:
-            return StreamingResponse(_events(engine, chat, engine.chat_stream(chat)), media_type="text/event-stream")
+            events = _events(engine, chat, engine.chat_stream(chat), bool(request.receipt))
+            return StreamingResponse(events, media_type="text/event-stream")
         result = engine.chat_completion(chat)
     except ValueError as problem:
         return error(str(problem))
@@ -171,6 +172,7 @@ def messages(request: MessagesRequest, engine: Engine) -> MessageResponse | JSON
             output_tokens=result.completion_tokens,
             cache_read_input_tokens=result.cached_tokens,
         ),
+        **({"receipt": result.receipt} if request.receipt else {}),
     )
 
 
@@ -183,7 +185,7 @@ def _event(kind: str, data: dict[str, Any]) -> str:
     return f"event: {kind}\ndata: {json.dumps({'type': kind, **data}, ensure_ascii=False)}\n\n"
 
 
-def _events(engine: DllmEngine, chat: ChatRequest, stream: ChatStream) -> Iterator[str]:
+def _events(engine: DllmEngine, chat: ChatRequest, stream: ChatStream, receipt: bool = False) -> Iterator[str]:
     start = {
         "id": chat.request_id,
         "type": "message",
@@ -227,7 +229,8 @@ def _events(engine: DllmEngine, chat: ChatRequest, stream: ChatStream) -> Iterat
                 yield _event("content_block_stop", {"index": index})
             delta = {"stop_reason": _stop_reason(event.finish_reason, event.stop_sequence),
                      "stop_sequence": event.stop_sequence}  # fmt: skip
-            yield _event("message_delta", {"delta": delta, "usage": {"output_tokens": event.completion_tokens}})
+            data = {"delta": delta, "usage": {"output_tokens": event.completion_tokens}}
+            yield _event("message_delta", {**data, "receipt": event.receipt} if receipt else data)
     yield _event("message_stop", {})
 
 

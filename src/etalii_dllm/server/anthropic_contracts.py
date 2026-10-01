@@ -70,6 +70,8 @@ class MessagesRequest(BaseModel):
     """The structured outputs beta spelling of ``output_config.format``."""
     seed: int | None = None
     """Not in the Anthropic API (pass it with ``extra_body``); defaults to 0."""
+    receipt: bool | None = None
+    """Extension: add a ``receipt`` to the response (see docs/receipts.md)."""
 
 
 class CountTokensRequest(BaseModel):
@@ -102,6 +104,8 @@ class Usage(BaseModel):
 
 
 class MessageResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")  # ``receipt`` when requested
+
     id: str
     type: Literal["message"] = "message"
     role: Literal["assistant"] = "assistant"

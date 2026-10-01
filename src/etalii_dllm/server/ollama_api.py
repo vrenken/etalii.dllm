@@ -99,6 +99,8 @@ class _GenerateBase(BaseModel):
     options: Options | None = None
     logprobs: bool | None = None
     top_logprobs: int | None = None
+    receipt: bool | None = None
+    """Extension: add a ``receipt`` to the final object (see docs/receipts.md)."""
 
 
 class ChatBody(_GenerateBase):
@@ -206,7 +208,7 @@ def _chat_request(body: ChatBody, engine: DllmEngine) -> ChatRequest:
     if not body.messages:
         raise ValueError("'messages' must contain at least one message")
     options, max_tokens, stop = _options(body, engine)
-    request_id = engine.derive_id("ollama-", body.model_dump(mode="json", exclude={"stream"}))
+    request_id = engine.derive_id("ollama-", body.model_dump(mode="json", exclude={"stream", "receipt"}))
     return ChatRequest(
         messages=_messages(body.messages),
         max_tokens=max_tokens,
@@ -228,7 +230,7 @@ def _generate_request(body: GenerateBody, engine: DllmEngine) -> ChatRequest:
     options, max_tokens, stop = _options(body, engine)
     messages = [ChatMessage("system", body.system)] if body.system else []
     messages.append(ChatMessage("user", body.prompt or ""))
-    request_id = engine.derive_id("ollama-", body.model_dump(mode="json", exclude={"stream"}))
+    request_id = engine.derive_id("ollama-", body.model_dump(mode="json", exclude={"stream", "receipt"}))
     return ChatRequest(
         messages=messages,
         max_tokens=max_tokens,
@@ -273,7 +275,9 @@ def _final(engine: DllmEngine, stream: ChatStream, event: Finished) -> dict[str,
     }
 
 
-def _chunks(engine: DllmEngine, stream: ChatStream, chat: bool, logprobs: bool) -> Iterator[dict[str, Any]]:
+def _chunks(
+    engine: DllmEngine, stream: ChatStream, chat: bool, logprobs: bool, receipt: bool = False
+) -> Iterator[dict[str, Any]]:
     """The response as Ollama streams it: one object per text delta or tool call, then the final one."""
     head = {"model": engine.model.id, "created_at": EPOCH}
     for event in stream:
@@ -289,7 +293,8 @@ def _chunks(engine: DllmEngine, stream: ChatStream, chat: bool, logprobs: bool) 
             yield {**head, "message": {"role": "assistant", "content": "", "tool_calls": [call]}, "done": False}
         elif isinstance(event, Finished):
             body = {"message": {"role": "assistant", "content": ""}} if chat else {"response": ""}
-            yield {**head, **body, **_final(engine, stream, event)}
+            final = {**head, **body, **_final(engine, stream, event)}
+            yield {**final, "receipt": event.receipt} if receipt else final
 
 
 def _collect(chunks: Iterator[dict[str, Any]], chat: bool) -> dict[str, Any]:
@@ -337,7 +342,9 @@ def chat(body: ChatBody, engine: Engine) -> JSONResponse | StreamingResponse:
         stream = engine.chat_stream(request)
     except ValueError as problem:
         return error(str(problem))
-    return _respond(_chunks(engine, stream, True, request.top_logprobs is not None), body.stream, True)
+    return _respond(
+        _chunks(engine, stream, True, request.top_logprobs is not None, bool(body.receipt)), body.stream, True
+    )
 
 
 @router.post("/api/generate", response_model=None)
@@ -350,7 +357,9 @@ def generate(body: GenerateBody, engine: Engine) -> JSONResponse | StreamingResp
         stream = engine.chat_stream(request)
     except ValueError as problem:
         return error(str(problem))
-    return _respond(_chunks(engine, stream, False, request.top_logprobs is not None), body.stream, False)
+    return _respond(
+        _chunks(engine, stream, False, request.top_logprobs is not None, bool(body.receipt)), body.stream, False
+    )
 
 
 def _embeddings(engine: DllmEngine, texts: list[str], dimensions: int | None) -> tuple[list[list[float]], int]:

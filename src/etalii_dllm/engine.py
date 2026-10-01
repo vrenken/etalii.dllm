@@ -20,6 +20,7 @@ from typing import Any
 
 import numpy as np
 
+from etalii_dllm import __version__, receipts
 from etalii_dllm import tools as tooling
 from etalii_dllm.chat import TOOL_CALL_OPEN, ChatMessage, ToolCall, render
 from etalii_dllm.chat_template import ChatTemplate
@@ -125,6 +126,8 @@ class Finished:
     completion_tokens: int
     fingerprint: str
     """Hash of the generated token ids."""
+    receipt: Mapping[str, Any] | None = None
+    """What anyone needs to check this response later (:mod:`etalii_dllm.receipts`)."""
 
 
 ChatEvent = TextDelta | ToolCallEvent | Finished
@@ -142,6 +145,8 @@ class ChatResult:
     logprobs: tuple[TokenLogprobs, ...] = ()
     cached_tokens: int = 0
     """Prompt tokens served from the prompt cache; depends on earlier requests, never changes the output."""
+    receipt: Mapping[str, Any] | None = field(default=None, compare=False)
+    """What anyone needs to check this response later (:mod:`etalii_dllm.receipts`)."""
 
 
 @dataclass
@@ -411,7 +416,7 @@ class DllmEngine:
                 yield TextDelta(delta, (step.logprobs,) if step.logprobs is not None else ())
         assert last is not None and last.finish_reason is not None
         result = generation.result()
-        finish_reason, calls = result.finish_reason, []
+        finish_reason, calls, content = result.finish_reason, [], text
         if tools:
             content, parsed = tooling.parse_calls(text, tools)
             if not content.startswith(streamed):  # pragma: no cover - _answer_prefix guarantees this
@@ -428,7 +433,11 @@ class DllmEngine:
             if calls:
                 finish_reason = "tool_calls"
         stop_sequence = generation.stop_sequence if finish_reason == "stop" else None
-        yield Finished(finish_reason, stop_sequence, len(tokens), result.fingerprint)
+        output = receipts.output_record(
+            result.fingerprint, content, calls, finish_reason, generation.prompt_tokens, len(tokens)
+        )
+        receipt = receipts.make_receipt(__version__, self.model.id, self.system_fingerprint, request, output)
+        yield Finished(finish_reason, stop_sequence, len(tokens), result.fingerprint, receipt)
 
     def chat_completion(self, request: ChatRequest) -> ChatResult:
         stream = self.chat_stream(request)
@@ -455,6 +464,7 @@ class DllmEngine:
             finished.fingerprint,
             tuple(logprobs),
             stream.cached_tokens,
+            finished.receipt,
         )
 
     # -- embeddings ---------------------------------------------------------------------------------------------
