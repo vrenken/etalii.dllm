@@ -101,6 +101,8 @@ class _GenerateBase(BaseModel):
     top_logprobs: int | None = None
     receipt: bool | None = None
     """Extension: add a ``receipt`` to the final object (see docs/receipts.md)."""
+    previous_receipt: str | None = None
+    """Extension: the receipt id of the conversation's previous turn, recorded as the new receipt's ``previous``."""
 
 
 class ChatBody(_GenerateBase):
@@ -208,7 +210,9 @@ def _chat_request(body: ChatBody, engine: DllmEngine) -> ChatRequest:
     if not body.messages:
         raise ValueError("'messages' must contain at least one message")
     options, max_tokens, stop = _options(body, engine)
-    request_id = engine.derive_id("ollama-", body.model_dump(mode="json", exclude={"stream", "receipt"}))
+    request_id = engine.derive_id(
+        "ollama-", body.model_dump(mode="json", exclude={"stream", "receipt", "previous_receipt"})
+    )
     return ChatRequest(
         messages=_messages(body.messages),
         max_tokens=max_tokens,
@@ -219,6 +223,7 @@ def _chat_request(body: ChatBody, engine: DllmEngine) -> ChatRequest:
         response_format=_format(body.format),
         top_logprobs=_top_logprobs(body),
         request_id=request_id,
+        previous_receipt=body.previous_receipt,
     )
 
 
@@ -230,7 +235,9 @@ def _generate_request(body: GenerateBody, engine: DllmEngine) -> ChatRequest:
     options, max_tokens, stop = _options(body, engine)
     messages = [ChatMessage("system", body.system)] if body.system else []
     messages.append(ChatMessage("user", body.prompt or ""))
-    request_id = engine.derive_id("ollama-", body.model_dump(mode="json", exclude={"stream", "receipt"}))
+    request_id = engine.derive_id(
+        "ollama-", body.model_dump(mode="json", exclude={"stream", "receipt", "previous_receipt"})
+    )
     return ChatRequest(
         messages=messages,
         max_tokens=max_tokens,
@@ -239,6 +246,7 @@ def _generate_request(body: GenerateBody, engine: DllmEngine) -> ChatRequest:
         response_format=_format(body.format),
         top_logprobs=_top_logprobs(body),
         request_id=request_id,
+        previous_receipt=body.previous_receipt,
         prompt=(body.prompt or "") if body.raw else None,
     )
 

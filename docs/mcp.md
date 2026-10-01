@@ -123,9 +123,10 @@ The model side is exactly as reproducible as a normal chat:
 - So the same conversation plus the same tool results always gives the same answer, token for token.
 
 External tools are outside that guarantee: a clock, a search engine or a database can return something different on
-the next run, and the answer after it then differs too. Every `ToolResult` carries what the tool returned, so a
-run can be reproduced exactly by passing the full transcript (the user turn, the assistant turns with their
-`tool_calls`, and the `tool` messages) to `DllmEngine.chat_completion`.
+the next run, and the answer after it then differs too. `--transcript FILE` records every round with the tool
+results, and `dllm replay FILE` replays the run offline with those results, round by round
+([reproducible agents](agents.md)). The [built-in tools](agents.md#built-in-tools) (`--tool calculator`,
+`--tool files=DIR`, `--tool documents`) are deterministic themselves, so a run with them repeats on its own.
 
 ### Limits
 

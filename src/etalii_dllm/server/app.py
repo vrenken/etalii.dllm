@@ -146,7 +146,8 @@ def _chat_request(request: ChatCompletionRequest, engine: DllmEngine) -> ChatReq
     if len(stop) > 4:
         raise ValueError("at most 4 stop sequences are supported")
     request_id = engine.derive_id(
-        "chatcmpl-", request.model_dump(mode="json", exclude={"stream", "stream_options", "receipt"})
+        "chatcmpl-",
+        request.model_dump(mode="json", exclude={"stream", "stream_options", "receipt", "previous_receipt"}),
     )
     return ChatRequest(
         messages=[_message(m) for m in request.messages],
@@ -159,6 +160,7 @@ def _chat_request(request: ChatCompletionRequest, engine: DllmEngine) -> ChatReq
         top_logprobs=(request.top_logprobs or 0) if request.logprobs else None,
         call_id_prefix="call_",
         request_id=request_id,
+        previous_receipt=request.previous_receipt,
     )
 
 
@@ -296,9 +298,12 @@ def embeddings(request: EmbeddingsRequest, engine: Engine) -> EmbeddingsResponse
 
 
 @app.post("/v1/receipts/verify", response_model=None)
-def verify_receipt(receipt: dict[str, Any], engine: Engine) -> JSONResponse:
-    """Extension: re-runs the request a generation receipt records and says whether the output is the same."""
+def verify_receipt(receipt: dict[str, Any] | list[dict[str, Any]], engine: Engine) -> JSONResponse:
+    """Extension: re-runs the request a generation receipt records and says whether the output is the same. A list
+    is a conversation's receipt chain, oldest first (:func:`etalii_dllm.receipts.verify_chain`)."""
     try:
+        if isinstance(receipt, list):
+            return JSONResponse(receipts.verify_chain(engine, receipt).to_json())
         verification = receipts.verify(engine, receipt)
     except (ValueError, KeyError, TypeError) as problem:
         return _error(f"not a valid receipt: {problem}")

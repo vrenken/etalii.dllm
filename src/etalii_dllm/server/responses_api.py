@@ -7,7 +7,8 @@ the final ``response.completed`` (or ``response.incomplete``) event of the same 
 
 ``previous_response_id`` continues a stored conversation. Responses are stored in memory (``store``, default true,
 the most recent :data:`STORE_SIZE`); their ids are hashes of the request (which includes the previous id) and the
-weights, so a conversation replayed from the start gets the same ids and the same answers.
+weights, so a conversation replayed from the start gets the same ids and the same answers. Each response's receipt
+names the receipt of the response it continues (``previous``), so the receipts of a conversation form a chain.
 
 Differences from OpenAI: ``temperature`` defaults to 0 (greedy) and ``seed`` (``extra_body``) seeds sampling, as on
 every endpoint here; ``created_at`` is 0; only function tools; no images, files, reasoning, background mode or
@@ -20,7 +21,7 @@ import hashlib
 import json
 import threading
 from collections import OrderedDict
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends
@@ -141,17 +142,18 @@ class _Store:
 
     def __init__(self, size: int = STORE_SIZE) -> None:
         self._size = size
-        self._items: OrderedDict[str, tuple[dict[str, Any], list[ChatMessage]]] = OrderedDict()
+        self._items: OrderedDict[str, tuple[dict[str, Any], list[ChatMessage], str | None]] = OrderedDict()
         self._lock = threading.Lock()
 
-    def put(self, response: dict[str, Any], conversation: list[ChatMessage]) -> None:
+    def put(self, response: dict[str, Any], conversation: list[ChatMessage], receipt: str | None = None) -> None:
+        """Stores a response, its conversation and its receipt id (which a follow-up's receipt names as previous)."""
         with self._lock:
-            self._items[response["id"]] = (response, conversation)
+            self._items[response["id"]] = (response, conversation, receipt)
             self._items.move_to_end(response["id"])
             while len(self._items) > self._size:
                 self._items.popitem(last=False)
 
-    def get(self, response_id: str) -> tuple[dict[str, Any], list[ChatMessage]] | None:
+    def get(self, response_id: str) -> tuple[dict[str, Any], list[ChatMessage], str | None] | None:
         with self._lock:
             return self._items.get(response_id)
 
@@ -241,11 +243,12 @@ def _response_format(request: ResponsesRequest) -> ResponseFormat:
 def _prepare(request: ResponsesRequest, engine: DllmEngine) -> tuple[ChatRequest, list[ChatMessage]]:
     """The engine request and the conversation to store (everything but the instructions)."""
     history: list[ChatMessage] = []
+    previous_receipt = None
     if request.previous_response_id:
         stored = store.get(request.previous_response_id)
         if stored is None:
             raise ValueError(f"Previous response with id '{request.previous_response_id}' not found.")
-        history = list(stored[1])
+        history, previous_receipt = list(stored[1]), stored[2]
     conversation = history + _conversation(request.input)
     if not conversation:
         raise ValueError("'input' must not be empty")
@@ -269,6 +272,7 @@ def _prepare(request: ResponsesRequest, engine: DllmEngine) -> tuple[ChatRequest
         top_logprobs=(request.top_logprobs or 0) if wants_logprobs else None,
         call_id_prefix="call_",
         request_id=engine.derive_id("resp_", payload),
+        previous_receipt=previous_receipt,
     )
     return chat, conversation
 
@@ -334,6 +338,7 @@ class _Events:
         self.response = _response(request, chat, engine)
         self.sequence = 0
         self.final: dict[str, Any] | None = None
+        self.receipt: Mapping[str, Any] | None = None
 
     def _event(self, kind: str, **data: Any) -> dict[str, Any]:
         event = {"type": kind, "sequence_number": self.sequence, **data}
@@ -418,6 +423,7 @@ class _Events:
         else:
             self.response["status"] = "completed"
             kind = "response.completed"
+        self.receipt = event.receipt
         if self.request.receipt:
             self.response["receipt"] = event.receipt
         self.final = self.response
@@ -438,7 +444,8 @@ def _stored(events: _Events, conversation: list[ChatMessage]) -> Iterator[dict[s
     yield from events
     final = events.final
     if final is not None and final["store"]:
-        store.put(final, [*conversation, _answer(final["output"], events.engine)])
+        receipt = events.receipt["id"] if events.receipt else None
+        store.put(final, [*conversation, _answer(final["output"], events.engine)], receipt)
 
 
 # -- endpoints ------------------------------------------------------------------------------------------------------

@@ -266,3 +266,109 @@ def test_cli_replay_reports_bad_receipts(tmp_path, capsys, content):
     assert main(["replay", str(path)]) == 2
     assert capsys.readouterr().err.startswith("dllm replay: ")
     assert main(["replay", str(tmp_path / "missing.json")]) == 2
+
+
+# -- receipt chains (Phase 16) --------------------------------------------------------------------------------------
+
+
+def _openai_turn(client, messages: list[dict], previous: str | None = None) -> dict:
+    body = {**OPENAI, "messages": messages, "receipt": True, "previous_receipt": previous}
+    return client.post("/v1/chat/completions", json=body).json()
+
+
+def test_openai_conversation_chain(client, placeholder_engine, tmp_path, capsys):
+    messages = [{"role": "system", "content": "Be brief."}, {"role": "user", "content": "Say something."}]
+    first = _openai_turn(client, messages)
+    answer = first["choices"][0]["message"]["content"]
+    messages += [{"role": "assistant", "content": answer}, {"role": "user", "content": "More."}]
+    second = _openai_turn(client, messages, first["receipt"]["id"])
+    plain = client.post("/v1/chat/completions", json={**OPENAI, "messages": messages}).json()
+    assert second["id"] == plain["id"]  # the previous receipt does not change the request id or the answer
+    assert second["choices"][0]["message"] == plain["choices"][0]["message"]
+    chain = [first["receipt"], second["receipt"]]
+    assert "previous" not in chain[0] and chain[1]["previous"] == chain[0]["id"]
+    outcome = receipts.verify_chain(placeholder_engine, chain)
+    assert outcome.ok, outcome.reasons
+    assert client.post("/v1/receipts/verify", json=chain).json()["ok"] is True
+
+    path = tmp_path / "chain.json"
+    path.write_text(json.dumps(chain))
+    assert main(["replay", str(path)]) == 0
+    assert "every turn gave the same output" in capsys.readouterr().out
+    assert main(["replay", str(path), "--json"]) == 0
+    assert len(json.loads(capsys.readouterr().out)["turns"]) == 2
+
+    # An answer changed in the next turn's conversation breaks the chain, though every receipt still verifies.
+    messages[2] = {"role": "assistant", "content": answer + "!"}
+    forged = _openai_turn(client, messages, first["receipt"]["id"])["receipt"]
+    outcome = receipts.verify_chain(placeholder_engine, [first["receipt"], forged])
+    assert not outcome.ok and outcome.reasons == ("turn 1: the previous answer's text was changed",)
+    path.write_text(json.dumps([first["receipt"], forged]))
+    assert main(["replay", str(path)]) == 1
+    assert "NOT verified" in capsys.readouterr().out
+
+
+def test_chain_problems(client, placeholder_engine):
+    first = placeholder_engine.chat_completion(REQUEST).receipt
+    reply = ChatMessage("assistant", "", ())
+    content = placeholder_engine.chat_completion(REQUEST).content
+    follow = [*REQUEST.messages, ChatMessage("assistant", content), ChatMessage("user", "More.")]
+    second = placeholder_engine.chat_completion(
+        ChatRequest(follow, 12, REQUEST.options, previous_receipt=first["id"])
+    ).receipt
+
+    def reasons(chain):
+        return receipts.verify_chain(placeholder_engine, chain).reasons
+
+    assert reasons([first, second]) == ()
+    unlinked = placeholder_engine.chat_completion(ChatRequest(follow, 12, REQUEST.options)).receipt
+    assert "names None as previous" in reasons([first, unlinked])[0]
+    missing = placeholder_engine.chat_completion(
+        ChatRequest([*REQUEST.messages, ChatMessage("user", "More.")], 12, previous_receipt=first["id"])
+    ).receipt
+    assert reasons([first, missing]) == ("turn 1: the previous answer is missing from its conversation",)
+    other = placeholder_engine.chat_completion(
+        ChatRequest([ChatMessage("user", "Else."), reply], 12, previous_receipt=first["id"])
+    ).receipt
+    assert reasons([first, other]) == ("turn 1: its conversation does not start with the previous turn's",)
+    calls = [ChatMessage("assistant", content, (ToolCall("c1", "f", "{}"),)), ChatMessage("user", "More.")]
+    called = placeholder_engine.chat_completion(
+        ChatRequest([*REQUEST.messages, *calls], 12, previous_receipt=first["id"])
+    ).receipt
+    assert reasons([first, called]) == ("turn 1: the previous answer's tool calls were changed",)
+    raw = placeholder_engine.chat_completion(ChatRequest([], 4, prompt="Once", previous_receipt=first["id"])).receipt
+    assert reasons([first, raw]) == ("turn 1: a raw prompt is not a conversation",)
+    edited = {**second, "model": "other"}
+    assert reasons([first, edited])[0].startswith("turn 1: the receipt was edited")
+    later = receipts.verify_chain(placeholder_engine, [second])
+    assert later.ok and later.notes == (f"the chain starts after {first['id']}, which it does not include",)
+    with pytest.raises(ValueError):
+        receipts.verify_chain(placeholder_engine, [])
+
+
+def test_responses_chain_receipts_automatically(client, placeholder_engine):
+    request = {"input": "Say something.", "instructions": "Be brief.", "max_output_tokens": 12}
+    first = client.post("/v1/responses", json=request).json()  # no receipt asked for: still chained
+    follow = {"input": "More.", "max_output_tokens": 12, "previous_response_id": first["id"], "receipt": True}
+    second = client.post("/v1/responses", json=follow).json()
+    again = client.post("/v1/responses", json={**request, "receipt": True}).json()
+    chain = [again["receipt"], second["receipt"]]
+    assert second["receipt"]["previous"] == again["receipt"]["id"]
+    outcome = receipts.verify_chain(placeholder_engine, chain)
+    assert outcome.ok, outcome.reasons  # the instructions do not carry over, and need not
+
+
+def test_other_front_ends_name_the_previous_receipt(client, placeholder_engine):
+    anthropic = {"messages": [{"role": "user", "content": "Hi"}], "max_tokens": 8, "receipt": True}
+    body = client.post("/v1/messages", json={**anthropic, "previous_receipt": "rcpt_x"}).json()
+    assert body["receipt"]["previous"] == "rcpt_x"
+    assert body["id"] == client.post("/v1/messages", json=anthropic).json()["id"]
+    ollama = {"messages": [{"role": "user", "content": "Hi"}], "stream": False, "receipt": True}
+    body = client.post("/api/chat", json={**ollama, "previous_receipt": "rcpt_x"}).json()
+    assert body["receipt"]["previous"] == "rcpt_x"
+
+    async def steps(mcp):
+        arguments = {"messages": [{"role": "user", "content": "Hi"}], "max_tokens": 8, "receipt": True}
+        return await mcp.call_tool("chat", {**arguments, "previous_receipt": "rcpt_x"})
+
+    assert json.loads(in_memory(steps).content[0].text)["receipt"]["previous"] == "rcpt_x"

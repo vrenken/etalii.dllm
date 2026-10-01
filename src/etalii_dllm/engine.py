@@ -106,6 +106,9 @@ class ChatRequest:
     """Seed for the tool call ids (see :meth:`DllmEngine.derive_id`)."""
     prompt: str | None = None
     """A raw prompt used as is instead of rendering ``messages`` (Ollama's ``raw`` mode); no tools then."""
+    previous_receipt: str | None = None
+    """The receipt id of the conversation's previous turn: recorded as the receipt's ``previous`` (a receipt chain,
+    :func:`etalii_dllm.receipts.verify_chain`); it never changes the output."""
 
 
 @dataclass(frozen=True)
@@ -443,7 +446,9 @@ class DllmEngine:
         output = receipts.output_record(
             result.fingerprint, content, calls, finish_reason, generation.prompt_tokens, len(tokens)
         )
-        receipt = receipts.make_receipt(__version__, self.model.id, self.system_fingerprint, request, output)
+        receipt = receipts.make_receipt(
+            __version__, self.model.id, self.system_fingerprint, request, output, request.previous_receipt
+        )
         yield Finished(finish_reason, stop_sequence, len(tokens), result.fingerprint, receipt)
 
     def chat_completion(self, request: ChatRequest) -> ChatResult:

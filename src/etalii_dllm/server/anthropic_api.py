@@ -129,7 +129,9 @@ def _chat_request(request: MessagesRequest, engine: DllmEngine) -> ChatRequest:
     output = request.output_config.format if request.output_config else None
     output = output or request.output_format
     response_format = ResponseFormat("json_schema", output.json_schema) if output else ResponseFormat()
-    request_id = engine.derive_id("msg_", request.model_dump(mode="json", exclude={"stream", "receipt"}))
+    request_id = engine.derive_id(
+        "msg_", request.model_dump(mode="json", exclude={"stream", "receipt", "previous_receipt"})
+    )
     return ChatRequest(
         messages=_messages(request.system, request.messages),
         max_tokens=request.max_tokens,
@@ -140,6 +142,7 @@ def _chat_request(request: MessagesRequest, engine: DllmEngine) -> ChatRequest:
         response_format=response_format,
         call_id_prefix="toolu_",
         request_id=request_id,
+        previous_receipt=request.previous_receipt,
     )
 
 

@@ -117,7 +117,10 @@ Because a response is a pure function of the weights and the request, the engine
 system fingerprint and hashes of the tokens, text and tool calls. Every front end only decides whether to show it
 (`"receipt": true`), and leaves it out of `derive_id`, so asking for one changes no id. `receipts.verify` replays
 the recorded request through `chat_completion` and compares the hashes; `dllm replay`, `POST /v1/receipts/verify`
-and the MCP `verify_receipt` tool are thin wrappers around it.
+and the MCP `verify_receipt` tool are thin wrappers around it. A front end that knows the previous turn's receipt
+passes it as `ChatRequest.previous_receipt` (the Responses API takes it from the stored response), the engine records
+it as `previous`, and `receipts.verify_chain` checks a whole conversation: every turn, the links, and that each
+turn's messages continue the previous answer exactly ([receipt chains](../agents.md#receipt-chains)).
 
 ### Conversations without server state
 
@@ -176,8 +179,12 @@ sequenceDiagram
 
 The model side of this loop is as reproducible as any chat: the prompt lists tools in a fixed order, calls run
 one at a time in the model's order, and ids come from the conversation. External tools are outside the guarantee:
-a clock or a search engine may answer differently next time, and everything after it can then differ. Every
-`ToolResult` is recorded, so a run can be replayed exactly by passing the transcript to `chat_completion`.
+a clock or a search engine may answer differently next time, and everything after it can then differ. So
+`transcripts.Recorder` records every round (its receipt, text, calls and tool results) as an
+[agent transcript](../agents.md#transcripts), and `transcripts.replay` runs the same loop with
+`RecordedTools`, which stands in for `McpHost` and answers each call from the transcript, then compares the rounds'
+receipts. `builtin_tools.server` is an in-process MCP server (`dllm chat --tool`, or `dllm-tools` over stdio) whose
+tools (exact calculator, read-only files, document search) answer the same on every run.
 
 ## Concurrency
 

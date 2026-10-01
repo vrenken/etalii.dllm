@@ -446,6 +446,21 @@ dllm --model smollm2-135m.dllm eval my-questions.jsonl   # {"context", "choices"
 
 Details: [evaluation](evaluation.md).
 
+## 12. Replay an agent run
+
+Give the model tools whose answers never change, record the run, and replay it offline later, round by round:
+
+```bash
+dllm --model qwen2.5-0.5b.dllm chat "What is 12.5 times 8.25?" --tool calculator --transcript run.json
+dllm --model qwen2.5-0.5b.dllm replay run.json   # "verified: every round gave the same output, bit for bit"
+```
+
+`--tool files=DIR` lets the model read a directory and `--tool documents` search your `--index`; `dllm-tools` serves
+the same tools to any MCP client. `--transcript` also works with `--mcp-server`: the replay answers every call from
+the recording, so no server is started. A conversation over the HTTP APIs chains its receipts (`previous_receipt`,
+or automatically with `previous_response_id`), and `dllm replay` of the list checks every turn. Details:
+[reproducible agents](agents.md).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,

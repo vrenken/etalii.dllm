@@ -295,7 +295,7 @@ def test_responses_store_keeps_the_most_recent():
     for name in ("a", "b", "c"):
         store.put({"id": name}, [])
     assert store.get("a") is None
-    assert store.get("b") == ({"id": "b"}, []) and store.get("c") == ({"id": "c"}, [])
+    assert store.get("b") == ({"id": "b"}, [], None) and store.get("c") == ({"id": "c"}, [], None)
     store.put({"id": "b"}, [ChatMessage("user", "again")])
     store.put({"id": "d"}, [])
     assert store.get("c") is None and store.get("b") is not None

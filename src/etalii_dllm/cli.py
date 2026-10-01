@@ -216,7 +216,9 @@ def main(argv: list[str] | None = None) -> int:
     evaluate.add_argument("-o", "--output", help="also write the full report (JSON) to this file")
 
     replay = commands.add_parser("replay", help="re-run a generation receipt and check the output is the same")
-    replay.add_argument("receipt", metavar="FILE", help="a receipt or agent transcript (JSON), or - for standard input")
+    replay.add_argument(
+        "receipt", metavar="FILE", help="a receipt, a receipt chain (JSON list) or agent transcript; - reads stdin"
+    )
     replay.add_argument("--json", action="store_true", help="print the verification as JSON")
 
     from etalii_dllm.interpret import commands as interpret_commands
@@ -439,6 +441,8 @@ def _replay(engine: DllmEngine, args: argparse.Namespace) -> int:
     try:
         text = sys.stdin.read() if args.receipt == "-" else Path(args.receipt).read_text(encoding="utf-8")
         receipt = json.loads(text)
+        if isinstance(receipt, list):
+            return _replay_chain(engine, receipt, args.json)
         if not isinstance(receipt, dict):
             raise ValueError(f"not a {receipts.FORMAT} receipt")
         if "transcript" in receipt:
@@ -458,6 +462,26 @@ def _replay(engine: DllmEngine, args: argparse.Namespace) -> int:
             print(f"differs:            {reason}")
         print("verified: the replay gave the same output, bit for bit" if verification.ok else "NOT verified")
     return 0 if verification.ok else 1
+
+
+def _replay_chain(engine: DllmEngine, chain: list, as_json: bool) -> int:
+    from etalii_dllm import receipts
+
+    if not all(isinstance(r, dict) for r in chain):
+        raise ValueError(f"a receipt chain is a list of {receipts.FORMAT} receipts")
+    outcome = receipts.verify_chain(engine, chain)
+    if as_json:
+        print(json.dumps(outcome.to_json(), indent=2, ensure_ascii=False))
+    else:
+        print(f"chain:              {len(chain)} turns, {chain[0].get('id')} .. {chain[-1].get('id')}")
+        print(f"model:              {chain[0].get('model')}  ({chain[0].get('system_fingerprint')})")
+        for note in outcome.notes:
+            print(f"note:               {note}")
+        for reason in outcome.reasons:
+            print(f"differs:            {reason}")
+        verdict = "verified: every turn gave the same output and continues the one before"
+        print(verdict if outcome.ok else "NOT verified")
+    return 0 if outcome.ok else 1
 
 
 def _replay_transcript(engine: DllmEngine, transcript: dict, as_json: bool) -> int:

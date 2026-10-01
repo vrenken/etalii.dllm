@@ -14,12 +14,16 @@ A receipt is plain JSON::
       "system_fingerprint": "fp_...",    # weights, quantisation, steering, document index
       "request": {...},                  # the engine request (request_record), enough to run it again
       "output": {"tokens": "...", "content": "...", "tool_calls": "...", "finish_reason": "stop",
-                 "prompt_tokens": 12, "completion_tokens": 7}
+                 "prompt_tokens": 12, "completion_tokens": 7},
+      "previous": "rcpt_..."             # only in a conversation: the receipt of the turn before
     }
 
 ``output.tokens`` hashes the generated token ids, ``output.content`` and ``output.tool_calls`` the text and calls the
 client saw. Settings that never change a bit (threads, device, prompt cache, speculative decoding, batching) are not
 recorded. Nothing in a receipt comes from a clock or a random source, so the same request gives the same receipt.
+
+The receipts of a conversation's turns form a chain: each names the one before as ``previous``, and
+:func:`verify_chain` checks every turn and that each turn's conversation continues the previous answer exactly.
 """
 
 from __future__ import annotations
@@ -135,9 +139,14 @@ def output_record(
 
 
 def make_receipt(
-    engine_version: str, model: str, system_fingerprint: str, request: ChatRequest, output: Mapping[str, Any]
+    engine_version: str,
+    model: str,
+    system_fingerprint: str,
+    request: ChatRequest,
+    output: Mapping[str, Any],
+    previous: str | None = None,
 ) -> dict[str, Any]:
-    body = {
+    body: dict[str, Any] = {
         "receipt": FORMAT,
         "engine": engine_version,
         "model": model,
@@ -145,6 +154,8 @@ def make_receipt(
         "request": request_record(request),
         "output": dict(output),
     }
+    if previous:
+        body["previous"] = previous
     return {**body, "id": receipt_id(body)}
 
 
@@ -204,3 +215,69 @@ def verify(engine: DllmEngine, receipt: Mapping[str, Any]) -> Verification:
         if expected.get(key) != actual.get(key):
             reasons.append(f"{label} differ: recorded {expected.get(key)!r}, replayed {actual.get(key)!r}")
     return Verification(not reasons, tuple(reasons), tuple(notes), replayed)
+
+
+@dataclass(frozen=True)
+class ChainVerification:
+    """The outcome of :func:`verify_chain`. ``ok`` only when every turn verifies and continues the one before."""
+
+    ok: bool
+    reasons: tuple[str, ...]
+    notes: tuple[str, ...]
+    turns: tuple[Verification, ...]
+
+    def to_json(self) -> dict[str, Any]:
+        return {"ok": self.ok, "reasons": list(self.reasons), "notes": list(self.notes),
+                "turns": [t.to_json() for t in self.turns]}  # fmt: skip
+
+
+def _conversation(receipt: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """The receipt's messages without a leading system message (instructions may change between turns)."""
+    messages = list(receipt["request"]["messages"])
+    return messages[1:] if messages and messages[0]["role"] == "system" else messages
+
+
+def _continues(previous: Mapping[str, Any], receipt: Mapping[str, Any]) -> str | None:
+    """Why ``receipt``'s conversation does not continue ``previous``'s answer exactly, else ``None``."""
+    if previous["request"]["prompt"] is not None or receipt["request"]["prompt"] is not None:
+        return "a raw prompt is not a conversation"
+    before, after = _conversation(previous), _conversation(receipt)
+    if after[: len(before)] != before:
+        return "its conversation does not start with the previous turn's"
+    if len(after) <= len(before) or after[len(before)]["role"] != "assistant":
+        return "the previous answer is missing from its conversation"
+    answer = after[len(before)]
+    calls = [{"id": c["id"], "name": c["name"], "arguments": c["arguments"]} for c in answer["tool_calls"]]
+    output = previous["output"]
+    if _sha256(answer["content"]) != output.get("content"):
+        return "the previous answer's text was changed"
+    if _sha256(canonical_json(calls)) != output.get("tool_calls"):
+        return "the previous answer's tool calls were changed"
+    return None
+
+
+def verify_chain(engine: DllmEngine, chain: Sequence[Mapping[str, Any]]) -> ChainVerification:
+    """Verifies every receipt of a conversation (oldest first), that each names the one before as ``previous`` and
+    that each turn's messages continue the previous turn's messages and answer exactly (a leading system message
+    may differ, as instructions in the Responses API do not carry over)."""
+    if not chain:
+        raise ValueError("an empty receipt chain")
+    reasons: list[str] = []
+    notes: list[str] = []
+    turns: list[Verification] = []
+    for index, receipt in enumerate(chain):
+        turn = verify(engine, receipt)
+        turns.append(turn)
+        reasons.extend(f"turn {index}: {reason}" for reason in turn.reasons)
+        notes.extend(note for note in turn.notes if note not in notes)
+        if index == 0:
+            if receipt.get("previous"):
+                notes.append(f"the chain starts after {receipt['previous']}, which it does not include")
+            continue
+        previous = chain[index - 1]
+        if receipt.get("previous") != previous.get("id"):
+            reasons.append(f"turn {index}: names {receipt.get('previous')!r} as previous, not {previous.get('id')!r}")
+        problem = _continues(previous, receipt)
+        if problem is not None:
+            reasons.append(f"turn {index}: {problem}")
+    return ChainVerification(not reasons, tuple(reasons), tuple(notes), tuple(turns))
