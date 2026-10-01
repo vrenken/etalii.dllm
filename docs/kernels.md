@@ -75,6 +75,9 @@ uses the first, API `logprobs` the second.
   eps)` (IEEE `sqrt` is correctly rounded), `out = x * inv * w` (or `* (1 + w)` for Gemma), rounded once.
 - **`silu`**: `x * sigmoid(x)`. **`gelu`**: exact `0.5 x (1 + erf(x / sqrt 2))` (evaluated as `0.5 x erfc(-x / sqrt 2)` so the negative tail does not cancel), or with `approximate="tanh"` the
   GPT-2 form. All elementwise in double, rounded once.
+- **`swiglu(gate, up, activation)`**: the gated MLP activation `act(gate) * up` in one pass. `act(gate)` is
+  rounded to float first and then multiplied by `up` in float, exactly what the two separate steps (and the CUDA
+  kernel) do, so fusing them changes no bit.
 - **`softcap(x, cap)`**: `cap * tanh(x / cap)` in double, rounded once (Gemma 2's final logits).
 
 ## RoPE
@@ -124,8 +127,8 @@ Phase 6 made the kernels fast without touching the order above. Two facts make t
    fit in 53), so a fused multiply-add rounds exactly once, like the separate multiply and add: FMA gives the same
    bits here. (The compiler is still forbidden to contract anything on its own.)
 
-`attention` runs one task per (query, head) row and scores four keys at a time, each with its own dot-product
-accumulator; `linear_backward` runs one task per row of `dx` and per row of `dweight`.
+`attention` runs one task per (key/value head, tile of four query rows); see [Phase 13](#phase-13-tiles) below.
+`linear_backward` runs one task per row of `dx` and per row of `dweight`.
 
 The code path is chosen once per process from the CPU (`simd.hpp`): `avx2` (AVX2 + FMA, x86-64 with GCC/Clang)
 or `portable` (SSE2 on x86-64, NEON on arm64, plain C++ elsewhere). `numerics.instruction_set()` reports it,
@@ -141,6 +144,44 @@ Measured on a 4-core cloud VM (Xeon, AVX2) with SmolLM2-135M, float32 weights:
 | Generation, per token | 346 ms | 99 ms | 46 ms | 27 ms |
 
 Generation is limited by memory bandwidth (every weight is read once per token), which is what Q8_0 helps with.
+
+### Phase 13: tiles
+
+Phase 13 made the kernels faster again, with the same rule. Every output still owns its accumulator and its order.
+Only the way outputs are grouped onto threads, SIMD lanes and registers changed, so all golden hashes stayed the
+same.
+
+- **Register tiles in `linear`.** A panel's outputs are computed for several rows of `x` at once, so each weight
+  vector that is loaded and converted to double serves several rows. AVX2 tiles are up to 6 rows by 8 outputs
+  (12 accumulators in the 16 vector registers). Tiles of 1 or 2 rows use the whole panel, so there are enough
+  independent accumulators to hide the FMA latency. SSE2 tiles are 4 outputs wide, NEON tiles 8. `x` is converted
+  to double once per call, so the inner loop only broadcasts. The tile height depends only on the kernel and on
+  how many rows are left (full tiles of 6, then one tile of the remaining rows), never on the request.
+- **Q8_0 tiles (AVX2).** Two rows by four outputs: each weight block that is loaded serves both rows, and the four
+  block sums of a row are reduced together into one vector. The four outputs' doubles then advance in the lanes of
+  one register with separate multiplies and adds, `acc + (d_x * d_w) * isum`, the exact scalar order (no FMA,
+  because these products are not exact). The activations are quantised on the pool.
+- **Tiled attention.** One task per (key/value head, tile of 4 query rows). The rows of a tile are the query heads
+  of a group (GQA), or consecutive queries, in (query, head) order. Each SIMD lane holds a different row. The
+  scores of the four rows are computed over the union of their visible keys, but a row's softmax and output only
+  ever use its own keys, in its own order. `attention(..., reference=True)` keeps the row-by-row statement, and
+  `tests/test_batch_invariance.py` compares the two on every path, including causal and sliding-window spans that
+  differ within a tile.
+- **Parallel elementwise.** Activations, `swiglu` and soft-capping run on the pool in fixed chunks of 8192 values.
+- **A spinning pool.** Workers and the caller busy-wait for up to 200 µs before they sleep on a condition
+  variable. A decode step runs hundreds of jobs that each take tens of microseconds, and waking sleeping threads
+  for each cost more than the job.
+- **`-O3` for real.** nanobind's CMake helper added `-Os` after `-O3`, which built every kernel for size, at up to
+  half the speed. `NOMINSIZE` removes it. The optimisation level never changes a bit: the floating point flags
+  (`-ffp-contract=off -fno-fast-math`, `/fp:precise`) fix the semantics.
+
+Measured in the same cloud VM (4 vCPUs, Xeon, AVX2) with SmolLM2-135M, a 256-token prompt and single-token decode
+steps, all threads, best or median of repeated runs:
+
+| | float32, before | float32, Phase 13 | Q8_0, before | Q8_0, Phase 13 |
+| --- | --- | --- | --- | --- |
+| Prompt, tokens/s | 93 | 280 to 290 | 77 | 275 to 305 |
+| Generation, ms per token | 54 to 59 | 33 to 34 | 38 to 41 | 20 to 22 |
 
 ## Q8_0 quantisation
 

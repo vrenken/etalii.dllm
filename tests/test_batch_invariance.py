@@ -87,6 +87,28 @@ def test_attention_is_identical_on_every_code_path():
         assert out == expected, setting
 
 
+@pytest.mark.parametrize(
+    ("q_len", "kv_len", "q_heads", "kv_heads", "window", "softcap", "causal"),
+    [
+        (1, 1, 1, 1, 0, 0.0, True),  # decode, one key
+        (9, 40, 8, 2, 0, 0.0, True),  # group 4: one tile per (query, kv head)
+        (7, 7, 9, 3, 0, 0.0, True),  # group 3: tiles span queries with different causal spans
+        (13, 30, 4, 4, 5, 0.0, True),  # group 1, sliding window: different first keys in a tile
+        (6, 50, 14, 2, 0, 30.0, True),  # group 7, soft-capping
+        (5, 11, 6, 3, 0, 0.0, False),  # not causal
+        (3, 2, 2, 1, 0, 0.0, True),  # keys from the cache only partly visible (q_offset 0 below)
+    ],
+)
+def test_tiled_attention_equals_the_row_reference(q_len, kv_len, q_heads, kv_heads, window, softcap, causal):
+    q = gaussian(21, q_len, q_heads, 16) * np.float32(3.0)
+    k, v = gaussian(22, kv_len, kv_heads, 16), gaussian(23, kv_len, kv_heads, 24)
+    q_offset = 0 if kv_len < q_len else kv_len - q_len
+    arguments = (q, k, v, 0.25, causal, q_offset, window, softcap)
+    expected = _kernels.attention(*arguments, reference=True).tobytes()
+    for setting in every_setting():
+        assert _kernels.attention(*arguments).tobytes() == expected, setting
+
+
 def test_quantized_linear_is_identical_on_every_code_path():
     weight = QuantizedWeight(gaussian(8, 50, 96))
     x = gaussian(9, 67, 96)
@@ -95,6 +117,37 @@ def test_quantized_linear_is_identical_on_every_code_path():
         out = numerics.linear(x, weight, gaussian(10, 50)).fingerprint()
         expected = expected or out
         assert out == expected, setting
+
+
+def test_activations_are_identical_for_every_thread_count():
+    """Elementwise kernels run over fixed chunks on the pool; the fused gated activation rounds the activation
+    before the multiply, exactly as the two separate steps do."""
+    gate, up = gaussian(11, 7, 5003) * np.float32(4.0), gaussian(12, 7, 5003)  # several chunks and a ragged end
+    numerics.set_threads(1)
+    expected = {
+        "silu": numerics.silu(gate).numpy().tobytes(),
+        "gelu": numerics.gelu(gate).numpy().tobytes(),
+        "gelu_tanh": numerics.gelu(gate, approximate="tanh").numpy().tobytes(),
+        "softcap": numerics.softcap(gate, 3.0).numpy().tobytes(),
+        "swiglu": (numerics.silu(gate).numpy() * up).tobytes(),
+        "geglu": (numerics.gelu(gate, approximate="tanh").numpy() * up).tobytes(),
+    }
+    single = np.array([numerics.silu(np.array([v], np.float32)).numpy()[0] for v in gate.reshape(-1)[:64]])
+    assert single.tobytes() == numerics.silu(gate).numpy().reshape(-1)[:64].tobytes()
+    for setting in every_setting():
+        actual = {
+            "silu": numerics.silu(gate).numpy().tobytes(),
+            "gelu": numerics.gelu(gate).numpy().tobytes(),
+            "gelu_tanh": numerics.gelu(gate, approximate="tanh").numpy().tobytes(),
+            "softcap": numerics.softcap(gate, 3.0).numpy().tobytes(),
+            "swiglu": numerics.swiglu(gate, up).numpy().tobytes(),
+            "geglu": numerics.swiglu(gate, up, "gelu_tanh").numpy().tobytes(),
+        }
+        assert actual == expected, setting
+    with pytest.raises(ValueError):
+        numerics.swiglu(gate, up, "relu")
+    with pytest.raises(ValueError):
+        numerics.swiglu(gate, up[:, :5])
 
 
 def test_linear_backward_is_identical_for_every_thread_count():
@@ -156,20 +209,22 @@ def test_quantization_matches_reference_and_rounds_half_to_even():
     assert list(values[0, :6]) == [-2, -2, 0, 0, 2, 2]
 
 
-def test_quantized_linear_matches_exact_reference():
-    w, x, b = gaussian(19, 5, 64), gaussian(20, 3, 64), gaussian(21, 5)
+@pytest.mark.parametrize(("rows", "outputs", "inputs"), [(3, 5, 64), (7, 37, 96)])  # ragged row and output tiles
+def test_quantized_linear_matches_exact_reference(rows, outputs, inputs):
+    w, x, b = gaussian(19, outputs, inputs), gaussian(20, rows, inputs), gaussian(21, outputs)
     wq, ws = _kernels.quantize_q8_0(w)
     xq, xs = _kernels.quantize_q8_0(x)
-    expected = np.empty((3, 5), dtype=np.float32)
-    for r in range(3):
-        for n in range(5):
+    expected = np.empty((rows, outputs), dtype=np.float32)
+    for r in range(rows):
+        for n in range(outputs):
             acc = 0.0  # Python floats are IEEE doubles: the kernel's order, spelled out
-            for block in range(2):
+            for block in range(inputs // 32):
                 part = slice(32 * block, 32 * block + 32)
                 isum = int(np.dot(xq[r, part].astype(np.int64), wq[n, part].astype(np.int64)))
                 acc += (float(xs[r, block]) * float(ws[n, block])) * float(isum)
             expected[r, n] = np.float32(acc + float(b[n]))
-    assert numerics.linear(x, QuantizedWeight(w), b).numpy().tobytes() == expected.tobytes()
+    for setting in every_setting():
+        assert numerics.linear(x, QuantizedWeight(w), b).numpy().tobytes() == expected.tobytes(), setting
     approx = numerics.linear(x, w, b).numpy()
     assert np.abs(expected - approx).max() < 0.05 * np.abs(approx).max()
 

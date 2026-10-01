@@ -64,7 +64,8 @@ flowchart LR
     pool -->|yes| workers["worker threads take tasks<br/>through an atomic counter"]
     pool -->|"no (another request)"| caller["all tasks on the calling thread"]
     workers & caller --> panel["one task: 16 outputs × one block of rows"]
-    panel --> isa{"instruction set<br/>(fixed at start-up)"}
+    panel --> tile["register tiles: up to 6 rows × 8 outputs<br/>(height from the rows left only)"]
+    tile --> isa{"instruction set<br/>(fixed at start-up)"}
     isa -->|avx2| v4["4 outputs per register"]
     isa -->|"sse2 / neon"| v2["2 outputs per register"]
     isa -->|scalar| v1["1 output at a time"]
@@ -74,18 +75,23 @@ flowchart LR
 - **`parallel.hpp`**: a process-wide pool (`DLLM_THREADS`, `--threads`, `numerics.set_threads`; default all cores).
   Each task owns a disjoint set of outputs and nothing is combined across tasks, so the thread count and scheduling
   are speed settings only. When the pool is busy with another caller's kernel, the tasks run on the calling thread,
-  with the same result. After `fork()` a child starts its own workers.
+  with the same result. After `fork()` a child starts its own workers. Workers spin for up to 200 µs before they
+  sleep, because a decode step runs hundreds of very short jobs.
 - **`fpenv.hpp`**: every binding runs under `FpEnvGuard`, which sets round-to-nearest with subnormals kept for the
   call and restores the caller's state; pool workers enter that state when they start. A library that turned
   flush-to-zero on for the process therefore cannot change a kernel's bits.
 - **`simd.hpp`**: the widest supported variant is chosen once per process. SIMD lanes hold *different* outputs,
   each advancing through `k` in the same order as the scalar loop. The product of two floats is exact in double, so
   an FMA rounds once exactly like a multiply plus an add, and every variant equals `linear_reference` bit for bit.
-  `PackedWeight` rearranges a weight once at load time into the `[in][16]` panels the vector loop reads.
+  `PackedWeight` rearranges a weight once at load time into the `[in][16]` panels the vector loop reads. A panel is
+  computed in register tiles of several rows, so a weight vector loaded once serves every row of the tile.
+- **Attention** runs one task per (key/value head, tile of 4 query rows), one row per SIMD lane; each row's softmax
+  and output only use its own keys, in its own order, and equal the row-by-row reference.
 - **Tiling** (for example `matmul`'s 64-column, 256-deep tiles) only changes the order in which outputs are
   visited; each output keeps one accumulator across all tiles.
 - **Q8_0** (`quant.hpp`) sums int8 products within a block in int32, which is exact and so order-free, then combines
-  blocks in ascending order in double.
+  blocks in ascending order in double. The AVX2 kernel works on tiles of 2 rows × 4 outputs, with the four outputs'
+  double combines in the lanes of one register.
 
 `tests/test_batch_invariance.py` forces every supported instruction set and several thread counts, and requires the
 bits of the scalar reference, of a lone row, and of a lone request.

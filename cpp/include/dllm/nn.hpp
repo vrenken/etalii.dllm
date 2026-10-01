@@ -84,173 +84,224 @@ inline void pack_linear(const float* w, float* dst, std::size_t in_features, std
     }
 }
 
-// All rows of one packed panel, one row at a time: kPanel double accumulators that the compiler keeps in vector
-// registers (SSE2 on x86-64, NEON on arm64), advancing together over k.
-DLLM_ALWAYS_INLINE void linear_panel(const float* x, const float* panel, const float* bias, float* out,
-                                     std::size_t rows, std::size_t in_features, std::size_t out_features,
-                                     std::size_t n0) {
-    const std::size_t width = n0 + kPanel <= out_features ? kPanel : out_features - n0;
-    for (std::size_t r = 0; r < rows; ++r) {
-        const float* xr = x + r * in_features;
-        double acc[kPanel] = {};
-        for (std::size_t k = 0; k < in_features; ++k) {
-            const float* pk = panel + k * kPanel;
-            const double v = xr[k];
-            for (std::size_t j = 0; j < kPanel; ++j) {
-                acc[j] += v * static_cast<double>(pk[j]);
-            }
-        }
-        for (std::size_t j = 0; j < width; ++j) {
+// The panel kernels work on register tiles: kTileRowsMax rows of x by a slice of the panel's outputs advance
+// together over k, so every weight vector loaded and converted serves several rows. x arrives converted to double
+// (convert_rows below) so a row value is a plain broadcast in the inner loop. The tile height only depends on the
+// kernel and on how many rows are left, and it changes speed only: every output keeps its own accumulator over k.
+constexpr std::size_t kTileRowsMax = 6;
+
+// Copies x[rows][in_features] to double (exact), the form the panel kernels read.
+inline void convert_rows(const float* x, double* dst, std::size_t n) {
+    for (std::size_t i = 0; i < n; ++i) {
+        dst[i] = x[i];
+    }
+}
+
+// Rounds the double sums of rows [r, r + R) and outputs [n0 + j0, n0 + j1) of a panel to float, after the bias.
+template <std::size_t R, std::size_t W>
+DLLM_ALWAYS_INLINE void store_tile(const double (&result)[R][W], const float* bias, float* out, std::size_t r,
+                                   std::size_t out_features, std::size_t n0, std::size_t j0, std::size_t j1) {
+    for (std::size_t i = 0; i < R; ++i) {
+        for (std::size_t j = j0; j < j1; ++j) {
+            double acc = result[i][j - j0];
             if (bias != nullptr) {
-                acc[j] += bias[n0 + j];
+                acc += bias[n0 + j];
             }
-            out[r * out_features + n0 + j] = static_cast<float>(acc[j]);
+            out[(r + i) * out_features + n0 + j] = static_cast<float>(acc);
         }
     }
 }
 
-// The baseline panel: SSE2 on x86-64 (every x86-64 CPU has it), NEON on arm64, the plain loop elsewhere.
-inline void linear_panel_portable(const float* x, const float* panel, const float* bias, float* out,
+// Calls tile<R>(r) over rows [0, rows): tiles of kTileRowsMax rows, then one tile of the rows left.
+template <template <std::size_t> class Tile, class... Args>
+DLLM_ALWAYS_INLINE void for_each_tile(std::size_t rows, Args&&... args) {
+    std::size_t r = 0;
+    for (; r + kTileRowsMax <= rows; r += kTileRowsMax) {
+        Tile<kTileRowsMax>::run(r, args...);
+    }
+    switch (rows - r) {
+        case 5: Tile<5>::run(r, args...); break;
+        case 4: Tile<4>::run(r, args...); break;
+        case 3: Tile<3>::run(r, args...); break;
+        case 2: Tile<2>::run(r, args...); break;
+        case 1: Tile<1>::run(r, args...); break;
+        default: break;
+    }
+}
+
+struct PanelArgs {
+    const double* x;
+    const float* panel;
+    const float* bias;
+    float* out;
+    std::size_t in_features;
+    std::size_t out_features;
+    std::size_t n0;
+    std::size_t width;
+};
+
+// The plain tile: R rows by the whole panel, kPanel double accumulators per row.
+template <std::size_t R>
+struct PlainTile {
+    static DLLM_ALWAYS_INLINE void run(std::size_t r, const PanelArgs& a) {
+        double acc[R][kPanel] = {};
+        for (std::size_t k = 0; k < a.in_features; ++k) {
+            const float* pk = a.panel + k * kPanel;
+            for (std::size_t i = 0; i < R; ++i) {
+                const double v = a.x[(r + i) * a.in_features + k];
+                for (std::size_t j = 0; j < kPanel; ++j) {
+                    acc[i][j] += v * static_cast<double>(pk[j]);
+                }
+            }
+        }
+        store_tile(acc, a.bias, a.out, r, a.out_features, a.n0, 0, a.width);
+    }
+};
+
+#if defined(DLLM_SSE2)
+// SSE2 (every x86-64 CPU): R rows by four outputs, two accumulators of two doubles per row.
+template <std::size_t R>
+struct Sse2Tile {
+    static DLLM_ALWAYS_INLINE void run(std::size_t r, const PanelArgs& a) {
+        for (std::size_t h = 0; h < a.width; h += 4) {
+            __m128d acc[R][2];
+            for (std::size_t i = 0; i < R; ++i) {
+                acc[i][0] = _mm_setzero_pd();
+                acc[i][1] = _mm_setzero_pd();
+            }
+            const float* pk = a.panel + h;
+            const double* xr = a.x + r * a.in_features;
+            for (std::size_t k = 0; k < a.in_features; ++k, pk += kPanel) {
+                const __m128 w = _mm_loadu_ps(pk);
+                const __m128d w0 = _mm_cvtps_pd(w);
+                const __m128d w1 = _mm_cvtps_pd(_mm_movehl_ps(w, w));
+                for (std::size_t i = 0; i < R; ++i) {
+                    const __m128d v = _mm_set1_pd(xr[i * a.in_features + k]);
+                    acc[i][0] = _mm_add_pd(acc[i][0], _mm_mul_pd(v, w0));
+                    acc[i][1] = _mm_add_pd(acc[i][1], _mm_mul_pd(v, w1));
+                }
+            }
+            alignas(16) double result[R][4];
+            for (std::size_t i = 0; i < R; ++i) {
+                _mm_store_pd(result[i], acc[i][0]);
+                _mm_store_pd(result[i] + 2, acc[i][1]);
+            }
+            store_tile(result, a.bias, a.out, r, a.out_features, a.n0, h, h + 4 < a.width ? h + 4 : a.width);
+        }
+    }
+};
+#elif defined(DLLM_NEON)
+// NEON (every arm64 CPU, 32 vector registers): R rows by eight outputs, four accumulators of two doubles per row.
+// vfmaq_f64 is exact-product fused multiply-add, which equals multiply-then-add here (see the AVX2 tile).
+template <std::size_t R>
+struct NeonTile {
+    static DLLM_ALWAYS_INLINE void run(std::size_t r, const PanelArgs& a) {
+        for (std::size_t h = 0; h < a.width; h += 8) {
+            float64x2_t acc[R][4];
+            for (std::size_t i = 0; i < R; ++i) {
+                for (std::size_t q = 0; q < 4; ++q) {
+                    acc[i][q] = vdupq_n_f64(0.0);
+                }
+            }
+            const float* pk = a.panel + h;
+            const double* xr = a.x + r * a.in_features;
+            for (std::size_t k = 0; k < a.in_features; ++k, pk += kPanel) {
+                const float32x4_t lo = vld1q_f32(pk);
+                const float32x4_t hi = vld1q_f32(pk + 4);
+                const float64x2_t w0 = vcvt_f64_f32(vget_low_f32(lo));
+                const float64x2_t w1 = vcvt_high_f64_f32(lo);
+                const float64x2_t w2 = vcvt_f64_f32(vget_low_f32(hi));
+                const float64x2_t w3 = vcvt_high_f64_f32(hi);
+                for (std::size_t i = 0; i < R; ++i) {
+                    const float64x2_t v = vld1q_dup_f64(xr + i * a.in_features + k);
+                    acc[i][0] = vfmaq_f64(acc[i][0], v, w0);
+                    acc[i][1] = vfmaq_f64(acc[i][1], v, w1);
+                    acc[i][2] = vfmaq_f64(acc[i][2], v, w2);
+                    acc[i][3] = vfmaq_f64(acc[i][3], v, w3);
+                }
+            }
+            alignas(16) double result[R][8];
+            for (std::size_t i = 0; i < R; ++i) {
+                for (std::size_t q = 0; q < 4; ++q) {
+                    vst1q_f64(result[i] + 2 * q, acc[i][q]);
+                }
+            }
+            store_tile(result, a.bias, a.out, r, a.out_features, a.n0, h, h + 8 < a.width ? h + 8 : a.width);
+        }
+    }
+};
+#endif
+
+// The baseline panel: SSE2 on x86-64, NEON on arm64, the plain loop elsewhere.
+inline void linear_panel_portable(const double* x, const float* panel, const float* bias, float* out,
                                   std::size_t rows, std::size_t in_features, std::size_t out_features,
                                   std::size_t n0) {
+    const PanelArgs args{x, panel, bias, out, in_features, out_features, n0,
+                         n0 + kPanel <= out_features ? kPanel : out_features - n0};
 #if defined(DLLM_SSE2)
-    const std::size_t width = n0 + kPanel <= out_features ? kPanel : out_features - n0;
-    alignas(16) double result[kPanel];
-    for (std::size_t r = 0; r < rows; ++r) {
-        const float* xr = x + r * in_features;
-        __m128d acc[8];
-        for (auto& a : acc) {
-            a = _mm_setzero_pd();
-        }
-        for (std::size_t k = 0; k < in_features; ++k) {
-            const float* pk = panel + k * kPanel;
-            const __m128d v = _mm_set1_pd(static_cast<double>(xr[k]));
-            for (std::size_t q = 0; q < 4; ++q) {
-                const __m128 w = _mm_loadu_ps(pk + 4 * q);
-                acc[2 * q] = _mm_add_pd(acc[2 * q], _mm_mul_pd(v, _mm_cvtps_pd(w)));
-                acc[2 * q + 1] = _mm_add_pd(acc[2 * q + 1], _mm_mul_pd(v, _mm_cvtps_pd(_mm_movehl_ps(w, w))));
-            }
-        }
-        for (std::size_t q = 0; q < 8; ++q) {
-            _mm_store_pd(result + 2 * q, acc[q]);
-        }
-        for (std::size_t j = 0; j < width; ++j) {
-            double value = result[j];
-            if (bias != nullptr) {
-                value += bias[n0 + j];
-            }
-            out[r * out_features + n0 + j] = static_cast<float>(value);
-        }
-    }
+    for_each_tile<Sse2Tile>(rows, args);
 #elif defined(DLLM_NEON)
-    // vfmaq_f64 is exact-product fused multiply-add, which equals multiply-then-add here (see the x86 panels).
-    const std::size_t width = n0 + kPanel <= out_features ? kPanel : out_features - n0;
-    alignas(16) double result[2][kPanel];
-    std::size_t r = 0;
-    while (r < rows) {
-        const std::size_t count = r + 2 <= rows ? 2 : 1;
-        const float* x0 = x + r * in_features;
-        const float* x1 = count == 2 ? x0 + in_features : x0;
-        float64x2_t a0[8];
-        float64x2_t a1[8];
-        for (std::size_t q = 0; q < 8; ++q) {
-            a0[q] = vdupq_n_f64(0.0);
-            a1[q] = vdupq_n_f64(0.0);
-        }
-        for (std::size_t k = 0; k < in_features; ++k) {
-            const float* pk = panel + k * kPanel;
-            const float64x2_t v0 = vdupq_n_f64(static_cast<double>(x0[k]));
-            const float64x2_t v1 = vdupq_n_f64(static_cast<double>(x1[k]));
-            for (std::size_t q = 0; q < 4; ++q) {
-                const float32x4_t w = vld1q_f32(pk + 4 * q);
-                const float64x2_t wl = vcvt_f64_f32(vget_low_f32(w));
-                const float64x2_t wh = vcvt_high_f64_f32(w);
-                a0[2 * q] = vfmaq_f64(a0[2 * q], v0, wl);
-                a0[2 * q + 1] = vfmaq_f64(a0[2 * q + 1], v0, wh);
-                a1[2 * q] = vfmaq_f64(a1[2 * q], v1, wl);
-                a1[2 * q + 1] = vfmaq_f64(a1[2 * q + 1], v1, wh);
-            }
-        }
-        for (std::size_t q = 0; q < 8; ++q) {
-            vst1q_f64(result[0] + 2 * q, a0[q]);
-            vst1q_f64(result[1] + 2 * q, a1[q]);
-        }
-        for (std::size_t i = 0; i < count; ++i) {
-            for (std::size_t j = 0; j < width; ++j) {
-                double value = result[i][j];
-                if (bias != nullptr) {
-                    value += bias[n0 + j];
-                }
-                out[(r + i) * out_features + n0 + j] = static_cast<float>(value);
-            }
-        }
-        r += count;
-    }
+    for_each_tile<NeonTile>(rows, args);
 #else
-    linear_panel(x, panel, bias, out, rows, in_features, out_features, n0);
+    for_each_tile<PlainTile>(rows, args);
 #endif
 }
 
 #ifdef DLLM_X86_DISPATCH
-// The x86 panels in intrinsics. They use fused multiply-add: a product of two floats is exact in double, so
-// fma(x, w, acc) rounds exactly once, like the separate multiply (exact) and add of linear_reference().
-DLLM_TARGET_AVX2 inline void linear_panel_avx2(const float* x, const float* panel, const float* bias, float* out,
+// AVX2: R rows by C vectors of four outputs. Tiles of three or more rows take half a panel (C = 2): with R = 6,
+// twelve accumulators, two converted weight vectors and one broadcast fit the sixteen vector registers. One or two
+// rows take the whole panel (C = 4), so there are enough independent accumulators to hide the FMA latency. It uses
+// fused multiply-add: a product of two floats is exact in double, so fma(x, w, acc) rounds exactly once, like the
+// separate multiply (exact) and add of linear_reference().
+template <std::size_t R>
+struct Avx2Tile {
+    static constexpr std::size_t C = R <= 2 ? 4 : 2;
+    // A call per tile: AVX2 code cannot be forced inline into the generic for_each_tile.
+    static DLLM_TARGET_AVX2 void run(std::size_t r, const PanelArgs& a) {
+        for (std::size_t h = 0; h < a.width; h += 4 * C) {
+            __m256d acc[R][C];
+            for (std::size_t i = 0; i < R; ++i) {
+                for (std::size_t c = 0; c < C; ++c) {
+                    acc[i][c] = _mm256_setzero_pd();
+                }
+            }
+            const float* pk = a.panel + h;
+            const double* xr = a.x + r * a.in_features;
+            for (std::size_t k = 0; k < a.in_features; ++k, pk += kPanel) {
+                __m256d w[C];
+                for (std::size_t c = 0; c < C; ++c) {
+                    w[c] = _mm256_cvtps_pd(_mm_loadu_ps(pk + 4 * c));
+                }
+                for (std::size_t i = 0; i < R; ++i) {
+                    const __m256d v = _mm256_broadcast_sd(xr + i * a.in_features + k);
+                    for (std::size_t c = 0; c < C; ++c) {
+                        acc[i][c] = _mm256_fmadd_pd(v, w[c], acc[i][c]);
+                    }
+                }
+            }
+            alignas(32) double result[R][4 * C];
+            for (std::size_t i = 0; i < R; ++i) {
+                for (std::size_t c = 0; c < C; ++c) {
+                    _mm256_store_pd(result[i] + 4 * c, acc[i][c]);
+                }
+            }
+            const std::size_t end = h + 4 * C < a.width ? h + 4 * C : a.width;
+            store_tile(result, a.bias, a.out, r, a.out_features, a.n0, h, end);
+        }
+    }
+};
+
+DLLM_TARGET_AVX2 inline void linear_panel_avx2(const double* x, const float* panel, const float* bias, float* out,
                                                std::size_t rows, std::size_t in_features, std::size_t out_features,
                                                std::size_t n0) {
-    const std::size_t width = n0 + kPanel <= out_features ? kPanel : out_features - n0;
-    alignas(32) double result[2][kPanel];
-    std::size_t r = 0;
-    while (r < rows) {
-        const std::size_t count = r + 2 <= rows ? 2 : 1;
-        const float* x0 = x + r * in_features;
-        const float* x1 = count == 2 ? x0 + in_features : x0;
-        __m256d a00 = _mm256_setzero_pd(), a01 = _mm256_setzero_pd(), a02 = _mm256_setzero_pd(),
-                a03 = _mm256_setzero_pd();
-        __m256d a10 = _mm256_setzero_pd(), a11 = _mm256_setzero_pd(), a12 = _mm256_setzero_pd(),
-                a13 = _mm256_setzero_pd();
-        for (std::size_t k = 0; k < in_features; ++k) {
-            const float* pk = panel + k * kPanel;
-            const __m256 lo = _mm256_loadu_ps(pk);
-            const __m256 hi = _mm256_loadu_ps(pk + 8);
-            const __m256d w0 = _mm256_cvtps_pd(_mm256_castps256_ps128(lo));
-            const __m256d w1 = _mm256_cvtps_pd(_mm256_extractf128_ps(lo, 1));
-            const __m256d w2 = _mm256_cvtps_pd(_mm256_castps256_ps128(hi));
-            const __m256d w3 = _mm256_cvtps_pd(_mm256_extractf128_ps(hi, 1));
-            const __m256d v0 = _mm256_set1_pd(static_cast<double>(x0[k]));
-            const __m256d v1 = _mm256_set1_pd(static_cast<double>(x1[k]));
-            a00 = _mm256_fmadd_pd(v0, w0, a00);
-            a01 = _mm256_fmadd_pd(v0, w1, a01);
-            a02 = _mm256_fmadd_pd(v0, w2, a02);
-            a03 = _mm256_fmadd_pd(v0, w3, a03);
-            a10 = _mm256_fmadd_pd(v1, w0, a10);
-            a11 = _mm256_fmadd_pd(v1, w1, a11);
-            a12 = _mm256_fmadd_pd(v1, w2, a12);
-            a13 = _mm256_fmadd_pd(v1, w3, a13);
-        }
-        _mm256_store_pd(result[0], a00);
-        _mm256_store_pd(result[0] + 4, a01);
-        _mm256_store_pd(result[0] + 8, a02);
-        _mm256_store_pd(result[0] + 12, a03);
-        _mm256_store_pd(result[1], a10);
-        _mm256_store_pd(result[1] + 4, a11);
-        _mm256_store_pd(result[1] + 8, a12);
-        _mm256_store_pd(result[1] + 12, a13);
-        for (std::size_t i = 0; i < count; ++i) {
-            for (std::size_t j = 0; j < width; ++j) {
-                double acc = result[i][j];
-                if (bias != nullptr) {
-                    acc += bias[n0 + j];
-                }
-                out[(r + i) * out_features + n0 + j] = static_cast<float>(acc);
-            }
-        }
-        r += count;
-    }
+    const PanelArgs args{x, panel, bias, out, in_features, out_features, n0,
+                         n0 + kPanel <= out_features ? kPanel : out_features - n0};
+    for_each_tile<Avx2Tile>(rows, args);
 }
 
 #endif
 
-using LinearPanelFn = void (*)(const float*, const float*, const float*, float*, std::size_t, std::size_t,
+using LinearPanelFn = void (*)(const double*, const float*, const float*, float*, std::size_t, std::size_t,
                                std::size_t, std::size_t);
 
 inline LinearPanelFn linear_panel_kernel() {
@@ -265,8 +316,9 @@ inline LinearPanelFn linear_panel_kernel() {
     return linear_panel_portable;
 }
 
-// Rows are processed in blocks so a block of x stays in cache while it meets every panel.
-constexpr std::size_t kRowBlock = 64;
+// Rows are processed in blocks so a block of x stays in cache while it meets every panel; a multiple of the tile
+// height.
+constexpr std::size_t kRowBlock = 4 * kTileRowsMax;
 
 // linear() with weights already packed by pack_linear(). Bit-identical to linear_reference().
 inline void linear_packed(const float* x, const float* packed, const float* bias, float* out, std::size_t rows,
@@ -274,11 +326,19 @@ inline void linear_packed(const float* x, const float* packed, const float* bias
     const LinearPanelFn kernel = linear_panel_kernel();
     const std::size_t panels = panel_count(out_features);
     const std::size_t row_blocks = (rows + kRowBlock - 1) / kRowBlock;
+    thread_local std::vector<double> buffer;  // reused by this caller's later calls
+    buffer.resize(rows * in_features);
+    double* const xd = buffer.data();  // the lambdas below run on other threads, with other thread_locals
+    parallel_for(row_blocks, [&](std::size_t block) {
+        const std::size_t r0 = block * kRowBlock;
+        const std::size_t count = r0 + kRowBlock <= rows ? kRowBlock : rows - r0;
+        convert_rows(x + r0 * in_features, xd + r0 * in_features, count * in_features);
+    });
     parallel_for(panels * row_blocks, [&](std::size_t task) {
         const std::size_t p = task % panels;
         const std::size_t r0 = (task / panels) * kRowBlock;
         const std::size_t count = r0 + kRowBlock <= rows ? kRowBlock : rows - r0;
-        kernel(x + r0 * in_features, packed + p * in_features * kPanel, bias, out + r0 * out_features, count,
+        kernel(xd + r0 * in_features, packed + p * in_features * kPanel, bias, out + r0 * out_features, count,
                in_features, out_features, p * kPanel);
     });
 }
@@ -288,11 +348,13 @@ inline void linear_packed(const float* x, const float* packed, const float* bias
 inline void linear(const float* x, const float* w, const float* bias, float* out, std::size_t rows,
                    std::size_t in_features, std::size_t out_features) {
     const LinearPanelFn kernel = linear_panel_kernel();
+    std::vector<double> xd(rows * in_features);
+    convert_rows(x, xd.data(), xd.size());
     parallel_for(panel_count(out_features), [&](std::size_t p) {
         thread_local std::vector<float> buffer;
         buffer.resize(in_features * kPanel);
         pack_panel(w, buffer.data(), in_features, out_features, p * kPanel);
-        kernel(x, buffer.data(), bias, out, rows, in_features, out_features, p * kPanel);
+        kernel(xd.data(), buffer.data(), bias, out, rows, in_features, out_features, p * kPanel);
     });
 }
 
@@ -345,11 +407,33 @@ inline void rms_norm(const float* x, const float* weight, float* out, std::size_
     }
 }
 
+// Elementwise work is split into fixed chunks of kElementChunk values, one thread-pool task each. Every output is
+// computed from its own inputs only, so the split never changes a bit; it is fixed so the tasks do not depend on
+// the thread count either.
+constexpr std::size_t kElementChunk = 8192;
+
+template <typename Fn>
+inline void parallel_elementwise(std::size_t n, Fn fn) {
+    const std::size_t chunks = (n + kElementChunk - 1) / kElementChunk;
+    if (chunks <= 1) {
+        for (std::size_t i = 0; i < n; ++i) {
+            fn(i);
+        }
+        return;
+    }
+    parallel_for(chunks, [&](std::size_t c) {
+        const std::size_t end = (c + 1) * kElementChunk < n ? (c + 1) * kElementChunk : n;
+        for (std::size_t i = c * kElementChunk; i < end; ++i) {
+            fn(i);
+        }
+    });
+}
+
 // Logit soft-capping (Gemma 2): cap * tanh(x / cap), in double, rounded once.
 inline void softcap(const float* x, float* out, std::size_t n, double cap) {
-    for (std::size_t i = 0; i < n; ++i) {
+    parallel_elementwise(n, [&](std::size_t i) {
         out[i] = static_cast<float>(cap * dllm::tanh(static_cast<double>(x[i]) / cap));
-    }
+    });
 }
 
 // SiLU (swish): x * sigmoid(x), in double, rounded once.
@@ -371,6 +455,13 @@ inline float gelu_tanh(float x) {
     constexpr double sqrt_2_over_pi = 7.97884560802865355879e-01;
     const double d = x;
     return static_cast<float>(0.5 * d * (1.0 + dllm::tanh(sqrt_2_over_pi * (d + 0.044715 * d * d * d))));
+}
+
+// The gated MLP activation act(gate) * up: the activation rounded to float first, then a float multiply, exactly as
+// computing the two steps separately (and as the CUDA swiglu kernel). Act is silu or gelu_tanh.
+template <float (*Act)(float)>
+inline void gated_activation(const float* gate, const float* up, float* out, std::size_t n) {
+    parallel_elementwise(n, [&](std::size_t i) { out[i] = Act(gate[i]) * up[i]; });
 }
 
 // Rotary position embedding, in place-free form. x is [tokens, heads, head_dim]; positions[t] is token t's absolute
@@ -411,9 +502,48 @@ inline void rope(const float* x, const std::int64_t* positions, const double* in
     }
 }
 
+// The softmax and value sum of one attention row whose scaled scores[0, visible) are ready: a positive softcap
+// (Gemma 2) maps each score s to softcap * tanh(s / softcap), in double; the maximum is subtracted, exponentials
+// and their total run over keys ascending, then the value sum over keys ascending, divided by the total once.
+DLLM_ALWAYS_INLINE void attention_finish(double* scores, const float* v, float* oh, double* acc, std::size_t visible,
+                                         std::size_t kv_heads, std::size_t kvh, std::size_t value_dim,
+                                         double softcap) {
+    std::size_t j = 0;
+    if (softcap > 0.0) {
+        for (j = 0; j < visible; ++j) {
+            scores[j] = softcap * dllm::tanh(scores[j] / softcap);
+        }
+    }
+    double max = scores[0];
+    for (j = 1; j < visible; ++j) {
+        if (scores[j] > max) {
+            max = scores[j];
+        }
+    }
+    double total = 0.0;
+    for (j = 0; j < visible; ++j) {
+        scores[j] = dllm::exp(scores[j] - max);
+        total += scores[j];
+    }
+    for (std::size_t i = 0; i < value_dim; ++i) {
+        acc[i] = 0.0;
+    }
+    for (j = 0; j < visible; ++j) {
+        const float* vj = v + (j * kv_heads + kvh) * value_dim;
+        const double p = scores[j];
+        for (std::size_t i = 0; i < value_dim; ++i) {
+            acc[i] += p * static_cast<double>(vj[i]);
+        }
+    }
+    const double inv = 1.0 / total;
+    for (std::size_t i = 0; i < value_dim; ++i) {
+        oh[i] = static_cast<float>(acc[i] * inv);
+    }
+}
+
 // One (query, head) row of attention(): writes oh[value_dim]. Four keys are scored at a time, each with its own
-// accumulator, so the order inside every dot product is unchanged. A positive softcap (Gemma 2) maps each scaled
-// score s to softcap * tanh(s / softcap), in double.
+// accumulator, so the order inside every dot product is unchanged; attention_finish() does the rest. This is the
+// plain statement of a row; attention() computes the same bits with attention_tile().
 DLLM_ALWAYS_INLINE void attention_row(const float* qh, const float* k, const float* v, float* oh, double* scores,
                                       double* acc, std::size_t visible, std::size_t kv_heads, std::size_t kvh,
                                       std::size_t head_dim, std::size_t value_dim, double scale, double softcap) {
@@ -454,67 +584,117 @@ DLLM_ALWAYS_INLINE void attention_row(const float* qh, const float* k, const flo
         }
         scores[j] = dotp * scale;
     }
-    if (softcap > 0.0) {
-        for (j = 0; j < visible; ++j) {
-            scores[j] = softcap * dllm::tanh(scores[j] / softcap);
+    attention_finish(scores, v, oh, acc, visible, kv_heads, kvh, value_dim, softcap);
+}
+
+// Up to kQueryTile rows that read the same key/value head, computed together: lane l of every score accumulator
+// belongs to row l, so SIMD registers hold different rows while each lane sums its own dot product over head_dim
+// ascending in double, exactly as attention_row(). The rows may see different keys (causal masks, windows): scores
+// are computed for the union of their spans and each row's softmax and value sum (attention_finish) use only its
+// own span, so a row's bits never depend on the rows it is tiled with.
+constexpr std::size_t kQueryTile = 4;
+
+struct AttentionTile {
+    const float* q[kQueryTile];
+    float* out[kQueryTile];
+    std::size_t first[kQueryTile];
+    std::size_t count[kQueryTile];
+    std::size_t lanes;
+};
+
+DLLM_ALWAYS_INLINE void attention_tile(const AttentionTile& tile, const float* k, const float* v, double* scores,
+                                       double* acc, float* qt, std::size_t kv_len, std::size_t kv_heads,
+                                       std::size_t kvh, std::size_t head_dim, std::size_t value_dim, double scale,
+                                       double softcap) {
+    std::size_t u0 = kv_len;
+    std::size_t u1 = 0;
+    for (std::size_t l = 0; l < tile.lanes; ++l) {
+        if (tile.count[l] == 0) {
+            continue;
+        }
+        u0 = tile.first[l] < u0 ? tile.first[l] : u0;
+        u1 = tile.first[l] + tile.count[l] > u1 ? tile.first[l] + tile.count[l] : u1;
+    }
+    // Queries transposed to qt[head_dim][kQueryTile]; unused lanes are zero and their scores are never read.
+    for (std::size_t i = 0; i < head_dim; ++i) {
+        for (std::size_t l = 0; l < kQueryTile; ++l) {
+            qt[i * kQueryTile + l] = l < tile.lanes ? tile.q[l][i] : 0.0f;
         }
     }
-    double max = scores[0];
-    for (j = 1; j < visible; ++j) {
-        if (scores[j] > max) {
-            max = scores[j];
+    const std::size_t key_stride = kv_heads * head_dim;
+    std::size_t j = u0;
+    for (; j + 4 <= u1; j += 4) {
+        const float* k0 = k + (j * kv_heads + kvh) * head_dim;
+        double a[4][kQueryTile] = {};
+        for (std::size_t i = 0; i < head_dim; ++i) {
+            const float* qi = qt + i * kQueryTile;
+            for (std::size_t b = 0; b < 4; ++b) {
+                const double kb = k0[b * key_stride + i];
+                for (std::size_t l = 0; l < kQueryTile; ++l) {
+                    a[b][l] += static_cast<double>(qi[l]) * kb;
+                }
+            }
+        }
+        for (std::size_t b = 0; b < 4; ++b) {
+            for (std::size_t l = 0; l < kQueryTile; ++l) {
+                scores[l * kv_len + j + b] = a[b][l] * scale;
+            }
         }
     }
-    double total = 0.0;
-    for (j = 0; j < visible; ++j) {
-        scores[j] = dllm::exp(scores[j] - max);
-        total += scores[j];
-    }
-    for (std::size_t i = 0; i < value_dim; ++i) {
-        acc[i] = 0.0;
-    }
-    for (j = 0; j < visible; ++j) {
-        const float* vj = v + (j * kv_heads + kvh) * value_dim;
-        const double p = scores[j];
-        for (std::size_t i = 0; i < value_dim; ++i) {
-            acc[i] += p * static_cast<double>(vj[i]);
+    for (; j < u1; ++j) {
+        const float* kj = k + (j * kv_heads + kvh) * head_dim;
+        double a[kQueryTile] = {};
+        for (std::size_t i = 0; i < head_dim; ++i) {
+            const double ki = kj[i];
+            for (std::size_t l = 0; l < kQueryTile; ++l) {
+                a[l] += static_cast<double>(qt[i * kQueryTile + l]) * ki;
+            }
+        }
+        for (std::size_t l = 0; l < kQueryTile; ++l) {
+            scores[l * kv_len + j] = a[l] * scale;
         }
     }
-    const double inv = 1.0 / total;
-    for (std::size_t i = 0; i < value_dim; ++i) {
-        oh[i] = static_cast<float>(acc[i] * inv);
+    for (std::size_t l = 0; l < tile.lanes; ++l) {
+        if (tile.count[l] == 0) {
+            for (std::size_t i = 0; i < value_dim; ++i) {
+                tile.out[l][i] = 0.0f;
+            }
+            continue;
+        }
+        attention_finish(scores + l * kv_len + tile.first[l], v + tile.first[l] * kv_heads * value_dim, tile.out[l],
+                         acc, tile.count[l], kv_heads, kvh, value_dim, softcap);
     }
 }
 
-using AttentionRowFn = void (*)(const float*, const float*, const float*, float*, double*, double*, std::size_t,
-                                std::size_t, std::size_t, std::size_t, std::size_t, double, double);
+using AttentionTileFn = void (*)(const AttentionTile&, const float*, const float*, double*, double*, float*,
+                                 std::size_t, std::size_t, std::size_t, std::size_t, std::size_t, double, double);
 
-inline void attention_row_portable(const float* qh, const float* k, const float* v, float* oh, double* scores,
-                                   double* acc, std::size_t visible, std::size_t kv_heads, std::size_t kvh,
-                                   std::size_t head_dim, std::size_t value_dim, double scale, double softcap) {
-    attention_row(qh, k, v, oh, scores, acc, visible, kv_heads, kvh, head_dim, value_dim, scale, softcap);
+inline void attention_tile_portable(const AttentionTile& tile, const float* k, const float* v, double* scores,
+                                    double* acc, float* qt, std::size_t kv_len, std::size_t kv_heads,
+                                    std::size_t kvh, std::size_t head_dim, std::size_t value_dim, double scale,
+                                    double softcap) {
+    attention_tile(tile, k, v, scores, acc, qt, kv_len, kv_heads, kvh, head_dim, value_dim, scale, softcap);
 }
 
 #ifdef DLLM_X86_DISPATCH
-DLLM_TARGET_AVX2 inline void attention_row_avx2(const float* qh, const float* k, const float* v, float* oh,
-                                                double* scores, double* acc, std::size_t visible,
-                                                std::size_t kv_heads, std::size_t kvh, std::size_t head_dim,
-                                                std::size_t value_dim, double scale, double softcap) {
-    attention_row(qh, k, v, oh, scores, acc, visible, kv_heads, kvh, head_dim, value_dim, scale, softcap);
+DLLM_TARGET_AVX2 inline void attention_tile_avx2(const AttentionTile& tile, const float* k, const float* v,
+                                                 double* scores, double* acc, float* qt, std::size_t kv_len,
+                                                 std::size_t kv_heads, std::size_t kvh, std::size_t head_dim,
+                                                 std::size_t value_dim, double scale, double softcap) {
+    attention_tile(tile, k, v, scores, acc, qt, kv_len, kv_heads, kvh, head_dim, value_dim, scale, softcap);
 }
-
 #endif
 
-inline AttentionRowFn attention_row_kernel() {
+inline AttentionTileFn attention_tile_kernel() {
 #ifdef DLLM_X86_DISPATCH
     switch (active_isa()) {
         case Isa::avx2:
-            return attention_row_avx2;
+            return attention_tile_avx2;
         default:
             break;
     }
 #endif
-    return attention_row_portable;
+    return attention_tile_portable;
 }
 
 // The keys query t attends to: first .. first + count - 1 (see attention()).
@@ -551,20 +731,54 @@ inline void attention(const float* q, const float* k, const float* v, float* out
         throw std::invalid_argument("q_heads must be a multiple of kv_heads");
     }
     const std::size_t group = q_heads / kv_heads;
-    const AttentionRowFn kernel = attention_row_kernel();
-    // One task per (query, head) row; the rows are independent.
-    parallel_for(q_len * q_heads, [&](std::size_t task) {
-        const std::size_t t = task / q_heads;
-        const std::size_t h = task % q_heads;
-        const AttentionSpan span = attention_span(t, kv_len, causal, q_offset, window);
+    const AttentionTileFn kernel = attention_tile_kernel();
+    // The rows of each key/value head, in (query, head) order, cut into tiles of kQueryTile: one task per tile.
+    const std::size_t rows = q_len * group;
+    const std::size_t tiles = (rows + kQueryTile - 1) / kQueryTile;
+    parallel_for(kv_heads * tiles, [&](std::size_t task) {
+        const std::size_t kvh = task / tiles;
+        const std::size_t r0 = (task % tiles) * kQueryTile;
+        AttentionTile tile{};
+        tile.lanes = r0 + kQueryTile <= rows ? kQueryTile : rows - r0;
+        for (std::size_t l = 0; l < tile.lanes; ++l) {
+            const std::size_t t = (r0 + l) / group;
+            const std::size_t h = kvh * group + (r0 + l) % group;
+            const AttentionSpan span = attention_span(t, kv_len, causal, q_offset, window);
+            tile.q[l] = q + (t * q_heads + h) * head_dim;
+            tile.out[l] = out + (t * q_heads + h) * value_dim;
+            tile.first[l] = span.first;
+            tile.count[l] = span.count;
+        }
         thread_local std::vector<double> scores;
         thread_local std::vector<double> acc;
-        scores.resize(kv_len > 0 ? kv_len : 1);
+        thread_local std::vector<float> qt;
+        scores.resize(kQueryTile * (kv_len > 0 ? kv_len : 1));
         acc.resize(value_dim > 0 ? value_dim : 1);
-        kernel(q + (t * q_heads + h) * head_dim, k + span.first * kv_heads * head_dim,
-               v + span.first * kv_heads * value_dim, out + (t * q_heads + h) * value_dim, scores.data(), acc.data(),
-               span.count, kv_heads, h / group, head_dim, value_dim, scale, softcap);
+        qt.resize(kQueryTile * (head_dim > 0 ? head_dim : 1));
+        kernel(tile, k, v, scores.data(), acc.data(), qt.data(), kv_len, kv_heads, kvh, head_dim, value_dim, scale,
+               softcap);
     });
+}
+
+// attention() row by row with attention_row(), on one thread: the plain statement of the order, for tests.
+inline void attention_reference(const float* q, const float* k, const float* v, float* out, std::size_t q_len,
+                                std::size_t kv_len, std::size_t q_heads, std::size_t kv_heads,
+                                std::size_t head_dim, std::size_t value_dim, double scale, bool causal,
+                                std::size_t q_offset, std::size_t window = 0, double softcap = 0.0) {
+    if (kv_heads == 0 || q_heads % kv_heads != 0) {
+        throw std::invalid_argument("q_heads must be a multiple of kv_heads");
+    }
+    const std::size_t group = q_heads / kv_heads;
+    std::vector<double> scores(kv_len > 0 ? kv_len : 1);
+    std::vector<double> acc(value_dim > 0 ? value_dim : 1);
+    for (std::size_t t = 0; t < q_len; ++t) {
+        const AttentionSpan span = attention_span(t, kv_len, causal, q_offset, window);
+        for (std::size_t h = 0; h < q_heads; ++h) {
+            attention_row(q + (t * q_heads + h) * head_dim, k + span.first * kv_heads * head_dim,
+                          v + span.first * kv_heads * value_dim, out + (t * q_heads + h) * value_dim, scores.data(),
+                          acc.data(), span.count, kv_heads, h / group, head_dim, value_dim, scale, softcap);
+        }
+    }
 }
 
 }  // namespace dllm

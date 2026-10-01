@@ -7,7 +7,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Python 3.11 COMPONENTS Interpreter Development.Module REQUIRED)
 find_package(nanobind CONFIG REQUIRED)
 
-nanobind_add_module(_kernels NB_STATIC cpp/kernels.cpp)
+# NOMINSIZE: nanobind would otherwise add -Os after -O3 and build the kernels for size, at up to half the speed.
+# The optimisation level never changes a bit; the floating point flags below fix the semantics.
+nanobind_add_module(_kernels NB_STATIC NOMINSIZE cpp/kernels.cpp)
 target_include_directories(_kernels PRIVATE cpp/include ${CMAKE_CURRENT_BINARY_DIR}/generated)
 
 # The CUDA backend compiles its kernels at run time (NVRTC, see cpp/include/dllm/cuda.hpp), so their sources are

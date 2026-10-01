@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdlib>
@@ -17,6 +18,15 @@
 #include <vector>
 
 #include "fpenv.hpp"
+
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+#include <immintrin.h>
+#define DLLM_SPIN_PAUSE() _mm_pause()
+#elif defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+#define DLLM_SPIN_PAUSE() __asm__ __volatile__("yield")
+#else
+#define DLLM_SPIN_PAUSE() ((void)0)
+#endif
 
 #if defined(__unix__) || defined(__APPLE__)
 #include <unistd.h>
@@ -77,13 +87,34 @@ public:
         }
         wake_.notify_all();
         work();
+        spin_until([this] { return pending_.load() == 0; });
         std::unique_lock<std::mutex> lock(mutex_);
-        done_.wait(lock, [this] { return pending_ == 0; });
+        done_.wait(lock, [this] { return pending_.load() == 0; });
         job_ = nullptr;
     }
 
 private:
     explicit ThreadPool(std::size_t threads) : threads_(threads) {}
+
+    // Busy-waits up to kSpin for ready() before a caller falls back to sleeping on a condition variable. A decode
+    // step runs hundreds of short parallel jobs; waking sleeping threads for each would cost more than the job.
+    static constexpr std::chrono::microseconds kSpin{200};
+
+    template <class Ready>
+    static bool spin_until(Ready ready) {
+        const auto start = std::chrono::steady_clock::now();
+        for (;;) {
+            for (int i = 0; i < 64; ++i) {
+                if (ready()) {
+                    return true;
+                }
+                DLLM_SPIN_PAUSE();
+            }
+            if (std::chrono::steady_clock::now() - start > kSpin) {
+                return false;
+            }
+        }
+    }
 
     void work() {
         for (std::size_t t = next_.fetch_add(1); t < tasks_; t = next_.fetch_add(1)) {
@@ -108,20 +139,21 @@ private:
         stop_workers();
         stopping_ = false;
         for (std::size_t i = 0; i < count; ++i) {
-            workers_.emplace_back([this, seen = generation_]() mutable {
+            workers_.emplace_back([this, seen = generation_.load()]() mutable {
                 enter_canonical_fp_environment();  // a new thread may inherit a non-default state
                 for (;;) {
+                    spin_until([&] { return stopping_.load() || generation_.load() != seen; });
                     {
                         std::unique_lock<std::mutex> lock(mutex_);
-                        wake_.wait(lock, [&] { return stopping_ || generation_ != seen; });
+                        wake_.wait(lock, [&] { return stopping_.load() || generation_.load() != seen; });
                         if (stopping_) {
                             return;
                         }
-                        seen = generation_;
+                        seen = generation_.load();
                     }
                     work();
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    if (--pending_ == 0) {
+                    if (pending_.fetch_sub(1) == 1) {
+                        std::lock_guard<std::mutex> lock(mutex_);
                         done_.notify_one();
                     }
                 }
@@ -150,9 +182,9 @@ private:
     const std::function<void(std::size_t)>* job_ = nullptr;
     std::size_t tasks_ = 0;
     std::atomic<std::size_t> next_{0};
-    std::size_t pending_ = 0;
-    std::size_t generation_ = 0;
-    bool stopping_ = false;
+    std::atomic<std::size_t> pending_{0};
+    std::atomic<std::size_t> generation_{0};
+    std::atomic<bool> stopping_{false};
 #ifdef DLLM_HAS_FORK
     pid_t owner_ = getpid();
 #endif

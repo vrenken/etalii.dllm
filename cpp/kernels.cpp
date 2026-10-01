@@ -87,14 +87,14 @@ void require(bool condition, const char* message) {
     }
 }
 
+// Elementwise F over fixed chunks on the thread pool (dllm::parallel_elementwise): the same bits on any thread count.
 template <float (*F)(float)>
 OwnedFloatArray elementwise(FloatTensor x) {
     float* out;
     auto result = make_array(shape_of(x), &out);
     const float* in = x.data();
-    for (std::size_t i = 0; i < x.size(); ++i) {
-        out[i] = F(in[i]);
-    }
+    nb::gil_scoped_release release;
+    dllm::parallel_elementwise(x.size(), [&](std::size_t i) { out[i] = F(in[i]); });
     return result;
 }
 
@@ -525,11 +525,29 @@ NB_MODULE(_kernels, module) {
     m.def("gelu", &elementwise<dllm::gelu>, nb::arg("x"), "Elementwise exact (erf) GELU.");
     m.def("gelu_tanh", &elementwise<dllm::gelu_tanh>, nb::arg("x"), "Elementwise tanh-approximated GELU.");
     m.def(
+        "swiglu",
+        [](FloatTensor gate, FloatTensor up, int kind) {
+            require(gate.size() == up.size(), "gate and up must have the same size");
+            require(kind == 0 || kind == 2, "kind must be silu (0) or gelu_tanh (2)");
+            float* out;
+            auto result = make_array(shape_of(gate), &out);
+            nb::gil_scoped_release release;
+            if (kind == 0) {
+                dllm::gated_activation<dllm::silu>(gate.data(), up.data(), out, gate.size());
+            } else {
+                dllm::gated_activation<dllm::gelu_tanh>(gate.data(), up.data(), out, gate.size());
+            }
+            return result;
+        },
+        nb::arg("gate"), nb::arg("up"), nb::arg("kind") = 0,
+        "float32 act(gate) * up: silu (0) or gelu_tanh (2), the activation rounded before the multiply.");
+    m.def(
         "softcap",
         [](FloatTensor x, double cap) {
             require(cap > 0.0, "cap must be positive");
             float* out;
             auto result = make_array(shape_of(x), &out);
+            nb::gil_scoped_release release;
             dllm::softcap(x.data(), out, x.size(), cap);
             return result;
         },
@@ -556,7 +574,7 @@ NB_MODULE(_kernels, module) {
     m.def(
         "attention",
         [](FloatTensor q, FloatTensor k, FloatTensor v, double scale, bool causal, std::int64_t q_offset,
-           std::size_t window, double softcap) {
+           std::size_t window, double softcap, bool reference) {
             require(q.ndim() == 3 && k.ndim() == 3 && v.ndim() == 3, "q, k and v must be [length, heads, dim]");
             const std::size_t q_len = q.shape(0);
             const std::size_t kv_len = k.shape(0);
@@ -570,12 +588,15 @@ NB_MODULE(_kernels, module) {
             float* out;
             auto result = make_array({q_len, q.shape(1), v.shape(2)}, &out);
             nb::gil_scoped_release release;
-            dllm::attention(q.data(), k.data(), v.data(), out, q_len, kv_len, q.shape(1), k.shape(1), q.shape(2),
-                            v.shape(2), scale, causal, static_cast<std::size_t>(q_offset), window, softcap);
+            const auto run = reference ? dllm::attention_reference : dllm::attention;
+            run(q.data(), k.data(), v.data(), out, q_len, kv_len, q.shape(1), k.shape(1), q.shape(2), v.shape(2), scale,
+                causal, static_cast<std::size_t>(q_offset), window, softcap);
             return result;
         },
         nb::arg("q"), nb::arg("k"), nb::arg("v"), nb::arg("scale"), nb::arg("causal") = true,
-        nb::arg("q_offset") = -1, nb::arg("window") = 0, nb::arg("softcap") = 0.0, "Scaled dot-product attention with grouped-query heads and a fixed order.");
+        nb::arg("q_offset") = -1, nb::arg("window") = 0, nb::arg("softcap") = 0.0, nb::arg("reference") = false,
+        "Scaled dot-product attention with grouped-query heads and a fixed order; reference=True computes it row by "
+        "row on one thread (attention_reference), with the same bits.");
 
     m.def(
         "attention_weights",
