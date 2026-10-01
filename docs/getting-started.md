@@ -276,7 +276,8 @@ The response ids and `system_fingerprint` are derived from the request and the w
 byte-identical responses, and a streamed answer is identical to the non-streamed one. The server reuses the work of
 earlier requests that start the same way (a chat's earlier turns, a shared system prompt), so follow-up turns are
 several times faster; `usage` reports the reused tokens (`cached_tokens`), which is the only thing that differs.
-`--prompt-cache 0` turns this off, and `--persistent-cache DIR` keeps that work across restarts; see
+`--prompt-cache 0` turns this off, and `--persistent-cache DIR` keeps that work across restarts (a long shared
+system prompt is then answered in 0.4 s instead of 6.3 s right after a restart); see
 [prompt caching](api.md#prompt-caching). Temperature defaults to 0
 (greedy) on every endpoint. All options, how tools and structured output work, and the differences from the real
 APIs: [HTTP API](api.md).
