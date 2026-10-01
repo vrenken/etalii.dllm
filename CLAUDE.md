@@ -29,7 +29,7 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
 ## Layout
 
 - `cpp/include/dllm/`: header-only C++ kernels (`random.hpp`, `math.hpp` transcendentals, `nn.hpp` matmul/norm/RoPE/
-  attention, `grad.hpp` their gradients plus cross-entropy and AdamW, `quant.hpp` Q8_0, `parallel.hpp` the thread pool, `fpenv.hpp` the
+  attention, `grad.hpp` their gradients plus cross-entropy and AdamW, `quant.hpp` Q8_0, `interp.hpp` attention probabilities/cosine/Cholesky for interpretability, `parallel.hpp` the thread pool, `fpenv.hpp` the
   floating point environment every binding runs in,
   `simd.hpp` the per-machine AVX2/SSE2/NEON dispatch, `cuda.hpp` the CUDA backend; evaluation orders in `docs/kernels.md`);
   `cpp/kernels.cpp` binds them as `etalii_dllm._kernels`. `cpp/cuda/kernels.cu` holds the GPU kernels: CMake embeds it
@@ -46,7 +46,8 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
   (the `model.dllm` container, `docs/model-format.md`), `importing` (safetensors/GGUF readers and `dllm import`),
   `training` (gradients, AdamW, data order, checkpoints and `dllm finetune`, `docs/training.md`), `lora` (LoRA
   adapters, always merged into the weights; the PEFT format), `grammar`
-  (JSON-schema constrained decoding over a token trie), `tools` (tool calling in the Hermes `<tool_call>` format).
+  (JSON-schema constrained decoding over a token trie), `tools` (tool calling in the Hermes `<tool_call>` format), `interpret/` (activation tracing via `LayerHook`, logit lens,
+  embedding explorer, attention maps; `dllm lens|attention|neighbours`, `docs/interpretability.md`).
   Tests compare against the reference packages `gguf`, `safetensors` and `tokenizers` (dev dependencies).
 - `src/etalii_dllm/server/` (OpenAI `app.py` and `responses_api.py`, Anthropic `anthropic_api.py`, Ollama `ollama_api.py`, the browser chat page `static/chat.html`
   served at `/`; `docs/api.md`), `mcp_server.py`,

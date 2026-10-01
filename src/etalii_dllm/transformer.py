@@ -31,6 +31,7 @@ from etalii_dllm.numerics import (
     PackedWeight,
     QuantizedWeight,
     attention,
+    attention_weights,
     gelu,
     linear,
     rms_norm,
@@ -45,6 +46,34 @@ _MATRICES = tuple(f".{m}.weight" for m in ("q", "k", "v", "o", "gate", "up", "do
 
 
 Weight = PackedWeight | QuantizedWeight | CudaWeight | CudaQuantizedWeight
+
+
+class LayerHook:
+    """Observes (and may change) the activations of a CPU forward pass, layer by layer; see
+    :meth:`Transformer.run_hooked`. Every method gets a fresh float32 array it may keep. ``residual`` may return a
+    replacement for the residual stream (same shape and dtype), which the rest of the pass then uses; returning
+    ``None`` leaves it unchanged, so a hook that only observes cannot change a single bit of the output."""
+
+    wants_attention = False
+    """Whether :meth:`attention` should be called (computing the probabilities costs a second pass over the keys)."""
+
+    def residual(self, layer: int, point: str, x: np.ndarray) -> np.ndarray | None:
+        """The residual stream ``[positions, hidden]`` of ``layer`` at ``point``: ``"input"`` (before the layer;
+        layer 0 sees the embeddings), ``"middle"`` (after the attention block's residual add) or ``"output"``."""
+        return None
+
+    def attention(self, layer: int, probabilities: np.ndarray) -> None:
+        """The attention probabilities ``[positions, heads, keys]`` of ``layer``."""
+
+    def attention_output(self, layer: int, out: np.ndarray) -> None:
+        """What the attention block adds to the residual stream, ``[positions, hidden]``."""
+
+    def mlp_activation(self, layer: int, activation: np.ndarray) -> None:
+        """The MLP's hidden activation ``act(gate) * up``, ``[positions, intermediate]``: the input of the down
+        projection (the "keys" of model editing)."""
+
+    def mlp_output(self, layer: int, out: np.ndarray) -> None:
+        """What the MLP block adds to the residual stream, ``[positions, hidden]``."""
 
 
 def _prepare(weight: Tensor, quantize: str | None, device: str) -> Weight:
@@ -284,18 +313,54 @@ class Transformer:
             for i, end in enumerate(ends):
                 states[end : end + 1].copy_to(last[i : i + 1])
             logits = cuda.linear(last, self._lm_head).numpy()  # type: ignore[arg-type]
+            logits = self._finish_logits(logits)
         else:
             hidden = self._layers(segments).numpy()
-            logits = linear(np.ascontiguousarray(hidden[ends]), self._lm_head).numpy()
-        if self.config.logits_scaling != 1.0:
-            logits = logits / np.float32(self.config.logits_scaling)
-        if self.config.logits_softcap is not None:
-            logits = softcap(logits, self.config.logits_softcap).numpy()
+            logits = self.logits_from_hidden(hidden[ends])
         for tokens, _, cache in segments:
             cache.tokens.extend(tokens)
         return [row.copy() for row in logits]
 
-    def _layers(self, segments: list[tuple[list[int], int, KVCache]]) -> Tensor:
+    def logits_from_hidden(self, hidden: npt.ArrayLike) -> FloatArray:
+        """Logits ``[rows, vocabulary]`` of final-norm hidden states ``[rows, hidden]``: the LM head, then the
+        logits scaling and soft-cap, exactly as :meth:`forward` applies them (CPU)."""
+        values = np.ascontiguousarray(hidden, dtype=np.float32)
+        head = self._lm_head
+        if self.device == "cuda":
+            head = self._host_lm_head()
+        return self._finish_logits(linear(values, head).numpy())
+
+    def final_norm(self, x: npt.ArrayLike) -> FloatArray:
+        """The final RMSNorm of residual stream rows ``[rows, hidden]`` (what :meth:`hidden_states` returns for the
+        last layer's output)."""
+        weight = self.tensors["final_norm.weight"]
+        normed = rms_norm(x, weight, self.config.rms_norm_eps, add_unit_offset=self.config.norm_unit_offset)
+        return normed.numpy().copy()
+
+    def run_hooked(self, tokens: Sequence[int], hook: LayerHook) -> FloatArray:
+        """Runs ``tokens`` from scratch on the CPU with ``hook`` watching every layer and returns the final-norm
+        hidden states ``[positions, hidden]``. With a hook that changes nothing these are the bits of
+        :meth:`hidden_states`, and ``logits_from_hidden`` of the last row is the bits of :meth:`forward`."""
+        if not tokens:
+            raise ValueError("the decoder needs at least one token of context")
+        if self.device != "cpu":
+            raise ValueError("hooked forward passes run on the CPU; load the model with device='cpu'")
+        return self._layers([(list(tokens), 0, self.new_cache())], hook).numpy().copy()
+
+    def _finish_logits(self, logits: np.ndarray) -> FloatArray:
+        if self.config.logits_scaling != 1.0:
+            logits = logits / np.float32(self.config.logits_scaling)
+        if self.config.logits_softcap is not None:
+            logits = softcap(logits, self.config.logits_softcap).numpy()
+        return logits
+
+    def _host_lm_head(self) -> Weight:
+        if not hasattr(self, "_cpu_lm_head"):
+            name = "token_embedding.weight" if self.config.tie_word_embeddings else "lm_head.weight"
+            self._cpu_lm_head = _prepare(self.tensors[name], self.quantization, "cpu")
+        return self._cpu_lm_head
+
+    def _layers(self, segments: list[tuple[list[int], int, KVCache]], hook: LayerHook | None = None) -> Tensor:
         """Runs the new ``tokens`` of each ``(tokens, start, cache)`` segment, stacked, through the decoder."""
         config = self.config
         w = self._w
@@ -307,8 +372,15 @@ class Transformer:
         def norm(values: npt.ArrayLike | Tensor, name: str) -> Tensor:
             return rms_norm(values, w[name], config.rms_norm_eps, add_unit_offset=unit)
 
+        def observe(layer: int, point: str, values: np.ndarray) -> np.ndarray:
+            if hook is None:
+                return values
+            replaced = hook.residual(layer, point, values.copy())
+            return values if replaced is None else np.ascontiguousarray(replaced, dtype=np.float32)
+
         for layer in range(config.layers):
             p = f"layers.{layer}."
+            x = observe(layer, "input", x)
             h = norm(x, p + "attention_norm.weight") if config.has_pre_norms else x
             q = linear(h, w[p + "attention.q.weight"], w.get(p + "attention.q.bias"))
             k = linear(h, w[p + "attention.k.weight"], w.get(p + "attention.k.bias"))
@@ -337,19 +409,39 @@ class Transformer:
                         softcap=config.attention_softcap,
                     ).numpy()
                 )
+                if hook is not None and hook.wants_attention:
+                    hook.attention(
+                        layer,
+                        attention_weights(
+                            q[lo:hi],
+                            keys,
+                            scale=config.attention_scale,
+                            causal=True,
+                            q_offset=start,
+                            window=config.window(layer),
+                            softcap=config.attention_softcap,
+                        ).numpy(),
+                    )
             a = attended[0] if len(attended) == 1 else np.concatenate(attended)
             out = linear(a.reshape(count, config.heads * config.head_dim), w[p + "attention.o.weight"])
             if config.has_post_norms:
                 out = norm(out, p + "attention_post_norm.weight")
-            x = x + out.numpy()
+            if hook is not None:
+                hook.attention_output(layer, out.numpy().copy())
+            x = observe(layer, "middle", x + out.numpy())
             h = norm(x, p + "mlp_norm.weight") if config.has_pre_norms else x
             gate = linear(h, w[p + "mlp.gate.weight"])
             gate = (gelu(gate, approximate="tanh") if config.activation == "gelu_tanh" else silu(gate)).numpy()
             up = linear(h, w[p + "mlp.up.weight"]).numpy()
-            out = linear(gate * up, w[p + "mlp.down.weight"])
+            activation = gate * up
+            if hook is not None:
+                hook.mlp_activation(layer, activation.copy())
+            out = linear(activation, w[p + "mlp.down.weight"])
             if config.has_post_norms:
                 out = norm(out, p + "mlp_post_norm.weight")
-            x = x + out.numpy()
+            if hook is not None:
+                hook.mlp_output(layer, out.numpy().copy())
+            x = observe(layer, "output", x + out.numpy())
         return norm(x, "final_norm.weight")
 
     def _embeddings(self, tokens: list[int]) -> np.ndarray:

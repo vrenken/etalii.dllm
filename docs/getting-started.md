@@ -325,7 +325,22 @@ dllm import ./some-peft-adapter --base qwen2.5-0.5b.dllm -o tuned.dllm     # a P
 Applying an adapter at load time and serving the merged file give the same answers bit for bit, with the same
 `system_fingerprint`. Details: [LoRA adapters](training.md#lora-adapters).
 
-## 7. Docker
+## 7. Look inside the model
+
+Because every number inside the model is reproducible, you can inspect it and anyone with the same model file sees
+exactly the same thing:
+
+```bash
+dllm --model smollm2-135m.dllm lens --prompt "The capital of France is" --top-k 3        # what each layer predicts
+dllm --model smollm2-135m.dllm attention --prompt "The cat sat on the mat. The cat" --layer 5 --html attention.html
+dllm --model smollm2-135m.dllm neighbours "king - man + woman" --top-k 8 --svg cloud.svg  # ' queen' comes first
+```
+
+`--html` writes a self-contained page (a grid of predictions per layer and position, or attention heatmaps) and
+`--svg` a word cloud. The Python API (`etalii_dllm.interpret.trace`) returns every activation of a forward pass.
+Details: [interpretability](interpretability.md).
+
+## 8. Docker
 
 The server also comes as an image for linux/amd64 and linux/arm64, published with every release as
 `ghcr.io/vrenken/etalii-dllm:<version>` and `:latest` (`:edge` follows `develop`). It runs `dllm-server` on port

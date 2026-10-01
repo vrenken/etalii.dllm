@@ -9,5 +9,6 @@
   {"title": "Phase 7: Usability and releases", "due_on": "2027-08-31", "description": "Pre-built wheels and tagged releases, PyPI, CUDA install route checked in CI, Docker image, web chat UI, a larger verified model"},
   {"title": "Phase 8: Serving and ecosystem", "due_on": "2027-10-31", "description": "Prompt caching and batched concurrent decoding with each request's solo bits, Ollama-compatible API, OpenAI Responses API, Qwen3, LoRA adapters"},
   {"title": "Phase 9: Mainstream model families", "due_on": "2027-12-31", "description": "SentencePiece-style tokenizers, Mistral and sliding-window attention, Gemma 2/3, Phi-3/Phi-4-mini, OLMo 2, Granite 3.x, a verified Llama 3.2"},
-  {"title": "Phase 10: Portable determinism", "due_on": "2028-02-29", "description": "Identical output across machines as a guarantee: canonical floating point environment, tokenizer and template independent of Python/regex/Jinja versions, real-model golden answers on every release platform, dllm verify"}
+  {"title": "Phase 10: Portable determinism", "due_on": "2028-02-29", "description": "Identical output across machines as a guarantee: canonical floating point environment, tokenizer and template independent of Python/regex/Jinja versions, real-model golden answers on every release platform, dllm verify"},
+  {"title": "Phase 11: Interpretability and editing", "due_on": "2028-04-30", "description": "Activation tracing, logit lens, embedding explorer and word clouds, attention maps, steering vectors, ROME model edits and sparse autoencoders, all bit-reproducible"}
 ]

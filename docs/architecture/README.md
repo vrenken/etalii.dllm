@@ -123,7 +123,8 @@ flowchart TB
     fe --> eng --> chat --> model --> num --> cpp
 ```
 
-Two subsystems sit beside this stack rather than in it: `importing/` writes `model.dllm` files (it uses the file
+Three subsystems sit beside this stack rather than in it: `interpret/` runs the decoder with a `LayerHook` that
+observes (or deliberately changes) its activations; `importing/` writes `model.dllm` files (it uses the file
 format and the configuration, not the decoder), and `training/` reuses the decoder and adds gradient kernels and
 AdamW from `grad.hpp`.
 
@@ -153,6 +154,7 @@ AdamW from `grad.hpp`.
 | `numerics.py`, `tensor.py` | Thin wrappers over the C++ kernels, fingerprints, `DeterministicRandom`, and the 64-byte aligned float32 `Tensor`. |
 | `cuda.py` | The GPU backend: finding NVRTC, `CudaTensor`, device-side operations. |
 | `importing/` | Readers for safetensors and GGUF (with GGML dequantisation), the Hugging Face download pinned to a commit, the licence policy, and `dllm import`. |
+| `interpret/` | Interpretability tools on the decoder's own pass: activation tracing through `LayerHook` (observation cannot change a bit), the logit lens, the embedding explorer, attention maps and their HTML/SVG views (`dllm lens`, `attention`, `neighbours`; [interpretability](../interpretability.md)). |
 | `training/` | Gradients of the decoder, AdamW, fixed data order and checkpoints that resume bit for bit (`dllm finetune`), for all parameters or LoRA adapters. |
 | `server/` | The OpenAI Chat Completions (`app.py`, `contracts.py`), OpenAI Responses (`responses_api.py`), Anthropic (`anthropic_api.py`, `anthropic_contracts.py`) and Ollama (`ollama_api.py`) wire formats, and the chat page `static/chat.html`. |
 | `mcp_server.py` | The model as an MCP server over stdio (tools, prompts, resources). |
@@ -167,6 +169,7 @@ AdamW from `grad.hpp`.
 | `include/dllm/math.hpp` | Fixed-order reductions and `exp`, `log`, `sin`, `cos`, `tanh`, `erf` built from `+ - * /` and `sqrt`. |
 | `include/dllm/nn.hpp` | Matmul, RMSNorm, activations, RoPE and attention; every output element has its own accumulation in one order. |
 | `include/dllm/grad.hpp` | Backward kernels, cross-entropy and the AdamW update, with the same ordering rules. |
+| `include/dllm/interp.hpp` | Attention probabilities, cosine similarity, column means and a Cholesky solve for the interpretability and editing tools. |
 | `include/dllm/quant.hpp` | Q8_0 quantisation with exact integer block sums. |
 | `include/dllm/parallel.hpp` | A thread pool whose tasks own disjoint outputs, so the thread count never changes a bit. |
 | `include/dllm/fpenv.hpp` | Runs every binding in the IEEE default floating point state (no flush-to-zero), whatever the process set. |
