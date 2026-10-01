@@ -388,7 +388,7 @@ def test_checkpoint_rejects_other_data_and_corruption(model_file, tmp_path):
         FineTuner.load_checkpoint(path, ascii_data())
 
 
-def test_cli_finetune_and_resume(tmp_path, capsys):
+def test_cli_finetune_and_resume(tmp_path, capsys, monkeypatch):
     from test_bpe import smollm2_style
     from test_chat_template import SMOLLM2
 
@@ -428,6 +428,29 @@ def test_cli_finetune_and_resume(tmp_path, capsys):
     assert "fine-tuned:         4 steps" in capsys.readouterr().out
     assert cli(["--model", str(tmp_path / "a.dllm"), "chat", "What is 3 plus 3?", "--max-tokens", "4"]) == 0
     assert cli([*common, "-o", str(tmp_path / "missing.dllm"), "--resume", str(tmp_path / "nope")]) == 1
+
+    # A training receipt: training again gives the same weights; other data or an edited receipt does not verify.
+    receipt = tmp_path / "train.json"
+    assert cli([*common, "--adapter-output", str(tmp_path / "x"), "--lora-rank", "2", "--receipt", str(receipt)]) == 0
+    assert "receipt:            " in capsys.readouterr().out
+    recorded = json.loads(receipt.read_text())
+    assert recorded["output"]["steps"] == 4 and len(recorded["losses"]) == 4 and recorded["run"]["lora"]["rank"] == 2
+    assert cli(["replay", str(receipt), "--base", str(tmp_path / "base.dllm")]) == 0
+    assert "training again gave the same weights" in capsys.readouterr().out
+    other = tmp_path / "other.jsonl"
+    other.write_text("\n".join(conversation(i) for i in range(1, 9)), encoding="utf-8")
+    assert cli(["replay", str(receipt), "--base", str(tmp_path / "base.dllm"), "--data", str(other), "--json"]) == 1
+    outcome = json.loads(capsys.readouterr().out)
+    assert outcome["diverged_at"] == 1 and any("different training data" in r for r in outcome["reasons"])
+    receipt.write_text(json.dumps({**recorded, "engine": "0.0.1"}))
+    assert cli(["replay", str(receipt), "--base", str(tmp_path / "a.dllm")]) == 1
+    output = capsys.readouterr().out
+    assert "the receipt was edited" in output and "a different base model" in output and "note:" in output
+    monkeypatch.delenv("DLLM_MODEL", raising=False)  # the chat above set it
+    assert cli(["replay", str(receipt)]) == 2
+    assert "needs the base model" in capsys.readouterr().err
+    receipt.write_text(json.dumps({**recorded, "training_receipt": "dllm-train/0"}))
+    assert cli(["replay", str(receipt), "--base", str(tmp_path / "base.dllm")]) == 2
 
 
 def test_architectures_without_a_backward_pass_are_refused():

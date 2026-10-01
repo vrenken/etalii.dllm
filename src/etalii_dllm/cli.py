@@ -104,10 +104,9 @@ def _finetune(args: argparse.Namespace) -> int:
         LoraConfig,
         RunConfig,
         StepResult,
-        TrainingData,
         TrainingDataError,
-        read_documents,
     )
+    from etalii_dllm.training.receipt import load_data, make_receipt
 
     if not args.output and not args.adapter_output:
         print("dllm finetune: pass -o/--output, --adapter-output, or both", file=sys.stderr)
@@ -115,13 +114,7 @@ def _finetune(args: argparse.Namespace) -> int:
     try:
         base = ModelFile(args.base)
         engine = DllmEngine.from_model_file(args.base, verify=False)
-        render = None
-        if engine.chat_template is not None:
-            template = engine.chat_template
-            render = lambda messages: template.render(messages, add_generation_prompt=False)  # noqa: E731
-        separator = base.config.eos_token_ids[0] if base.config.eos_token_ids else None
-        documents = read_documents(args.data, render)
-        data = TrainingData.from_documents(documents, engine.tokenizer.encode, args.sequence_length, separator)
+        data = load_data(engine, base, args.data, args.sequence_length)
         if args.resume:
             tuner = FineTuner.load_checkpoint(args.resume, data, base)
         else:
@@ -168,6 +161,10 @@ def _finetune(args: argparse.Namespace) -> int:
         fingerprint = tuner.export(args.output)
         print(f"wrote:              {args.output}")
         print(f"system_fingerprint: {fingerprint}")
+    if args.receipt:
+        receipt = make_receipt(tuner, args.data)
+        Path(args.receipt).write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+        print(f"receipt:            {args.receipt} ({receipt['id']})")
     return 0
 
 
@@ -225,6 +222,8 @@ def main(argv: list[str] | None = None) -> int:
         "receipt", metavar="FILE", help="a receipt, a receipt chain (JSON list) or agent transcript; - reads stdin"
     )
     replay.add_argument("--json", action="store_true", help="print the verification as JSON")
+    replay.add_argument("--base", help="training receipts: the model.dllm the run started from (default: --model)")
+    replay.add_argument("--data", help="training receipts: the training data (default: the file the receipt names)")
 
     from etalii_dllm.interpret import commands as interpret_commands
 
@@ -280,6 +279,7 @@ def main(argv: list[str] | None = None) -> int:
         "--lora-targets", default="q,k,v,o,gate,up,down", help="linear layers to adapt (comma separated)"
     )
     finetune.add_argument("--adapter-output", help="LoRA runs: write the adapters as a PEFT directory here")
+    finetune.add_argument("--receipt", metavar="FILE", help="write a training receipt (dllm replay trains again)")
 
     args = parser.parse_args(argv)
     if args.command == "finetune":
@@ -290,6 +290,14 @@ def main(argv: list[str] | None = None) -> int:
         return _import(args)
     if args.command == "inspect":
         return _inspect(args)
+    if args.command == "replay":
+        try:
+            args.loaded = _read_json(args.receipt)
+        except (OSError, ValueError) as error:
+            print(f"dllm replay: {error}", file=sys.stderr)
+            return 2
+        if isinstance(args.loaded, dict) and "training_receipt" in args.loaded:
+            return _replay_training(args)
     configured = args.model or os.environ.get(MODEL_ENVIRONMENT_VARIABLE)
     if args.command == "index" and args.index_command == "search" and not configured:
         args.model = _index_model(args.index_file)  # search with the model the index was built with
@@ -440,12 +448,44 @@ def _evaluate(engine: DllmEngine, args: argparse.Namespace) -> int:
     return 0
 
 
+def _read_json(path: str) -> Any:
+    return json.loads(sys.stdin.read() if path == "-" else Path(path).read_text(encoding="utf-8"))
+
+
+def _replay_training(args: argparse.Namespace) -> int:
+    from etalii_dllm.modelfile import ModelFileError
+    from etalii_dllm.training import TrainingDataError
+    from etalii_dllm.training.receipt import verify
+
+    receipt = args.loaded
+    base = args.base or args.model or os.environ.get(MODEL_ENVIRONMENT_VARIABLE)
+    if not base:
+        print("dllm replay: a training receipt needs the base model (--base or --model)", file=sys.stderr)
+        return 2
+    try:
+        outcome = verify(receipt, base, args.data)
+    except (OSError, ValueError, KeyError, ModelFileError, TrainingDataError) as error:
+        print(f"dllm replay: {error}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(outcome.to_json(), indent=2, ensure_ascii=False))
+    else:
+        print(f"training receipt:   {receipt.get('id')}  ({receipt['output']['steps']} steps)")
+        print(f"base:               {receipt.get('base_fingerprint')}")
+        for note in outcome.notes:
+            print(f"note:               {note}")
+        for reason in outcome.reasons:
+            print(f"differs:            {reason}")
+        verdict = "verified: training again gave the same weights, bit for bit"
+        print(verdict if outcome.ok else "NOT verified")
+    return 0 if outcome.ok else 1
+
+
 def _replay(engine: DllmEngine, args: argparse.Namespace) -> int:
     from etalii_dllm import receipts
 
     try:
-        text = sys.stdin.read() if args.receipt == "-" else Path(args.receipt).read_text(encoding="utf-8")
-        receipt = json.loads(text)
+        receipt = args.loaded
         if isinstance(receipt, list):
             return _replay_chain(engine, receipt, args.json)
         if not isinstance(receipt, dict):
