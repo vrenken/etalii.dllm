@@ -479,10 +479,13 @@ def _embeddings(engine: DllmEngine) -> np.ndarray:
 
 
 def test_embedding_golden(embedding_imported):
-    key, _, result = embedding_imported
+    key, directory, result = embedding_imported
     golden = REFERENCE_MODEL_FINGERPRINTS.get(key, {})
-    assert result.fingerprint == golden.get("import")
-    assert fingerprint(_embeddings(DllmEngine.from_model_file(result.path))) == golden.get("embedding")
+    actual = {
+        "import": result.fingerprint,
+        "embedding": fingerprint(_embeddings(DllmEngine.from_model_file(result.path))),
+    }
+    assert actual == {name: golden.get(name) for name in actual}, f"snapshot {directory.name}"
 
 
 def test_embeddings_match_reference(embedding_imported):
