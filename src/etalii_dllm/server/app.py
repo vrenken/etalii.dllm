@@ -310,6 +310,16 @@ def verify_receipt(receipt: dict[str, Any] | list[dict[str, Any]], engine: Engin
     return JSONResponse(verification.to_json())
 
 
+@app.get("/v1/audit", response_model=None)
+def audit_report(engine: Engine) -> JSONResponse:
+    """Extension: what ``--audit-every`` found (re-runs of served responses), and the response cache's counters."""
+    report: dict[str, Any] = {"audit": engine.auditor.report() if engine.auditor is not None else None}
+    cache = engine.response_cache
+    report["response_cache"] = None if cache is None else {"hits": cache.hits, "misses": cache.misses, **cache.stats()}
+    report["coalesced"] = engine.inflight.joined
+    return JSONResponse(report)
+
+
 def main() -> None:
     import uvicorn
 
@@ -334,5 +344,7 @@ def main() -> None:
         draft_model=args.draft_model,
         prompt_cache_dir=args.prompt_cache_dir,
         sign_key=args.sign_key,
+        response_cache=args.response_cache,
+        audit_every=args.audit_every,
     )
     uvicorn.run(app, host=args.host, port=args.port)

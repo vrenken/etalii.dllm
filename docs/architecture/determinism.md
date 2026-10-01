@@ -198,6 +198,8 @@ per platform.
 - A model is checkable too: its file records its [lineage](../provenance.md#lineage), a fine-tune's
   [training receipt](../provenance.md#training-receipts) replays to the same weights, the same import gives the same
   file on every platform, and an Ed25519 [signature](../provenance.md#signatures) says who vouches for any of these.
+- Determinism makes serving exact: a cache keyed on the request is never stale, identical requests can share one
+  generation, and replicas can be audited against each other ([serving at scale](../serving.md)).
 - Determinism is not robustness. The model is as sensitive to its input as any LLM: a different file in the
   context, a timestamp in a tool result or a reworded question can change everything after it. And a wrong answer
   is wrong every time.

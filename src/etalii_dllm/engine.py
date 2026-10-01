@@ -13,7 +13,7 @@ import hashlib
 import json
 import os
 from collections.abc import Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cache
 from pathlib import Path
 from typing import Any
@@ -32,6 +32,7 @@ from etalii_dllm.numerics import QUANTIZATIONS, linear, set_threads, sum_squares
 from etalii_dllm.prompt_cache import DEFAULT_PROMPT_CACHE_SIZE
 from etalii_dllm.retrieval import DEFAULT_TOP, Retriever
 from etalii_dllm.sampling import GREEDY, SamplingOptions
+from etalii_dllm.serving import Auditor, Inflight, ResponseCache, SharedGeneration, response_key
 from etalii_dllm.signing import Signer
 from etalii_dllm.speculative import DEFAULT_DRAFT_TOKENS
 from etalii_dllm.tokenization import ByteTokenizer, Tokenizer
@@ -64,6 +65,11 @@ SPECULATE_ENVIRONMENT_VARIABLE = "DLLM_SPECULATE"
 """Tokens speculative decoding drafts per step (0 or unset: off). Never changes the output."""
 DRAFT_MODEL_ENVIRONMENT_VARIABLE = "DLLM_DRAFT_MODEL"
 SIGN_KEY_ENVIRONMENT_VARIABLE = "DLLM_SIGN_KEY"
+"""Ed25519 private key that signs every receipt (``--sign-key``)."""
+RESPONSE_CACHE_ENVIRONMENT_VARIABLE = "DLLM_RESPONSE_CACHE"
+"""Directory of the exact response cache (``--response-cache``)."""
+AUDIT_EVERY_ENVIRONMENT_VARIABLE = "DLLM_AUDIT_EVERY"
+"""Re-run every Nth response to check it reproduces (``--audit-every``)."""
 """A smaller ``model.dllm`` with the same tokenizer that drafts for speculative decoding. Never changes the output."""
 
 
@@ -156,6 +162,16 @@ class ChatResult:
     """What anyone needs to check this response later (:mod:`etalii_dllm.receipts`)."""
 
 
+@dataclass(frozen=True)
+class _ChatGeneration:
+    prompt_tokens: int
+    cached_tokens: int
+    events: Iterator[ChatEvent]
+
+    def __iter__(self) -> Iterator[ChatEvent]:
+        return self.events
+
+
 @dataclass
 class ChatStream:
     """A chat generation in progress: ``prompt_tokens`` (and how many of them the prompt cache holds,
@@ -178,6 +194,10 @@ class Embedding:
 class DllmEngine:
     signer: Signer | None = None
     """Signs every receipt this engine makes (``--sign-key``, :mod:`etalii_dllm.signing`)."""
+    response_cache: ResponseCache | None = None
+    """Answers repeated requests from storage, with the same bits (``--response-cache``, :mod:`etalii_dllm.serving`)."""
+    auditor: Auditor | None = None
+    """Re-runs a share of the responses to check they reproduce (``--audit-every``, :mod:`etalii_dllm.serving`)."""
 
     def __init__(
         self,
@@ -215,6 +235,8 @@ class DllmEngine:
         cache_dir = str(prompt_cache_dir) if prompt_cache_dir else None
         self._generator = Generator(model, tokenizer, stop_tokens, prompt_cache, speculate, draft_model, cache_dir)
         self._trie: TokenTrie | None = None
+        self.inflight = Inflight()
+        """Generations still being read: identical requests share one (:mod:`etalii_dllm.serving`)."""
 
     @staticmethod
     def from_model_file(
@@ -385,13 +407,38 @@ class DllmEngine:
             return TokenConstraint(answer, self._token_trie())
         return None
 
-    def chat_stream(self, request: ChatRequest) -> ChatStream:
+    def chat_stream(self, request: ChatRequest, *, fresh: bool = False) -> ChatStream:
         """Starts a chat generation. Raises ``ValueError`` for invalid requests (unknown tools, unsupported
-        schemas, ...) before any token is generated."""
+        schemas, ...) before any token is generated.
+
+        A request the response cache holds is answered from it, and one identical to a generation still in progress
+        shares that generation (:mod:`etalii_dllm.serving`); both give the same events, so only ``cached_tokens``
+        tells. ``fresh`` always runs the model: replays and audits use it."""
         tools = [] if request.tool_choice.mode == "none" else list(request.tools)
         tooling.validate_tools(tools, request.tool_choice)
         if request.prompt is not None and tools:
             raise ValueError("a raw prompt cannot use tools")
+        if fresh:
+            generation = self._generate(request, tools)
+            return ChatStream(
+                generation.prompt_tokens, self._answer(iter(generation), request, audit=False), generation.cached_tokens
+            )
+        key = response_key(self, request)
+        cache = self.response_cache
+        recorded = cache.get(key) if cache is not None else None
+        if recorded is not None:
+            events = self._answer(iter(recorded.events), request)
+            return ChatStream(recorded.prompt_tokens, events, recorded.prompt_tokens)
+
+        def start() -> SharedGeneration:
+            generation = self._generate(request, tools)
+            store = None if cache is None else lambda finished: cache.put(key, finished)
+            return SharedGeneration(generation.prompt_tokens, generation.cached_tokens, iter(generation), store)
+
+        shared = self.inflight.get_or_start(key, start)
+        return ChatStream(shared.prompt_tokens, self._answer(shared.reader(), request), shared.cached_tokens)
+
+    def _generate(self, request: ChatRequest, tools: Sequence[Tool]) -> _ChatGeneration:
         constraint = self._constraint(request, tools)
         messages = request.messages
         if self.retriever is not None and request.prompt is None:
@@ -406,7 +453,27 @@ class DllmEngine:
             top_logprobs=request.top_logprobs,
             new_text=request.prompt is None,
         )
-        return ChatStream(generation.prompt_tokens, self._events(generation, request, tools), generation.cached_tokens)
+        return _ChatGeneration(
+            generation.prompt_tokens, generation.cached_tokens, self._events(generation, request, tools)
+        )
+
+    def _answer(self, events: Iterator[ChatEvent], request: ChatRequest, audit: bool = True) -> Iterator[ChatEvent]:
+        """The events for ``request``: its own receipt chain link and signature on the shared receipt, which the
+        auditor sees (not for replays, which are what it runs)."""
+        for event in events:
+            if isinstance(event, Finished) and event.receipt is not None:
+                receipt = event.receipt
+                if request.previous_receipt:
+                    output = receipt["output"]
+                    receipt = receipts.make_receipt(
+                        __version__, self.model.id, self.system_fingerprint, request, output, request.previous_receipt
+                    )
+                if self.signer is not None:
+                    receipt = self.signer.sign(receipt)
+                if audit and self.auditor is not None:
+                    self.auditor.observe(receipt)
+                event = replace(event, receipt=receipt)
+            yield event
 
     def _events(self, generation: Generation, request: ChatRequest, tools: Sequence[Tool]) -> Iterator[ChatEvent]:
         text = ""
@@ -451,15 +518,11 @@ class DllmEngine:
         output = receipts.output_record(
             result.fingerprint, content, calls, finish_reason, generation.prompt_tokens, len(tokens)
         )
-        receipt = receipts.make_receipt(
-            __version__, self.model.id, self.system_fingerprint, request, output, request.previous_receipt
-        )
-        if self.signer is not None:
-            receipt = self.signer.sign(receipt)
+        receipt = receipts.make_receipt(__version__, self.model.id, self.system_fingerprint, request, output)
         yield Finished(finish_reason, stop_sequence, len(tokens), result.fingerprint, receipt)
 
-    def chat_completion(self, request: ChatRequest) -> ChatResult:
-        stream = self.chat_stream(request)
+    def chat_completion(self, request: ChatRequest, *, fresh: bool = False) -> ChatResult:
+        stream = self.chat_stream(request, fresh=fresh)
         content: list[str] = []
         calls: list[ToolCall] = []
         logprobs: list[TokenLogprobs] = []
@@ -566,6 +629,8 @@ def use_model_file(
     draft_model: str | Path | None = None,
     prompt_cache_dir: str | Path | None = None,
     sign_key: str | Path | None = None,
+    response_cache: str | Path | None = None,
+    audit_every: int | None = None,
 ) -> None:
     """Makes the front ends serve ``path`` (sets ``DLLM_MODEL``, and ``DLLM_QUANTIZE``/``DLLM_DEVICE``/
     ``DLLM_PROMPT_CACHE``/``DLLM_ADAPTER`` when ``quantize``/``device``/``prompt_cache``/``adapter`` are given) and
@@ -599,6 +664,10 @@ def use_model_file(
         os.environ[PROMPT_CACHE_DIR_ENVIRONMENT_VARIABLE] = str(prompt_cache_dir)
     if sign_key:
         os.environ[SIGN_KEY_ENVIRONMENT_VARIABLE] = str(sign_key)
+    if response_cache:
+        os.environ[RESPONSE_CACHE_ENVIRONMENT_VARIABLE] = str(response_cache)
+    if audit_every is not None:
+        os.environ[AUDIT_EVERY_ENVIRONMENT_VARIABLE] = str(audit_every)
     if threads is not None:
         set_threads(threads)
     default_engine.cache_clear()
@@ -656,6 +725,19 @@ def add_runtime_arguments(parser: argparse.ArgumentParser) -> None:
         "--sign-key",
         metavar="FILE",
         help="sign every receipt with this Ed25519 private key (dllm sign --keygen; default: $DLLM_SIGN_KEY)",
+    )
+    parser.add_argument(
+        "--response-cache",
+        metavar="DIR",
+        help="answer repeated requests from responses stored in DIR (default: $DLLM_RESPONSE_CACHE, else off); "
+        "never changes output",
+    )
+    parser.add_argument(
+        "--audit-every",
+        type=int,
+        metavar="N",
+        help="re-run every Nth response in the background to check it reproduces, reported at GET /v1/audit "
+        "(default: $DLLM_AUDIT_EVERY, else off)",
     )
     parser.add_argument(
         "--persistent-cache",
@@ -759,7 +841,23 @@ def default_engine() -> DllmEngine:
     key = os.environ.get(SIGN_KEY_ENVIRONMENT_VARIABLE)
     if key:
         engine.signer = Signer.load(key)
+    directory = os.environ.get(RESPONSE_CACHE_ENVIRONMENT_VARIABLE)
+    if directory:
+        engine.response_cache = ResponseCache(directory)
+    every = configured_audit_every()
+    if every:
+        engine.auditor = Auditor(engine, every)
     return engine
+
+
+def configured_audit_every() -> int:
+    """``DLLM_AUDIT_EVERY``: re-run every Nth response (0: no audit)."""
+    value = os.environ.get(AUDIT_EVERY_ENVIRONMENT_VARIABLE, "").strip()
+    if not value:
+        return 0
+    if not value.isdigit():
+        raise ValueError(f"{AUDIT_EVERY_ENVIRONMENT_VARIABLE}={value!r}; expected a non-negative integer")
+    return int(value)
 
 
 def _configured_engine(path: str) -> DllmEngine:
