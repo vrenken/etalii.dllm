@@ -198,6 +198,12 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("--top-p", type=float, default=1.0)
         command.add_argument("--seed", type=int, default=0)
 
+    evaluate = commands.add_parser("eval", help="score the model on a task file: perplexity or multiple choice")
+    evaluate.add_argument("task", metavar="TASK", help=".jsonl ({'context','choices','answer'} or {'text'}) or .txt")
+    evaluate.add_argument("--max-length", type=int, help="longest window for perplexity texts (default: 1024)")
+    evaluate.add_argument("--json", action="store_true", help="print the full report, per-item results included")
+    evaluate.add_argument("-o", "--output", help="also write the full report (JSON) to this file")
+
     replay = commands.add_parser("replay", help="re-run a generation receipt and check the output is the same")
     replay.add_argument("receipt", metavar="RECEIPT", help="the receipt file (JSON), or - for standard input")
     replay.add_argument("--json", action="store_true", help="print the verification as JSON")
@@ -305,6 +311,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "replay":
         return _replay(engine, args)
 
+    if args.command == "eval":
+        return _evaluate(engine, args)
+
     if args.command in interpret_commands.COMMANDS:
         return interpret_commands.run(args, engine)
     if args.command == "index":
@@ -385,6 +394,32 @@ def _verify(engine: DllmEngine, as_json: bool) -> int:
         print(f"\nverify:             {report.fingerprint}")
         print("Equal verify fingerprints (same model and options) mean the two machines give the same bits.")
     return 1 if report.mismatches else 0
+
+
+def _evaluate(engine: DllmEngine, args: argparse.Namespace) -> int:
+    from etalii_dllm import evaluation
+
+    def progress(done: int, total: int) -> None:
+        print(f"item {done}/{total}", file=sys.stderr)
+
+    try:
+        items = evaluation.read_task(args.task)
+        report = evaluation.evaluate(
+            engine, items, task=Path(args.task).name, max_length=args.max_length, progress=progress
+        )
+    except evaluation.EvaluationError as error:
+        print(f"dllm eval: {error}", file=sys.stderr)
+        return 1
+    text = json.dumps(report, indent=2, ensure_ascii=False)
+    if args.output:
+        Path(args.output).write_text(text + "\n", encoding="utf-8")
+    if args.json:
+        print(text)
+        return 0
+    for key, value in report.items():
+        if key != "results":
+            print(f"{key + ':':<20}{value}")
+    return 0
 
 
 def _replay(engine: DllmEngine, args: argparse.Namespace) -> int:

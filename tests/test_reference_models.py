@@ -383,6 +383,16 @@ def test_sampled_chat_golden(model_key, imported):
     assert generated.fingerprint == REFERENCE_MODEL_FINGERPRINTS[model_key].get("sampled")
 
 
+def test_eval_golden(model_key, imported):
+    """``dllm eval`` on the bundled multiple-choice task: every per-token log-probability, bit for bit."""
+    from etalii_dllm import evaluation
+
+    _, result = imported
+    task = Path(__file__).parent / "data" / "eval-tiny.jsonl"
+    report = evaluation.evaluate(DllmEngine.from_model_file(result.path), evaluation.read_task(task))
+    assert report["fingerprint"] == REFERENCE_MODEL_FINGERPRINTS[model_key].get("eval")
+
+
 def test_logits_match_reference(imported, reference):
     import torch
 

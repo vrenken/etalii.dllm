@@ -433,6 +433,18 @@ dllm --model smollm2-135m.dllm replay colours.json      # "verified: the replay 
 The server front ends return one when the request says `"receipt": true`, and `POST /v1/receipts/verify` (or the MCP
 `verify_receipt` tool) checks one. Details: [receipts](receipts.md).
 
+## 11. Score a model reproducibly
+
+`dllm eval` measures perplexity on a text or multiple-choice accuracy from a JSON lines file, with a fingerprint
+over every log-probability, so two machines can check they measured the very same thing:
+
+```bash
+dllm --model smollm2-135m.dllm eval my-text.txt
+dllm --model smollm2-135m.dllm eval my-questions.jsonl   # {"context", "choices", "answer"} per line
+```
+
+Details: [evaluation](evaluation.md).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,

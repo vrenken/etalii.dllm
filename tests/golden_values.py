@@ -85,6 +85,7 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "logits": "939f4dab80703cf2dcfff45656a84cc8fbd6602a8a9c3e6d75ada13ce0c5a5fb",
         "logits_q8_0": "000765286f26f9e922fc23f5dfcbae1b7b53b5574525015b2a956b272252b3f9",
         "logits_q4_0": "5cd1ce3aa760e2917c64c1815e9b32543b4b54059b9eedcb8de09044a3cb61fa",
+        "eval": "5083f67f1060e5eb61e61e230f7160683d9fdaf3eb02079b847f202f03419aa7",
     },
     "qwen2.5": {
         "import": "9bf78203fabbc1d93a5f387456ff1d755d7fef36396351c911f51656c898eb99",
@@ -162,4 +163,14 @@ TINY_TRACE_FINGERPRINT = {
     "phi3": "c6c900b68cd750245988c3f88f0885dd0bb16c3d92b043fc8fb9d87baa02f6b1",
     "qwen2": "9049474d08a5d8987fcbf8ae06f19e0c3f96aa63c7afcccf5343110654cb369c",
     "qwen3": "ae441bb1809c65a97d4b36d0ed01c25cc2454c9439b2da2798c6173309c5cc25",
+}
+
+# dllm eval (tests/test_evaluation.py): fingerprints over every per-token log-probability of the bundled tasks
+# tests/data/eval-tiny.jsonl (multiple choice) and eval-text.jsonl (perplexity), for the placeholder bigram model and
+# the tiny imported Llama of tests/test_engine_import.py.
+EVAL_FINGERPRINTS = {
+    "bigram_multiple_choice": "5d8c7c3e14555e68584266bf8b330ae362e38152e9eb40adcf27a9f99347700d",
+    "bigram_perplexity": "197a7650abe9257cdf2def0085eebbc31ae5540afe20d4ae4b3589e2583332be",
+    "tiny_multiple_choice": "95d8333e39566d7f7442630ebdcd695d78906f66ef08c73bdcc827a1740c1e05",
+    "tiny_perplexity": "f7c09b64af3a7e5762bf6f8cc6e393f03464c5efb5e873a157b921e964c43e35",
 }
