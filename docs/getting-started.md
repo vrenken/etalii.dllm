@@ -509,9 +509,23 @@ dllm conformance check vectors/                      # check this build (or --im
 ```
 
 `--reference` runs the prompt through the compiled kernels and through a second implementation written in plain
-Python, and prints `equal` for the logits and for a greedy and a sampled answer (it takes about a minute for
+Python, and prints `equal` for the logits and for a greedy, a sampled and a controlled (penalties, min-p, logit
+bias) answer (it takes about a minute for
 SmolLM2-135M). A difference means this machine's kernels (a SIMD path, the GPU, the compiler) do not compute what the
 [determinism specification](specification.md) says.
+
+## 17. Shape the answer without losing reproducibility
+
+```bash
+dllm --model smollm2-135m.dllm generate --prompt "List: apple, apple," --repetition-penalty 1.3
+dllm --model smollm2-135m.dllm generate --prompt "Once upon a time" --temperature 0.9 --seed 5 --n 3
+dllm --model smollm2-135m.dllm chat "Give me a date" --regex '\d{4}-\d{2}-\d{2}'
+```
+
+Repetition, frequency and presence penalties, `--min-p` and `--logit-bias TOKEN=BIAS` change the logits in one fixed
+order, so the same flags give the same answer everywhere. `--n 3` prints three choices; choice `i` is exactly the
+answer you get with `--seed SEED+i`. `--regex` only lets the model write text that matches the pattern in full. The
+HTTP API has all of them too: [decoding controls](api.md#decoding-controls).
 
 ## What does not work yet
 

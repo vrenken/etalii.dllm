@@ -193,5 +193,10 @@ EVAL_FINGERPRINTS = {
 }
 
 # SHA-256 of the conformance vectors' manifest.json (`dllm conformance write`, Phase 20). It covers every input and
-# output file's SHA-256, so it pins the bits of every kernel case, the sampler and the two small decoders.
-CONFORMANCE_MANIFEST_SHA256 = "37f2724b3529c3fe343e1b62f3f85c0fc3bc4615c70138bb6f7c33fe91c2f100"
+# output file's SHA-256, so it pins the bits of every kernel case, the sampler and the two small decoders. Phase 21
+# added the two sample-penalties cases (penalties, min-p and logit bias).
+CONFORMANCE_MANIFEST_SHA256 = "78f2307713e42db142b03d6d25eb4f7755d0913f5635f9962bf66f18ea78e081"
+
+# Phase 21: the placeholder model continuing "Deterministic decoding controls are" with every decoding control set
+# (tests/test_decoding_controls.py::CONTROLLED): penalties, min-p and logit bias.
+DECODING_CONTROLS_FINGERPRINT = "469d2f4cf54e7b6659fa2b1c34b3a6ae3039be211bb516280f28fc762424b04c"

@@ -11,7 +11,7 @@ The specification is checked three ways:
   code with the C++ kernels. `tests/test_reference.py` requires it to give the kernels' bits for every kernel and
   every architecture option.
 - **`dllm verify --reference`** runs a model through both implementations on the machine itself and compares the
-  logits and a greedy and a sampled answer bit for bit (see [checking an implementation](#checking-an-implementation)).
+  logits and a greedy, a sampled and a fully controlled (penalties, min-p, logit bias) answer bit for bit (see [checking an implementation](#checking-an-implementation)).
 - **`dllm conformance write DIR`** writes test vectors: inputs and exact outputs for every kernel, the random number
   generator, the sampler and two small decoders. A port checks itself against these files.
 
@@ -182,6 +182,18 @@ Keys before `first` and after `end` are never read, so a prefill and token-by-to
 - `fill_gaussian(seed, n)`: `n` values of `next_gaussian` from a generator seeded with `seed`. All test weights and
   conformance inputs come from it.
 
+**Logit adjustments.** Before any sampling (greedy included), the float32 logits change in this order. Each token
+is adjusted on its own, so the order tokens are visited in does not matter:
+
+1. Logit bias: `x = f32(x + f32(bias))` for every `(token, bias)` pair with `token` below the vocabulary size.
+2. Repetition penalty `r` (when `r != 1` and `repeat_last_n != 0`): for every distinct token among the last
+   `repeat_last_n` tokens of prompt plus output (all of them when `repeat_last_n` is -1), `x = f32(x / f32(r))` if
+   `x > 0`, else `x = f32(x * f32(r))`.
+3. Frequency and presence penalties: for every token the output (not the prompt) contains `c > 0` times,
+   `x = f32(x - f32(c * frequency_penalty + presence_penalty))`, the penalty computed in double.
+
+Log-probabilities reported with an answer come from the unadjusted logits.
+
 **Sampler.**
 
 - With temperature 0, the token is `argmax(logits)`.
@@ -190,9 +202,19 @@ Keys before `first` and after `end` are never read, so a prefill and token-by-to
   2. Order the candidates by probability descending, then id ascending.
   3. Keep the first `top_k` candidates (all when `top_k` is 0).
   4. With `top_p < 1`, keep the shortest prefix whose running double sum of `p` reaches `top_p`.
-  5. `total` is the kept probabilities summed in order. With `u = next_double() * total`, the token is the first
+  5. With `min_p > 0`, cut the kept prefix before the first candidate (after the first) whose `p` is below
+     `min_p * p[first]` (a double product).
+  6. `total` is the kept probabilities summed in order. With `u = next_double() * total`, the token is the first
      candidate whose running sum exceeds `u`, or the last kept candidate if none does.
-- Constrained decoding restricts the logits to the allowed ids (ascending) before these steps.
+- Constrained decoding restricts the adjusted logits to the allowed ids (ascending) before these steps.
+- **Several choices.** Choice `i` of a request for `n` is the request with the seed `(seed + i) mod 2^64`; nothing
+  else differs, so each choice is exactly the answer a single request with that seed gets.
+
+**Regular expressions.** A regex constraint allows exactly the outputs whose UTF-8 bytes, in full, are the
+encoding of a string the pattern matches, where `\d`, `\w` and `\s` have their ASCII meanings (`[0-9]`,
+`[A-Za-z0-9_]`, `[ \t\n\r\f\v]`), `.` is any code point but `\n`, and classes hold code points (never
+surrogates). The supported syntax is listed in `etalii_dllm.regexp`. A token is allowed when its bytes extend the
+output to a prefix of such an encoding; a stop token is allowed when the output so far is a full match.
 
 ## 5. The decoder
 
@@ -239,7 +261,7 @@ Not covered here, but just as fixed:
 
 **On one machine.** `dllm --model m.dllm verify --reference` compares this machine's compiled kernels (whatever
 SIMD path, thread count or GPU is in use) with the reference implementation. It checks the prompt's logits and a
-greedy and a sampled 16-token answer, and prints `equal` for each part, or where the two first differ. CI runs it
+greedy, a sampled and a controlled 16-token answer (every logit adjustment and `min_p` at once), and prints `equal` for each part, or where the two first differ. CI runs it
 for SmolLM2-135M on every release platform and SIMD path, in float32 and Q8_0.
 
 **Elsewhere.** `dllm conformance write DIR` writes the vectors:
@@ -251,7 +273,8 @@ for SmolLM2-135M on every release platform and SIMD path, in float32 and Q8_0.
   `{file, dtype, shape, sha256}`.
 - **Kernels covered.** The transcendentals, `linear` (float32 and quantised), `quantize`, `matmul`, `rms_norm`, the
   activations, `softmax`, `rope_inv_freq`, `rope`, `attention`, `random` (the `next_u64`, `next_double` and
-  `next_gaussian` streams), `sample`, and `decoder`.
+  `next_gaussian` streams), `sample`, `sample_controls` (logit adjustments and `min_p` over a sequence of steps that
+  starts from a `prompt` input), and `decoder`.
 - **The decoder cases.** Each holds a config, its tensors (inputs named `tensor.<name>`), and the logits after each
   token fed one at a time.
 

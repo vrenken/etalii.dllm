@@ -138,12 +138,13 @@ AdamW from `grad.hpp`.
 | `chat.py` | Chat messages and the fixed prompt format for models without a chat template. |
 | `chat_template.py` | Renders a model's own Jinja chat template the way `transformers` does. |
 | `tools.py` | Tool calling in the Hermes `<tool_call>` format: presenting tools, constraining and parsing calls. |
-| `grammar.py` | Constrained decoding: byte-level JSON grammars and the token masks they induce over a token trie. |
+| `grammar.py` | Constrained decoding: byte-level JSON and regex grammars and the token masks they induce over a token trie. |
+| `regexp.py` | Regular expressions compiled to byte-level DFAs (UTF-8 ranges included) for regex-constrained output. |
 | `generation.py` | The autoregressive loop: forward pass, sample, append, repeat; stop sequences, logprobs, result fingerprint. |
 | `speculative.py` | Drafters for speculative decoding (prompt lookup, a draft model); the loop in `generation.py` keeps only drafted tokens it would have chosen. |
 | `prompt_cache.py` | KV caches of earlier requests, lent to the next prompt that shares their prefix; saves work, never changes tokens. |
 | `batching.py` | Continuous batching: concurrent generations share one `forward_batch` per step, each keeping its solo bits. |
-| `sampling.py` | Temperature, top-k and top-p sampling with a seeded generator and ties broken on token id. |
+| `sampling.py` | Logit bias, repetition/frequency/presence penalties, then temperature, top-k, top-p and min-p sampling with a seeded generator and ties broken on token id; choice seeds for `n`. |
 | `tokenization.py`, `bpe.py` | The byte tokenizer of the placeholder model, and BPE (byte-level or SentencePiece-style) driven by a `tokenizer.json`. |
 | `verify.py` | `dllm verify`: one fingerprint of a fixed workload (kernels, Unicode, tokenizer, logits, answers) to compare machines; `--reference` compares the model's answers with `reference.py`. |
 | `reference.py` | A second, independent implementation of the [specification](../specification.md) (transcendentals, kernels, RNG, sampler, decoder) in Python and elementwise NumPy, sharing no code with the C++ kernels. |

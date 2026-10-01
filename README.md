@@ -178,6 +178,7 @@ module map), with Mermaid diagrams.
 | 18. Deterministic serving at scale ✅ | ✅ An exact response cache that answers repeated requests with the same bits (#151); ✅ identical requests in flight share one generation (#152); ✅ `dllm audit` to check that servers agree, and a self-audit at `GET /v1/audit` (#153). See [serving at scale](docs/serving.md) |
 | 19. Reproducible model building ✅ | ✅ Exact model merges recorded in the lineage (`dllm merge`: linear, SLERP, TIES, #156); ✅ exports back to safetensors and GGUF that import to the same weights (`dllm export`, #157); ✅ distillation on a teacher's answers that replays bit for bit (`dllm distill`, #158). See [building models](docs/model-building.md) |
 | 20. Independent verification ✅ | ✅ A second, independent implementation that gives the same bits (#161); ✅ `dllm verify --reference` to check a machine against it (#162); ✅ conformance vectors for other implementations (`dllm conformance`, #163); ✅ a written determinism specification (#164). See [specification](docs/specification.md) |
+| 21. Deterministic decoding controls ✅ | ✅ Repetition, frequency and presence penalties, min-p and logit bias with a fixed order (#166); ✅ several choices per request, each with its solo bits (`n`, #167); ✅ regex-constrained output (#168); ✅ all of them in the specification, the reference implementation and the conformance vectors (#169). See [decoding controls](docs/api.md#decoding-controls) |
 
 ## Working with Claude Code
 

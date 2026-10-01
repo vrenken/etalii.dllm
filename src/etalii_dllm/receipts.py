@@ -70,16 +70,11 @@ def request_record(request: ChatRequest) -> dict[str, Any]:
         ],
         "prompt": request.prompt,
         "max_tokens": request.max_tokens,
-        "options": {
-            "temperature": options.temperature,
-            "top_k": options.top_k,
-            "top_p": options.top_p,
-            "seed": options.seed,
-        },
+        "options": options.record(),
         "stop": list(request.stop),
         "tools": [{"name": t.name, "description": t.description, "parameters": t.parameters} for t in request.tools],
         "tool_choice": {"mode": request.tool_choice.mode, "name": request.tool_choice.name},
-        "response_format": {"type": request.response_format.type, "schema": request.response_format.schema},
+        "response_format": request.response_format.record(),
         "top_logprobs": request.top_logprobs,
         "call_id_prefix": request.call_id_prefix,
         "request_id": request.request_id,
@@ -105,13 +100,13 @@ def request_from_record(record: Mapping[str, Any]) -> ChatRequest:
             for m in record["messages"]
         ],
         max_tokens=record["max_tokens"],
-        options=SamplingOptions(
-            temperature=options["temperature"], top_k=options["top_k"], top_p=options["top_p"], seed=options["seed"]
-        ),
+        options=SamplingOptions.from_record(options),
         stop=tuple(record["stop"]),
         tools=tuple(Tool(t["name"], t["description"], t["parameters"]) for t in record["tools"]),
         tool_choice=ToolChoice(choice["mode"], choice["name"]),
-        response_format=ResponseFormat(response_format["type"], response_format["schema"]),
+        response_format=ResponseFormat(
+            response_format["type"], response_format["schema"], response_format.get("pattern")
+        ),
         top_logprobs=record["top_logprobs"],
         call_id_prefix=record["call_id_prefix"],
         request_id=record["request_id"],

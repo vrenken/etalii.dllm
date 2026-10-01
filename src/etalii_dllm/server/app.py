@@ -23,6 +23,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from etalii_dllm import __version__, receipts
 from etalii_dllm.chat import ChatMessage, ToolCall
 from etalii_dllm.engine import (
+    MAX_CHOICES,
     ChatRequest,
     DllmEngine,
     Finished,
@@ -60,6 +61,7 @@ from etalii_dllm.server.contracts import (
     PromptTokensDetails,
     ToolCallModel,
     TopLogprob,
+    id_payload,
 )
 from etalii_dllm.tools import Tool, ToolChoice
 
@@ -119,13 +121,17 @@ def _chat_request(request: ChatCompletionRequest, engine: DllmEngine) -> ChatReq
     """Translates the wire request; raises ``ValueError`` for invalid ones."""
     if not request.messages:
         raise ValueError("'messages' must contain at least one message.")
-    if request.n not in (None, 1):
-        raise ValueError("only n=1 is supported")
     options = SamplingOptions(
         temperature=request.temperature if request.temperature is not None else 0.0,
         top_k=request.top_k or 0,
         top_p=request.top_p if request.top_p is not None else 1.0,
         seed=request.seed or 0,
+        min_p=request.min_p or 0.0,
+        repetition_penalty=request.repetition_penalty if request.repetition_penalty is not None else 1.0,
+        repeat_last_n=request.repeat_last_n if request.repeat_last_n is not None else 64,
+        frequency_penalty=request.frequency_penalty or 0.0,
+        presence_penalty=request.presence_penalty or 0.0,
+        logit_bias=SamplingOptions.bias(request.logit_bias),
     )
     functions = [t.function for t in request.tools or ()]
     tools = [Tool(f.name, f.description or "", f.parameters or {}) for f in functions]
@@ -136,7 +142,15 @@ def _chat_request(request: ChatCompletionRequest, engine: DllmEngine) -> ChatReq
     else:
         choice = ToolChoice("named", request.tool_choice.function.name)
     response_format = ResponseFormat()
-    if request.response_format is not None and request.response_format.type != "text":
+    if request.guided_regex is not None:
+        if request.response_format is not None and request.response_format.type != "text":
+            raise ValueError("guided_regex cannot be combined with a response_format")
+        response_format = ResponseFormat("regex", pattern=request.guided_regex)
+    elif request.response_format is not None and request.response_format.type == "regex":
+        if request.response_format.regex is None:
+            raise ValueError("response_format regex needs a 'regex'")
+        response_format = ResponseFormat("regex", pattern=request.response_format.regex)
+    elif request.response_format is not None and request.response_format.type != "text":
         spec = request.response_format.json_schema
         if request.response_format.type == "json_schema" and (spec is None or spec.json_schema is None):
             raise ValueError("response_format json_schema needs a 'json_schema.schema'")
@@ -147,7 +161,9 @@ def _chat_request(request: ChatCompletionRequest, engine: DllmEngine) -> ChatReq
         raise ValueError("at most 4 stop sequences are supported")
     request_id = engine.derive_id(
         "chatcmpl-",
-        request.model_dump(mode="json", exclude={"stream", "stream_options", "receipt", "previous_receipt"}),
+        id_payload(
+            request.model_dump(mode="json", exclude={"stream", "stream_options", "receipt", "previous_receipt"})
+        ),
     )
     return ChatRequest(
         messages=[_message(m) for m in request.messages],
@@ -182,42 +198,51 @@ def _logprobs(engine: DllmEngine, entries: tuple[TokenLogprobs, ...]) -> ChoiceL
 def chat_completions(
     request: ChatCompletionRequest, engine: Engine
 ) -> ChatCompletionResponse | JSONResponse | StreamingResponse:
+    n = request.n if request.n is not None else 1
     try:
         chat = _chat_request(request, engine)
         if request.stream:
+            if not 1 <= n <= MAX_CHOICES:
+                raise ValueError(f"n must be between 1 and {MAX_CHOICES}")
             stream = engine.chat_stream(chat)
             include_usage = bool(request.stream_options and request.stream_options.include_usage)
             return StreamingResponse(
-                _chunks(engine, chat, stream, include_usage, chat.top_logprobs is not None, bool(request.receipt)),
+                _chunks(engine, chat, stream, include_usage, chat.top_logprobs is not None, bool(request.receipt), n),
                 media_type="text/event-stream",
             )
-        result = engine.chat_completion(chat)
+        results = engine.chat_choices(chat, n)
     except ValueError as error:
         return _error(str(error))
 
-    calls = [
-        ToolCallModel(id=c.id, function=FunctionCall(name=c.name, arguments=c.arguments)) for c in result.tool_calls
-    ]
+    choices = []
+    for index, result in enumerate(results):
+        calls = [
+            ToolCallModel(id=c.id, function=FunctionCall(name=c.name, arguments=c.arguments)) for c in result.tool_calls
+        ]
+        choices.append(
+            ChatCompletionChoice(
+                index=index,
+                message=AssistantMessage(content=result.content or (None if calls else ""), tool_calls=calls or None),
+                logprobs=_logprobs(engine, result.logprobs) if chat.top_logprobs is not None else None,
+                finish_reason=result.finish_reason,
+                **({"receipt": result.receipt} if request.receipt and n > 1 else {}),
+            )
+        )
+    first = results[0]
+    completion_tokens = sum(result.completion_tokens for result in results)
     return ChatCompletionResponse(
         id=chat.request_id,
         created=0,
         model=engine.model.id,
         system_fingerprint=engine.system_fingerprint,
-        choices=[
-            ChatCompletionChoice(
-                index=0,
-                message=AssistantMessage(content=result.content or (None if calls else ""), tool_calls=calls or None),
-                logprobs=_logprobs(engine, result.logprobs) if chat.top_logprobs is not None else None,
-                finish_reason=result.finish_reason,
-            )
-        ],
+        choices=choices,
         usage=ChatCompletionUsage(
-            prompt_tokens=result.prompt_tokens,
-            completion_tokens=result.completion_tokens,
-            total_tokens=result.prompt_tokens + result.completion_tokens,
-            prompt_tokens_details=PromptTokensDetails(cached_tokens=result.cached_tokens),
+            prompt_tokens=first.prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=first.prompt_tokens + completion_tokens,
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=first.cached_tokens),
         ),
-        **({"receipt": result.receipt} if request.receipt else {}),
+        **({"receipt": first.receipt} if request.receipt else {}),
     )
 
 
@@ -226,48 +251,61 @@ def _sse(chunk: ChatCompletionChunk) -> str:
 
 
 def _chunks(
-    engine: DllmEngine, chat: ChatRequest, stream, include_usage: bool, logprobs: bool, receipt: bool = False
+    engine: DllmEngine,
+    chat: ChatRequest,
+    stream,
+    include_usage: bool,
+    logprobs: bool,
+    receipt: bool = False,
+    n: int = 1,
 ) -> Iterator[str]:
-    def chunk(delta: ChunkDelta, extra: dict | None = None, **fields) -> ChatCompletionChunk:
+    """Several choices stream one after another (each one's chunks in order), never interleaved by timing."""
+
+    def chunk(index: int, delta: ChunkDelta, extra: dict | None = None, **fields) -> ChatCompletionChunk:
         return ChatCompletionChunk(
             id=chat.request_id,
             model=engine.model.id,
             system_fingerprint=engine.system_fingerprint,
-            choices=[ChunkChoice(delta=delta, **fields)],
+            choices=[ChunkChoice(index=index, delta=delta, **fields)],
             **(extra or {}),
         )
 
-    yield _sse(chunk(ChunkDelta(role="assistant", content="")))
-    for event in stream:
-        if isinstance(event, TextDelta):
-            entries = _logprobs(engine, event.logprobs) if logprobs else None
-            yield _sse(chunk(ChunkDelta(content=event.text), logprobs=entries))
-        elif isinstance(event, ToolCallEvent):
-            call = DeltaToolCall(
-                index=event.index,
-                id=event.call.id,
-                type="function",
-                function=DeltaFunctionCall(name=event.call.name, arguments=event.call.arguments),
-            )
-            yield _sse(chunk(ChunkDelta(tool_calls=[call])))
-        elif isinstance(event, Finished):
-            extra = {"receipt": event.receipt} if receipt else None
-            yield _sse(chunk(ChunkDelta(), extra, finish_reason=event.finish_reason))
-            if include_usage:
-                usage = ChatCompletionUsage(
-                    prompt_tokens=stream.prompt_tokens,
-                    completion_tokens=event.completion_tokens,
-                    total_tokens=stream.prompt_tokens + event.completion_tokens,
-                    prompt_tokens_details=PromptTokensDetails(cached_tokens=stream.cached_tokens),
+    first, completion_tokens = stream, 0
+    for index in range(n):
+        if index > 0:
+            stream = engine.chat_stream(engine.choice_request(chat, index))
+        yield _sse(chunk(index, ChunkDelta(role="assistant", content="")))
+        for event in stream:
+            if isinstance(event, TextDelta):
+                entries = _logprobs(engine, event.logprobs) if logprobs else None
+                yield _sse(chunk(index, ChunkDelta(content=event.text), logprobs=entries))
+            elif isinstance(event, ToolCallEvent):
+                call = DeltaToolCall(
+                    index=event.index,
+                    id=event.call.id,
+                    type="function",
+                    function=DeltaFunctionCall(name=event.call.name, arguments=event.call.arguments),
                 )
-                final = ChatCompletionChunk(
-                    id=chat.request_id,
-                    model=engine.model.id,
-                    system_fingerprint=engine.system_fingerprint,
-                    choices=[],
-                    usage=usage,
-                )
-                yield _sse(final)
+                yield _sse(chunk(index, ChunkDelta(tool_calls=[call])))
+            elif isinstance(event, Finished):
+                extra = {"receipt": event.receipt} if receipt else None
+                yield _sse(chunk(index, ChunkDelta(), extra, finish_reason=event.finish_reason))
+                completion_tokens += event.completion_tokens
+    if include_usage:
+        usage = ChatCompletionUsage(
+            prompt_tokens=first.prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=first.prompt_tokens + completion_tokens,
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=first.cached_tokens),
+        )
+        final = ChatCompletionChunk(
+            id=chat.request_id,
+            model=engine.model.id,
+            system_fingerprint=engine.system_fingerprint,
+            choices=[],
+            usage=usage,
+        )
+        yield _sse(final)
     yield "data: [DONE]\n\n"
 
 

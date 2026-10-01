@@ -42,7 +42,8 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
   `sampling`, `tokenization`, `models`, `generation`, `prompt_cache` (KV caches reused across requests),
   `batching` (concurrent generations share `forward_batch` steps), `chat`, `engine` (`DllmEngine`, the facade shared by every front
   end; `DLLM_MODEL`/`--model` selects a `model.dllm`), `transformer` (Llama/Qwen2/Qwen3 decoder + KV cache), `bpe`, `unicode` (Unicode tables pinned to one version) and
-  `chat_template` (the model's own tokenizer and Jinja template), `cuda` (the GPU backend: NVRTC discovery, `CudaTensor`, device
+  `chat_template` (the model's own tokenizer and Jinja template), `sampling` (logit bias, penalties, top-k/top-p/
+  min-p, choice seeds; `docs/api.md#decoding-controls`), `regexp` (regexes compiled to byte DFAs for `grammar`), `cuda` (the GPU backend: NVRTC discovery, `CudaTensor`, device
   ops; `--device cuda`/`DLLM_DEVICE`), `architecture` (`TransformerConfig`), `modelfile`
   (the `model.dllm` container, `docs/model-format.md`), `importing` (safetensors/GGUF readers and `dllm import`),
   `training` (gradients, AdamW, data order, checkpoints and `dllm finetune`, `docs/training.md`), `lora` (LoRA

@@ -28,6 +28,17 @@ from etalii_dllm.sampling import GREEDY, SamplingOptions
 PROMPT = "The capital of France is"
 MAX_TOKENS = 16
 SAMPLED = SamplingOptions(temperature=0.8, seed=7)
+CONTROLLED = SamplingOptions(
+    temperature=0.9,
+    top_k=40,
+    seed=11,
+    min_p=0.02,
+    repetition_penalty=1.3,
+    frequency_penalty=0.4,
+    presence_penalty=0.2,
+    logit_bias=((13, 1.5), (32, -2.0)),
+)
+"""Every Phase 21 decoding control at once (``dllm verify --reference``)."""
 
 # Text that exercises normalisation, case, categories and scripts (Latin, CJK, Hangul, Greek, Cyrillic, emoji,
 # compatibility and combining characters, letters new in Unicode 15/15.1), escaped to keep the source ASCII.
@@ -219,9 +230,9 @@ def check_reference(engine: Any, max_tokens: int = MAX_TOKENS) -> ReferenceCheck
         differing = np.flatnonzero(logits.view(np.uint32) != expected.view(np.uint32))
         results["logits"] = f"{len(differing)} of {len(logits)} differ, first at token id {int(differing[0])}"
     stops = sorted(engine.stop_tokens)
-    for name, options in (("greedy", GREEDY), ("sampled", SAMPLED)):
+    for name, options in (("greedy", GREEDY), ("sampled", SAMPLED), ("controlled", CONTROLLED)):
         answer = engine.complete(PROMPT, max_tokens, options)
-        sampler = reference.Sampler(options.temperature, options.top_k, options.top_p, options.seed)
+        sampler = reference.sampler(options)
         tokens, _ = twin.generate(context, max_tokens, sampler, stops)
         results[name] = _first_difference(answer.tokens, tokens)
     return ReferenceCheck(results)

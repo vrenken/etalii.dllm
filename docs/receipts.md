@@ -47,7 +47,9 @@ streamed answer carries the same receipt as the non-streamed one.
 - `system_fingerprint` identifies the weights and everything else that changes the bits: quantisation, LoRA
   adapters, steering vectors and the document index (`--index`).
 - `request` is the engine request after the front end translated it, so a receipt from the Anthropic API replays
-  the same way as one from the CLI. A grounded chat (`--index`) records the conversation before the retrieved
+  the same way as one from the CLI. The [decoding controls](api.md#decoding-controls) (`min_p`, the penalties,
+  `logit_bias`, a regex `pattern` in `response_format`) appear only when they are set, so receipts made before them
+  keep their ids. A grounded chat (`--index`) records the conversation before the retrieved
   passages are added; the index is part of the fingerprint.
 - `output.tokens` is the SHA-256 fingerprint of the generated token ids (the one `dllm generate` prints),
   `output.content` the SHA-256 of the answer text and `output.tool_calls` of the canonical JSON of the tool calls.

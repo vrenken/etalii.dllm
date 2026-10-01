@@ -49,7 +49,8 @@ what the CLI and the MCP server use, so all front ends give the same answer for 
   `extra_body={"seed": 7}`). Recent Anthropic SDKs no longer have `temperature`, `top_p` and `top_k` parameters;
   send them with `extra_body` as well.
 - `max_tokens` defaults to 64 on the OpenAI endpoint; it is required on the Anthropic endpoint, as there.
-- Only `n=1`. No images, audio, documents or server tools (requests using them get a 400 error). `developer`
+- `n` (up to 16) on chat completions returns several choices; see [decoding controls](#decoding-controls). No
+  images, audio, documents or server tools (requests using them get a 400 error). `developer`
   messages are treated as `system` messages. Unknown request fields are ignored.
 - A final assistant message is a prefill: the answer continues its text (Anthropic semantics, on both endpoints).
 - Errors use each API's error shape: `{"error": {"type": "invalid_request_error", "message": ...}}` for OpenAI and
@@ -202,6 +203,42 @@ properties are generated; a schema without `properties` is a free-form object), 
 ignored. Keywords that constrain values in ways the automaton does not check (`pattern`, `minLength`, `minimum`,
 ...) are refused with a 400 error rather than silently ignored. Properties are generated in schema order; optional
 ones may be skipped. At most 16 whitespace bytes may appear between JSON tokens.
+
+## Decoding controls
+
+Penalties, min-p, logit bias, several choices and regexes (Phase 21) keep every answer bit-reproducible: each one is
+an exact, documented step ([specification](specification.md#4-random-numbers-and-sampling)) that the independent
+reference implementation repeats bit for bit.
+
+| Control | OpenAI chat | Ollama `options` | CLI (`generate`, `chat`) |
+| --- | --- | --- | --- |
+| Frequency and presence penalties (count only the answer's tokens) | `frequency_penalty`, `presence_penalty` | `frequency_penalty`, `presence_penalty` | `--frequency-penalty`, `--presence-penalty` |
+| Repetition penalty over the last N tokens of prompt and answer (-1: all) | `repetition_penalty`, `repeat_last_n` (extensions) | `repeat_penalty`, `repeat_last_n` | `--repetition-penalty`, `--repeat-last-n` |
+| Min-p: drop tokens less likely than `min_p` times the top one | `min_p` (extension) | `min_p` | `--min-p` |
+| Logit bias added to chosen tokens | `logit_bias` | | `--logit-bias TOKEN=BIAS` |
+| Several choices | `n` | | `--n` (`generate`) |
+| Output matching a regex in full | `response_format: {"type": "regex", "regex": ...}` or `guided_regex` | | `--regex` |
+
+- The defaults change nothing: a repetition penalty of 1 (Ollama's own default is 1.1; here it stays off unless asked
+  for, so answers equal those of the other endpoints), no bias, `min_p` 0. A `logit_bias` id outside the vocabulary
+  is a 400 error. Receipts record every control, so `dllm replay` repeats them.
+- Choice `i` samples with the seed `seed + i`, so each choice is exactly the answer of a single request with that
+  seed. Non-streamed choices are decoded concurrently (sharing batched steps, which never changes a bit); streamed ones
+  arrive one after another, never interleaved by timing. `usage.completion_tokens` adds up all choices. With
+  `"receipt": true` the top-level `receipt` belongs to choice 0, each choice carries its own `receipt`, and streamed
+  choices have theirs on their finishing chunk.
+- A regex constrains decoding like a JSON schema does ([structured output](#structured-output)): the answer is
+  always a full match unless `max_tokens` cuts it off. `\d`, `\w` and `\s` mean `[0-9]`, `[A-Za-z0-9_]` and ASCII
+  whitespace; classes, `.`, groups, alternation and `* + ? {m,n}` are supported. Backreferences, lookaround, word
+  boundaries and flags are refused with a 400 error.
+
+```bash
+curl -s localhost:5080/v1/chat/completions -H 'content-type: application/json' -d '{
+  "messages": [{"role": "user", "content": "Give me a date"}],
+  "temperature": 0.8, "seed": 3, "n": 2, "frequency_penalty": 0.5,
+  "response_format": {"type": "regex", "regex": "\\d{4}-\\d{2}-\\d{2}"}
+}'
+```
 
 ## Tools
 

@@ -64,8 +64,10 @@ class JsonSchemaFormat(BaseModel):
 
 
 class ResponseFormatModel(BaseModel):
-    type: Literal["text", "json_object", "json_schema"]
+    type: Literal["text", "json_object", "json_schema", "regex"]
     json_schema: JsonSchemaFormat | None = None
+    regex: str | None = None
+    """Extension: the pattern of a ``regex`` response format."""
 
 
 class StreamOptions(BaseModel):
@@ -97,6 +99,42 @@ class ChatCompletionRequest(BaseModel):
     """Extension: add a ``receipt`` to the response (see docs/receipts.md)."""
     previous_receipt: str | None = None
     """Extension: the receipt id of the conversation's previous turn, recorded as the new receipt's ``previous``."""
+    frequency_penalty: float | None = None
+    presence_penalty: float | None = None
+    logit_bias: dict[str, float] | None = None
+    min_p: float | None = None
+    """Extension (as in vLLM and llama.cpp)."""
+    repetition_penalty: float | None = None
+    """Extension (as in vLLM and llama.cpp)."""
+    repeat_last_n: int | None = None
+    """Extension (as in llama.cpp)."""
+    guided_regex: str | None = None
+    """Extension (as in vLLM): the same as ``response_format: {"type": "regex", "regex": ...}``."""
+
+
+DECODING_CONTROLS = (
+    "frequency_penalty",
+    "presence_penalty",
+    "logit_bias",
+    "min_p",
+    "repetition_penalty",
+    "repeat_last_n",
+    "repeat_penalty",
+    "guided_regex",
+)
+"""Request fields added in Phase 21: left out of the payloads ids are derived from while unset, so the ids of
+requests without them did not change."""
+
+
+def id_payload(dumped: dict[str, Any]) -> dict[str, Any]:
+    """``dumped`` without the :data:`DECODING_CONTROLS` that are unset (``None``), at the top level, in an
+    ``options`` object or (``regex``) in a ``response_format``."""
+    payload = {k: v for k, v in dumped.items() if not (k in DECODING_CONTROLS and v is None)}
+    if isinstance(payload.get("options"), dict):
+        payload["options"] = id_payload(payload["options"])
+    if isinstance(payload.get("response_format"), dict) and payload["response_format"].get("regex") is None:
+        payload["response_format"] = {k: v for k, v in payload["response_format"].items() if k != "regex"}
+    return payload
 
 
 class TopLogprob(BaseModel):
@@ -121,6 +159,8 @@ class AssistantMessage(BaseModel):
 
 
 class ChatCompletionChoice(BaseModel):
+    model_config = ConfigDict(extra="allow")  # each choice's ``receipt`` when several are requested
+
     index: int
     message: AssistantMessage
     logprobs: ChoiceLogprobs | None = None
