@@ -85,6 +85,7 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "logits": "939f4dab80703cf2dcfff45656a84cc8fbd6602a8a9c3e6d75ada13ce0c5a5fb",
         "logits_q8_0": "000765286f26f9e922fc23f5dfcbae1b7b53b5574525015b2a956b272252b3f9",
         "logits_q4_0": "5cd1ce3aa760e2917c64c1815e9b32543b4b54059b9eedcb8de09044a3cb61fa",
+        "eval": "5083f67f1060e5eb61e61e230f7160683d9fdaf3eb02079b847f202f03419aa7",
     },
     "qwen2.5": {
         "import": "9bf78203fabbc1d93a5f387456ff1d755d7fef36396351c911f51656c898eb99",
@@ -93,6 +94,7 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "logits": "cafb17dbac5ba9251af7a494246a70f258d6de372bab1a273897f07e74993404",
         "logits_q8_0": "e599b1133d04f3c72c0e6e32c24f78c9ea4d67db3424e7e8f0f54c05aa6fa831",
         "logits_q4_0": "67b3cd51a74b369fb4833eaf6392aaf08cd423315df2af9644695e736e3d4925",
+        "eval": "30e0fa10d3a5e611d8cf2a7f42e0b13c348054cb9f70130232d553d47f422c59",
     },
     "qwen2.5-1.5b": {
         "import": "626d11f6abd38e28450448eae2574b29de3212825a143f37bdbf145673e8556d",
@@ -102,6 +104,7 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "logits": "a4eff454791a62e4cfe01c24bd57f9af78809387ae9d699ecf162eeb1007a0a4",
         "logits_q8_0": "fc6ded7859eb616f4baa45870d5e3ad3af9f45757378f288db62d368986b3a73",
         "logits_q4_0": "e4a63bc4b199dfbed9767082df34718a07d3d91230a0209e1161c7bb6138e4a5",
+        "eval": "278e17c809204c33ad8d0bf27b655a151638b964918c8e1211ebb9776e7088e9",
     },
     "qwen3": {  # greedy chat rendered with enable_thinking=False
         "import": "c34b4666335e7e0dbe110ee9b9fc78936b84391a57a420688fd78036ad6df5b7",
@@ -110,6 +113,7 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "logits": "54400823b346fbacdb126d5ccca19e12f7e8d3c0d04a94ee546abfa840d1523a",
         "logits_q8_0": "21cd894f2d19253192801ec012209624721e1e401bf530b63d39c7e79900eb5a",
         "logits_q4_0": "c49da076a0b5ddb18fcf4984f706eccdc1a044048c334c75b6d021eade247080",
+        "eval": "1aaf1cc01dcc873631dd340a7fc40ab9dc4f6ff4281559618a0c23377cfae54f",
     },
     "tinyllama": {
         "import": "b02b4f3085396f3a0b20e07f5b875c9e4a0fbf996dcbc954953bc7d7346b4a4e",
@@ -118,6 +122,7 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "logits": "1b40cd4dc37c6179feee4abb69e05b42edc3468200e98390685965d893241a1b",
         "logits_q8_0": "5474bab37def485b16798648b8fe338db268e03f1b6544dcb98bc861ff976f53",
         "logits_q4_0": "f0b07f628f930e3f568f480b6bcb0d2c3be737e45495cac2263b03cd38a28f0f",
+        "eval": "1767104e39c97f0b1b9c74663c380909b25fbfd2ec49b6ae67e853182b41bd38",
     },
     "olmo2": {
         "import": "183baa6ee6dcc08d855a34f1531b7e5cd1d918c21c6e8bef4cebde7ec675d118",
@@ -126,6 +131,7 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "logits": "41db902b34618b95d3c185d772cf1f10fa58ee3fbd4094a6fb257252528eb5ba",
         "logits_q8_0": "114b3719f3601bfe781d74af647bb13de3345b6fe9a43b11d49825c6ad461b74",
         "logits_q4_0": "e8488c34ee031d82c7faaaca629aa58ab3766afb3c9b9028a705e6a475249457",
+        "eval": "78f5cfddedb0bdd67e799ed89f2cec337eb8e034d6c9284808bdfd61a3f94a58",
     },
     "llama3.2": {
         "import": "1abe366cb3879f73b5fc2c1a6ad191eab99a70b943942bcb98788eff17010f41",
@@ -135,6 +141,7 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "logits": "ba7281c7d31afaeb55ed8b259592efd11f71587705584be75ac71197ad02cb73",
         "logits_q8_0": "cea6797804d5b332e889f6d26d7611b31cfa708c296b502a04171198905214e6",
         "logits_q4_0": "44e3f9fc78a682bfddfb99aab425250e8ee49ce7d044ef28f76c8184870042e5",
+        "eval": "9ed44b0815c4c8b65a43bbbbb0620b8f2f64155dc61e3b6bf5ddd23aab60eacd",
     },
     "gemma3": {  # the licence text is the Gemma terms link (the repository has no licence file)
         "import": "b03e32d2236a67ff0f06e85c69285df2067ec6951bd3f52c502f13f00915e5e9",
@@ -143,6 +150,7 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "logits": "38a0996f57e80c1602e23e89b2897b0cca5422ab49b212e0ee38dfb4886d5360",
         "logits_q8_0": "7546cc1c60e56ed7cc4efd617b81c11ac7f7ebfa8f23e843313be6f850eb864b",
         "logits_q4_0": "0628e1c83908df847416569b6df78cff54766af22258ed98e31a8b7dd83bcf1b",
+        "eval": "9d8d8b3c63d6cb7087fbb06f5d101fcdd1a278d0720f3dcea114f6a65410b946",
     },
     # Embedding model: the float32 bits of the EMBEDDING_TEXTS embeddings (last-token pooling, query prompt).
     "qwen3-embedding": {
@@ -162,4 +170,14 @@ TINY_TRACE_FINGERPRINT = {
     "phi3": "c6c900b68cd750245988c3f88f0885dd0bb16c3d92b043fc8fb9d87baa02f6b1",
     "qwen2": "9049474d08a5d8987fcbf8ae06f19e0c3f96aa63c7afcccf5343110654cb369c",
     "qwen3": "ae441bb1809c65a97d4b36d0ed01c25cc2454c9439b2da2798c6173309c5cc25",
+}
+
+# dllm eval (tests/test_evaluation.py): fingerprints over every per-token log-probability of the bundled tasks
+# tests/data/eval-tiny.jsonl (multiple choice) and eval-text.jsonl (perplexity), for the placeholder bigram model and
+# the tiny imported Llama of tests/test_engine_import.py.
+EVAL_FINGERPRINTS = {
+    "bigram_multiple_choice": "5d8c7c3e14555e68584266bf8b330ae362e38152e9eb40adcf27a9f99347700d",
+    "bigram_perplexity": "197a7650abe9257cdf2def0085eebbc31ae5540afe20d4ae4b3589e2583332be",
+    "tiny_multiple_choice": "95d8333e39566d7f7442630ebdcd695d78906f66ef08c73bdcc827a1740c1e05",
+    "tiny_perplexity": "f7c09b64af3a7e5762bf6f8cc6e393f03464c5efb5e873a157b921e964c43e35",
 }

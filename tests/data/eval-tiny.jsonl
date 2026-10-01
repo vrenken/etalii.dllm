@@ -1,0 +1,5 @@
+{"context": "The capital of France is", "choices": [" Paris", " Rome", " Berlin"], "answer": 0}
+{"context": "Water freezes at zero degrees", "choices": [" Celsius", " Fahrenheit"], "answer": 0}
+{"context": "One, two, three,", "choices": [" four", " seven", " ten"], "answer": 0}
+{"context": "The opposite of hot is ", "choices": ["cold", "warm"], "answer": 0}
+{"context": "Bees make", "choices": [" honey", " milk", " silk", " wool"], "answer": 0}

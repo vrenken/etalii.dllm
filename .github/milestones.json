@@ -13,5 +13,6 @@
   {"title": "Phase 11: Interpretability and editing", "due_on": "2028-04-30", "description": "Activation tracing, logit lens, embedding explorer and word clouds, attention maps, steering vectors, ROME model edits and sparse autoencoders, all bit-reproducible"},
   {"title": "Phase 12: Retrieval and grounding", "due_on": "2028-06-30", "description": "Embedding models with last-token pooling and query prompts, an exact reproducible document index, chats grounded in it in every front end, an MCP search tool"},
   {"title": "Phase 13: Speed without changing a bit", "due_on": "2028-08-31", "description": "Register-tiled float32 and Q8_0 matmuls, tiled prefill attention, parallel fused activations, a low-latency thread pool; every golden hash unchanged"},
-  {"title": "Phase 14: Lean and fast decoding", "due_on": "2028-10-31", "description": "Speculative decoding that changes no bit, Q4_0 weights with exact integer sums, one copy of the weights in memory"}
+  {"title": "Phase 14: Lean and fast decoding", "due_on": "2028-10-31", "description": "Speculative decoding that changes no bit, Q4_0 weights with exact integer sums, one copy of the weights in memory"},
+  {"title": "Phase 15: Verifiable outputs", "due_on": "2028-12-31", "description": "Content-derived receipts for every response, dllm replay to verify them bit for bit, a prompt cache that survives restarts, reproducible evaluation"}
 ]

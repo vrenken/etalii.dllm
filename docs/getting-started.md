@@ -276,7 +276,9 @@ The response ids and `system_fingerprint` are derived from the request and the w
 byte-identical responses, and a streamed answer is identical to the non-streamed one. The server reuses the work of
 earlier requests that start the same way (a chat's earlier turns, a shared system prompt), so follow-up turns are
 several times faster; `usage` reports the reused tokens (`cached_tokens`), which is the only thing that differs.
-`--prompt-cache 0` turns this off, see [prompt caching](api.md#prompt-caching). Temperature defaults to 0
+`--prompt-cache 0` turns this off, and `--persistent-cache DIR` keeps that work across restarts (a long shared
+system prompt is then answered in 0.4 s instead of 6.3 s right after a restart); see
+[prompt caching](api.md#prompt-caching). Temperature defaults to 0
 (greedy) on every endpoint. All options, how tools and structured output work, and the differences from the real
 APIs: [HTTP API](api.md).
 
@@ -418,6 +420,31 @@ It runs a fixed workload (every kernel, the Unicode handling, the model's tokeni
 answer) and prints one fingerprint per part plus a combined `verify:` line, together with the environment (Python,
 instruction set, device). The kernel and Unicode parts are also compared with the values of the release, so a single
 machine already shows `(as released)` or `(DIFFERS from release)`; `--json` prints the report as JSON.
+
+## 10. Prove an answer later
+
+Any answer can come with a receipt: the request and hashes of the output, enough for anyone with the same model to
+re-run it and check every bit.
+
+```bash
+dllm --model smollm2-135m.dllm chat "Name three colours." --receipt colours.json
+dllm --model smollm2-135m.dllm replay colours.json      # "verified: the replay gave the same output, bit for bit"
+```
+
+The server front ends return one when the request says `"receipt": true`, and `POST /v1/receipts/verify` (or the MCP
+`verify_receipt` tool) checks one. Details: [receipts](receipts.md).
+
+## 11. Score a model reproducibly
+
+`dllm eval` measures perplexity on a text or multiple-choice accuracy from a JSON lines file, with a fingerprint
+over every log-probability, so two machines can check they measured the very same thing:
+
+```bash
+dllm --model smollm2-135m.dllm eval my-text.txt
+dllm --model smollm2-135m.dllm eval my-questions.jsonl   # {"context", "choices", "answer"} per line
+```
+
+Details: [evaluation](evaluation.md).
 
 ## What does not work yet
 

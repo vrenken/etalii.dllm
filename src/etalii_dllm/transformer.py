@@ -165,6 +165,31 @@ class KVCache:
     def truncate(self, length: int) -> None:
         del self.tokens[length:]
 
+    def export(self) -> tuple[list[int], np.ndarray, np.ndarray]:
+        """The tokens and copies of their keys and values, ``[layers, positions, kv_heads, head_dim]`` float32 (for
+        :class:`etalii_dllm.prompt_cache.CacheStore`)."""
+        length = len(self)
+        shape = (self._config.layers, length, self._config.kv_heads, self._config.head_dim)
+        keys, values = np.zeros(shape, dtype=np.float32), np.zeros(shape, dtype=np.float32)
+        for layer in range(len(self._keys) if length else 0):
+            stored_keys, stored_values = self._keys[layer][:length], self._values[layer][:length]
+            keys[layer] = stored_keys.numpy() if isinstance(stored_keys, CudaTensor) else stored_keys
+            values[layer] = stored_values.numpy() if isinstance(stored_values, CudaTensor) else stored_values
+        return list(self.tokens), keys, values
+
+    def restore(self, tokens: Sequence[int], keys: np.ndarray, values: np.ndarray) -> None:
+        """Fills an empty cache with what :meth:`export` returned. The rows are the same bits a recompute gives, on
+        either device, so a restored cache serves prompts exactly like the one it was exported from."""
+        expected = (self._config.layers, len(tokens), self._config.kv_heads, self._config.head_dim)
+        if len(self) or keys.shape != expected or values.shape != expected:
+            raise ValueError(f"a KV cache of shape {keys.shape} does not fit this model ({expected})")
+        for layer in range(self._config.layers):
+            if self.device == "cuda":
+                self.append(layer, 0, CudaTensor.upload(keys[layer]), CudaTensor.upload(values[layer]))
+            else:
+                self.append(layer, 0, keys[layer], values[layer])
+        self.tokens = list(tokens)
+
 
 def _rope_scaled(name: str, tensor: Tensor, config: TransformerConfig) -> Tensor:
     """``tensor`` with the rows feeding the rotated dimensions of each query or key head multiplied (elementwise,

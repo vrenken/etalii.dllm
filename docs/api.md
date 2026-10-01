@@ -15,6 +15,7 @@ what the CLI and the MCP server use, so all front ends give the same answer for 
 | `POST /api/chat`, `POST /api/generate` | Ollama | Streaming (NDJSON, the default), tools, `format` (JSON or a schema), logprobs, `raw` prompts. See [Ollama API](#ollama-api) |
 | `POST /api/embed`, `POST /api/embeddings` | Ollama | Same vectors as `/v1/embeddings` |
 | `GET /api/tags`, `POST /api/show`, `GET /api/ps`, `GET /api/version` | Ollama | The served model, its template and architecture |
+| `POST /v1/receipts/verify` | Extension | Re-runs a [generation receipt](receipts.md) and returns `{"ok", "reasons", "notes", "receipt"}` |
 | `GET /` | Browser | A chat page over the streamed `/v1/chat/completions`, with temperature, seed and system prompt; it marks a regenerated answer that is identical to the earlier one. Self-contained, nothing loaded from elsewhere |
 
 ## Determinism guarantees
@@ -31,6 +32,9 @@ what the CLI and the MCP server use, so all front ends give the same answer for 
   [Prompt caching](#prompt-caching)), which say how much work earlier requests saved; start the server with
   `--prompt-cache 0` to have those always 0 as well.
 - `system_fingerprint` (OpenAI) identifies the exact weights.
+- Every chat endpoint returns a [receipt](receipts.md) when the request says `"receipt": true`: the engine request and
+  hashes of the output, which anyone with the same weights can replay (`dllm replay`, `POST /v1/receipts/verify`).
+  Asking for one changes neither the answer nor the response id.
 
 ## Defaults and differences
 
@@ -62,6 +66,13 @@ the same as without it (`tests/test_prompt_cache.py`).
   off. Each cache holds one conversation and takes `2 x layers x kv_heads x head_dim x 4` bytes per token (about
   45 KB per token for SmolLM2-135M, 56 KB for Qwen2.5-1.5B). A cache serves one request at a time; a request whose
   prefix is cached but in use starts afresh. When the pool is full the least recently used cache goes.
+- `--persistent-cache DIR` (or `DLLM_PROMPT_CACHE_DIR`) also keeps the idle caches in `DIR`, so a restarted server
+  still skips the prefixes it has seen: with SmolLM2-135M on a 4-core cloud VM, the first answer after a restart
+  to a 1275-token prompt that shares a 1260-token system prompt with an earlier request takes 0.4 s instead of
+  6.3 s (the stored cache is 59 MB; loading it does not measurably slow the start). A stored cache is used only by the same weights (quantisation and steering
+  included) and engine version, and only when its SHA-256 checksum matches, so a damaged file is ignored rather than
+  read. The files hold the prompts' keys and values, from which the prompt text can be partly recovered: keep the
+  directory as private as the conversations.
 
 ## Concurrent requests
 

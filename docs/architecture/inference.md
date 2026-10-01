@@ -153,6 +153,12 @@ one. The only visible difference is the usage counter (`cached_tokens` in OpenAI
 `cache_read_input_tokens` for Anthropic), which depends on what ran before; `--prompt-cache 0` makes responses
 byte-identical regardless of history.
 
+With `--persistent-cache` a `CacheStore` mirrors the idle list on disk: on release the returned cache is exported
+(copied while no generation can hold it) and written to a temporary file that is then renamed, and files of
+evicted caches are deleted. A new engine loads the stored caches whose key (format, engine version, weights
+fingerprint) matches and whose SHA-256 checksum holds. The KV rows are the same bits on every device, so a cache
+written by a CPU run serves a GPU run too.
+
 ### Continuous batching
 
 When several requests decode at the same time, `Batcher` (`batching.py`) gathers their `forward_cached` calls and

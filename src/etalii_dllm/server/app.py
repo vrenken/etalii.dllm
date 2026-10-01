@@ -13,14 +13,14 @@ import argparse
 import base64
 from collections.abc import Iterator
 from importlib import resources
-from typing import Annotated
+from typing import Annotated, Any
 
 import numpy as np
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
-from etalii_dllm import __version__
+from etalii_dllm import __version__, receipts
 from etalii_dllm.chat import ChatMessage, ToolCall
 from etalii_dllm.engine import (
     ChatRequest,
@@ -145,7 +145,9 @@ def _chat_request(request: ChatCompletionRequest, engine: DllmEngine) -> ChatReq
     stop = [request.stop] if isinstance(request.stop, str) else list(request.stop or [])
     if len(stop) > 4:
         raise ValueError("at most 4 stop sequences are supported")
-    request_id = engine.derive_id("chatcmpl-", request.model_dump(mode="json", exclude={"stream", "stream_options"}))
+    request_id = engine.derive_id(
+        "chatcmpl-", request.model_dump(mode="json", exclude={"stream", "stream_options", "receipt"})
+    )
     return ChatRequest(
         messages=[_message(m) for m in request.messages],
         max_tokens=request.max_completion_tokens or request.max_tokens or DEFAULT_MAX_TOKENS,
@@ -184,7 +186,7 @@ def chat_completions(
             stream = engine.chat_stream(chat)
             include_usage = bool(request.stream_options and request.stream_options.include_usage)
             return StreamingResponse(
-                _chunks(engine, chat, stream, include_usage, chat.top_logprobs is not None),
+                _chunks(engine, chat, stream, include_usage, chat.top_logprobs is not None, bool(request.receipt)),
                 media_type="text/event-stream",
             )
         result = engine.chat_completion(chat)
@@ -213,6 +215,7 @@ def chat_completions(
             total_tokens=result.prompt_tokens + result.completion_tokens,
             prompt_tokens_details=PromptTokensDetails(cached_tokens=result.cached_tokens),
         ),
+        **({"receipt": result.receipt} if request.receipt else {}),
     )
 
 
@@ -220,13 +223,16 @@ def _sse(chunk: ChatCompletionChunk) -> str:
     return f"data: {chunk.model_dump_json()}\n\n"
 
 
-def _chunks(engine: DllmEngine, chat: ChatRequest, stream, include_usage: bool, logprobs: bool) -> Iterator[str]:
-    def chunk(delta: ChunkDelta, **fields) -> ChatCompletionChunk:
+def _chunks(
+    engine: DllmEngine, chat: ChatRequest, stream, include_usage: bool, logprobs: bool, receipt: bool = False
+) -> Iterator[str]:
+    def chunk(delta: ChunkDelta, extra: dict | None = None, **fields) -> ChatCompletionChunk:
         return ChatCompletionChunk(
             id=chat.request_id,
             model=engine.model.id,
             system_fingerprint=engine.system_fingerprint,
             choices=[ChunkChoice(delta=delta, **fields)],
+            **(extra or {}),
         )
 
     yield _sse(chunk(ChunkDelta(role="assistant", content="")))
@@ -243,7 +249,8 @@ def _chunks(engine: DllmEngine, chat: ChatRequest, stream, include_usage: bool, 
             )
             yield _sse(chunk(ChunkDelta(tool_calls=[call])))
         elif isinstance(event, Finished):
-            yield _sse(chunk(ChunkDelta(), finish_reason=event.finish_reason))
+            extra = {"receipt": event.receipt} if receipt else None
+            yield _sse(chunk(ChunkDelta(), extra, finish_reason=event.finish_reason))
             if include_usage:
                 usage = ChatCompletionUsage(
                     prompt_tokens=stream.prompt_tokens,
@@ -288,6 +295,16 @@ def embeddings(request: EmbeddingsRequest, engine: Engine) -> EmbeddingsResponse
     )
 
 
+@app.post("/v1/receipts/verify", response_model=None)
+def verify_receipt(receipt: dict[str, Any], engine: Engine) -> JSONResponse:
+    """Extension: re-runs the request a generation receipt records and says whether the output is the same."""
+    try:
+        verification = receipts.verify(engine, receipt)
+    except (ValueError, KeyError, TypeError) as problem:
+        return _error(f"not a valid receipt: {problem}")
+    return JSONResponse(verification.to_json())
+
+
 def main() -> None:
     import uvicorn
 
@@ -310,5 +327,6 @@ def main() -> None:
         embedding_model=args.embedding_model,
         speculate=args.speculate,
         draft_model=args.draft_model,
+        prompt_cache_dir=args.prompt_cache_dir,
     )
     uvicorn.run(app, host=args.host, port=args.port)

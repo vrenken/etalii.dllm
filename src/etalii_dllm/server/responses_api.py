@@ -124,6 +124,8 @@ class ResponsesRequest(BaseModel):
     stream: bool | None = None
     store: bool | None = None
     metadata: dict[str, str] | None = None
+    receipt: bool | None = None
+    """Extension: add a ``receipt`` to the response (see docs/receipts.md)."""
 
 
 def error(message: str, status: int = 400) -> JSONResponse:
@@ -256,7 +258,7 @@ def _prepare(request: ResponsesRequest, engine: DllmEngine) -> tuple[ChatRequest
         seed=request.seed or 0,
     )
     wants_logprobs = LOGPROBS_INCLUDE in (request.include or ()) or request.top_logprobs is not None
-    payload = request.model_dump(mode="json", exclude={"stream"})
+    payload = request.model_dump(mode="json", exclude={"stream", "receipt"})
     chat = ChatRequest(
         messages=instructions + conversation,
         max_tokens=request.max_output_tokens or DEFAULT_MAX_OUTPUT_TOKENS,
@@ -416,6 +418,8 @@ class _Events:
         else:
             self.response["status"] = "completed"
             kind = "response.completed"
+        if self.request.receipt:
+            self.response["receipt"] = event.receipt
         self.final = self.response
         return self._event(kind, response=self.response)
 

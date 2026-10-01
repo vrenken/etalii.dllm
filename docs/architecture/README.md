@@ -156,6 +156,8 @@ AdamW from `grad.hpp`.
 | `cuda.py` | The GPU backend: finding NVRTC, `CudaTensor`, device-side operations. |
 | `importing/` | Readers for safetensors and GGUF (with GGML dequantisation), the Hugging Face download pinned to a commit, the licence policy, and `dllm import`. |
 | `interpret/` | Interpretability tools on the decoder's own pass: activation tracing through `LayerHook` (observation cannot change a bit), the logit lens, the embedding explorer, attention maps and their HTML/SVG views (`dllm lens`, `attention`, `neighbours`), steering vectors (`steer`, `--steer`), ROME edits (`edit`) and sparse autoencoders (`sae`); [interpretability](../interpretability.md). |
+| `evaluation.py` | `dllm eval`: log-likelihood scoring (perplexity and multiple choice, as lm-evaluation-harness does) with fixed-order sums and a fingerprint over every log-probability; [evaluation](../evaluation.md). |
+| `receipts.py` | Generation receipts: the engine request and hashes of the output as content-addressed JSON, and `verify`, which replays a receipt (`dllm replay`, `POST /v1/receipts/verify`); [receipts](../receipts.md). |
 | `retrieval.py` | Exact document retrieval: fixed chunking, the `dllm index` file (vectors plus chunks in safetensors), cosine search with a total order, and the `Retriever` that grounds chats (`--index`); [retrieval](../retrieval.md). |
 | `training/` | Gradients of the decoder, AdamW, fixed data order and checkpoints that resume bit for bit (`dllm finetune`), for all parameters or LoRA adapters. |
 | `server/` | The OpenAI Chat Completions (`app.py`, `contracts.py`), OpenAI Responses (`responses_api.py`), Anthropic (`anthropic_api.py`, `anthropic_contracts.py`) and Ollama (`ollama_api.py`) wire formats, and the chat page `static/chat.html`. |

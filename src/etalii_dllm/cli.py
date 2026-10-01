@@ -190,12 +190,23 @@ def main(argv: list[str] | None = None) -> int:
         help="an MCP server whose tools the model may call (repeatable), e.g. 'time=uvx mcp-server-time'",
     )
     chat.add_argument("--max-tool-rounds", type=int, default=8, help="MCP tool rounds before the answer is cut off")
+    chat.add_argument("--receipt", metavar="FILE", help="write the answer's generation receipt to FILE (JSON)")
     for command in (generate, chat):
         command.add_argument("--max-tokens", type=int, default=64 if command is generate else 256)
         command.add_argument("--temperature", type=float, default=0.0)
         command.add_argument("--top-k", type=int, default=0)
         command.add_argument("--top-p", type=float, default=1.0)
         command.add_argument("--seed", type=int, default=0)
+
+    evaluate = commands.add_parser("eval", help="score the model on a task file: perplexity or multiple choice")
+    evaluate.add_argument("task", metavar="TASK", help=".jsonl ({'context','choices','answer'} or {'text'}) or .txt")
+    evaluate.add_argument("--max-length", type=int, help="longest window for perplexity texts (default: 1024)")
+    evaluate.add_argument("--json", action="store_true", help="print the full report, per-item results included")
+    evaluate.add_argument("-o", "--output", help="also write the full report (JSON) to this file")
+
+    replay = commands.add_parser("replay", help="re-run a generation receipt and check the output is the same")
+    replay.add_argument("receipt", metavar="RECEIPT", help="the receipt file (JSON), or - for standard input")
+    replay.add_argument("--json", action="store_true", help="print the verification as JSON")
 
     from etalii_dllm.interpret import commands as interpret_commands
 
@@ -278,6 +289,7 @@ def main(argv: list[str] | None = None) -> int:
         embedding_model=args.embedding_model,
         speculate=args.speculate,
         draft_model=args.draft_model,
+        prompt_cache_dir=args.prompt_cache_dir,
     )
     try:
         engine = default_engine()
@@ -295,6 +307,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "verify":
         return _verify(engine, args.json)
+
+    if args.command == "replay":
+        return _replay(engine, args)
+
+    if args.command == "eval":
+        return _evaluate(engine, args)
 
     if args.command in interpret_commands.COMMANDS:
         return interpret_commands.run(args, engine)
@@ -378,6 +396,63 @@ def _verify(engine: DllmEngine, as_json: bool) -> int:
     return 1 if report.mismatches else 0
 
 
+def _evaluate(engine: DllmEngine, args: argparse.Namespace) -> int:
+    from etalii_dllm import evaluation
+
+    def progress(done: int, total: int) -> None:
+        print(f"item {done}/{total}", file=sys.stderr)
+
+    try:
+        items = evaluation.read_task(args.task)
+        report = evaluation.evaluate(
+            engine, items, task=Path(args.task).name, max_length=args.max_length, progress=progress
+        )
+    except evaluation.EvaluationError as error:
+        print(f"dllm eval: {error}", file=sys.stderr)
+        return 1
+    text = json.dumps(report, indent=2, ensure_ascii=False)
+    if args.output:
+        Path(args.output).write_text(text + "\n", encoding="utf-8")
+    if args.json:
+        print(text)
+        return 0
+    for key, value in report.items():
+        if key != "results":
+            print(f"{key + ':':<20}{value}")
+    return 0
+
+
+def _replay(engine: DllmEngine, args: argparse.Namespace) -> int:
+    from etalii_dllm import receipts
+
+    try:
+        text = sys.stdin.read() if args.receipt == "-" else Path(args.receipt).read_text(encoding="utf-8")
+        receipt = json.loads(text)
+        if not isinstance(receipt, dict):
+            raise ValueError(f"not a {receipts.FORMAT} receipt")
+        verification = receipts.verify(engine, receipt)
+    except (OSError, ValueError, KeyError) as error:
+        print(f"dllm replay: {error}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(verification.to_json(), indent=2, ensure_ascii=False))
+    else:
+        print(f"receipt:            {receipt.get('id')}")
+        print(f"model:              {receipt.get('model')}  ({receipt.get('system_fingerprint')})")
+        for note in verification.notes:
+            print(f"note:               {note}")
+        for reason in verification.reasons:
+            print(f"differs:            {reason}")
+        print("verified: the replay gave the same output, bit for bit" if verification.ok else "NOT verified")
+    return 0 if verification.ok else 1
+
+
+def _write_receipt(path: str | None, finished: Finished) -> None:
+    if path and finished.receipt is not None:
+        Path(path).write_text(json.dumps(finished.receipt, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"receipt: {path} ({finished.receipt['id']})", file=sys.stderr)
+
+
 def _write(text: str) -> None:
     """Prints generated text as it arrives."""
     sys.stdout.write(text)
@@ -414,6 +489,7 @@ def _chat(engine: DllmEngine, args: argparse.Namespace, options: SamplingOptions
                 f"fingerprint: {event.fingerprint}  tokens: {event.completion_tokens}  finish: {event.finish_reason}",
                 file=sys.stderr,
             )
+            _write_receipt(args.receipt, event)
     return 0
 
 
@@ -446,6 +522,7 @@ def _chat_with_mcp(engine: DllmEngine, args: argparse.Namespace, request: ChatRe
             f"  finish: {finished.finish_reason}",
             file=sys.stderr,
         )
+        _write_receipt(args.receipt, finished)  # the last round's request carries the tool results
         return 0
 
     try:

@@ -17,7 +17,7 @@ from etalii_dllm.batching import Batcher
 from etalii_dllm.grammar import TokenConstraint
 from etalii_dllm.models import LanguageModel
 from etalii_dllm.numerics import fingerprint, log_softmax
-from etalii_dllm.prompt_cache import PromptCache
+from etalii_dllm.prompt_cache import CacheStore, PromptCache
 from etalii_dllm.sampling import Sampler, SamplingOptions
 from etalii_dllm.speculative import Drafter, DraftModel, PromptLookup
 from etalii_dllm.tokenization import Tokenizer
@@ -293,13 +293,15 @@ class Generator:
         prompt_cache: int = 0,
         speculate: int = 0,
         draft_model: Any = None,
+        prompt_cache_dir: str | None = None,
     ) -> None:
         """``prompt_cache`` is how many KV caches of finished generations to keep for reuse by later prompts that
         share a prefix (:mod:`etalii_dllm.prompt_cache`); 0, or a model without a KV cache, disables it. It never
         changes the output. Models that can run several sequences in one pass (``forward_batch``) decode concurrent
         generations together (:mod:`etalii_dllm.batching`), which never changes the output either. ``speculate``
         drafts that many tokens per step and checks them in one pass (:mod:`etalii_dllm.speculative`), with
-        ``draft_model`` or else from the text so far; it never changes the output either."""
+        ``draft_model`` or else from the text so far; it never changes the output either. ``prompt_cache_dir`` keeps
+        the prompt cache on disk across restarts (:class:`etalii_dllm.prompt_cache.CacheStore`)."""
         if speculate < 0:
             raise ValueError("speculate must be non-negative")
         if not hasattr(model, "forward_cached_last"):
@@ -311,9 +313,15 @@ class Generator:
         self.stop_tokens = frozenset(t for t in [tokenizer.end_of_sequence, *stop_tokens] if t >= 0)
         new_cache = getattr(model, "new_cache", None)
         self.batcher = Batcher(model) if hasattr(model, "forward_batch") else None  # type: ignore[arg-type]
-        self.prompt_cache: PromptCache | None = (
-            PromptCache(new_cache, prompt_cache) if new_cache is not None and prompt_cache > 0 else None
-        )
+        self.prompt_cache: PromptCache | None = None
+        if new_cache is not None and prompt_cache > 0:
+            store = None
+            if prompt_cache_dir:
+                from etalii_dllm import __version__
+
+                key = f"dllm-kv/1|{__version__}|{getattr(model, 'weights_fingerprint', '')}"
+                store = CacheStore(prompt_cache_dir, key)
+            self.prompt_cache = PromptCache(new_cache, prompt_cache, store)
 
     def new_drafter(self) -> Drafter | None:
         """A drafter for one generation, or ``None`` when speculation is off."""
