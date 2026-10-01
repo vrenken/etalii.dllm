@@ -92,7 +92,9 @@ REFERENCE_MODELS = {
 # Sentence-transformers embedding models (last-token pooling, query instructions): compared with transformers'
 # AutoModel hidden states, pooled and normalised the sentence-transformers way.
 EMBEDDING_MODELS = {
-    "qwen3-embedding": ReferenceModel("Qwen/Qwen3-Embedding-0.6B", "main", "Apache-2.0"),
+    "qwen3-embedding": ReferenceModel(
+        "Qwen/Qwen3-Embedding-0.6B", "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3", "Apache-2.0"
+    ),
 }
 _ALL_MODELS = {**REFERENCE_MODELS, **EMBEDDING_MODELS}
 

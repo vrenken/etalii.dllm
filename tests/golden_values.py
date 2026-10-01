@@ -136,6 +136,11 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "logits": "38a0996f57e80c1602e23e89b2897b0cca5422ab49b212e0ee38dfb4886d5360",
         "logits_q8_0": "7546cc1c60e56ed7cc4efd617b81c11ac7f7ebfa8f23e843313be6f850eb864b",
     },
+    # Embedding model: the float32 bits of the EMBEDDING_TEXTS embeddings (last-token pooling, query prompt).
+    "qwen3-embedding": {
+        "import": "3187399f4e35c2a2f236a8f2ab4435e1fd5f6d9cb40b73ae69c6507fb936066a",
+        "embedding": "a2db5e8e1ba53077b201e08ab1616d1dc6681c2c1e283aae5fea5a896f2e6b37",
+    },
 }
 
 # Trace.fingerprint() of the tiny models over tests/test_interpret.py's PROMPT (every activation, attention included).

@@ -413,7 +413,7 @@ machine already shows `(as released)` or `(DIFFERS from release)`; `--json` prin
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
   Qwen2.5-0.5B-Instruct, Qwen2.5-1.5B-Instruct, Qwen3-0.6B, TinyLlama-1.1B-Chat, OLMo-2-1B-Instruct,
   Llama-3.2-1B-Instruct and gemma-3-270m-it (tokenizer, chat template, logits within 1e-3 and the
-  same greedy answer; see `tests/test_reference_models.py`). Other Llama/Qwen2/Qwen3 models should work but are not
+  same greedy answer; see `tests/test_reference_models.py`), and so is the embedding model Qwen3-Embedding-0.6B. Other Llama/Qwen2/Qwen3 models should work but are not
   checked. Mistral, Granite, Phi-3 and Gemma 2 are checked against `transformers` only on tiny synthetic models (their real
   checkpoints are gated or too large for a CI runner in float32). Fine-tuning works for Llama, Mistral, Qwen2 and
   Qwen3, not yet for OLMo 2, Granite, Gemma or Phi models that use LongRoPE; Phi-3/Phi-4-mini with LongRoPE run up to their
