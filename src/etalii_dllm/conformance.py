@@ -308,6 +308,8 @@ def _little_endian(values: np.ndarray) -> np.ndarray:
 
 def _save(directory: Path, case: str, key: str, values: np.ndarray) -> dict[str, Any]:
     data = _little_endian(np.asarray(values))
+    if data.dtype.kind == "f":  # NaN payloads and signs are not specified (they differ between CPUs): write one NaN
+        data = np.where(np.isnan(data), data.dtype.type(math.nan), data).astype(data.dtype)
     relative = f"{case}/{key}.bin"
     path = directory / relative
     path.parent.mkdir(parents=True, exist_ok=True)
