@@ -20,6 +20,7 @@ ruff check . && ruff format --check .    # CI runs both
 dllm generate --prompt "Hi" --temperature 0.8 --seed 7
 dllm-server                  # http://localhost:5080/v1/chat/completions
 dllm-mcp                     # MCP over stdio
+dllm-tools --tool calculator    # built-in deterministic tools as an MCP server (also `dllm chat --tool`)
 docker build -t etalii-dllm .   # server image (Dockerfile, docker/entrypoint.sh); published by .github/workflows/docker.yml
 ```
 
@@ -48,7 +49,9 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
   adapters, always merged into the weights; the PEFT format), `grammar`
   (JSON-schema constrained decoding over a token trie), `tools` (tool calling in the Hermes `<tool_call>` format), `interpret/` (activation tracing via `LayerHook`, logit lens,
   embedding explorer, attention maps, steering vectors, ROME edits, sparse autoencoders; `dllm lens|attention|
-  neighbours|steer|edit|sae`, `docs/interpretability.md`), `receipts` (generation receipts and `dllm replay`, `docs/receipts.md`), `evaluation` (`dllm eval`,
+  neighbours|steer|edit|sae`, `docs/interpretability.md`), `receipts` (generation receipts, receipt chains and `dllm replay`, `docs/receipts.md`), `transcripts` (agent transcripts
+  and their offline replay), `builtin_tools` (deterministic calculator/files/documents tools, `dllm chat --tool`,
+  `dllm-tools`; `docs/agents.md`), `evaluation` (`dllm eval`,
   `docs/evaluation.md`), `retrieval` (exact document index, `dllm index`, chats
   grounded with `--index`, embedding-model pooling in `engine.embed`; `docs/retrieval.md`).
   Tests compare against the reference packages `gguf`, `safetensors` and `tokenizers` (dev dependencies).

@@ -7,6 +7,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 from etalii_dllm import cuda
 from etalii_dllm.chat import ChatMessage
@@ -189,8 +190,18 @@ def main(argv: list[str] | None = None) -> int:
         metavar="[NAME=]COMMAND|URL",
         help="an MCP server whose tools the model may call (repeatable), e.g. 'time=uvx mcp-server-time'",
     )
+    chat.add_argument(
+        "--tool",
+        action="append",
+        default=[],
+        metavar="NAME[=ARG]",
+        help="a built-in deterministic tool the model may call (repeatable): calculator, files=DIR, documents",
+    )
     chat.add_argument("--max-tool-rounds", type=int, default=8, help="MCP tool rounds before the answer is cut off")
     chat.add_argument("--receipt", metavar="FILE", help="write the answer's generation receipt to FILE (JSON)")
+    chat.add_argument(
+        "--transcript", metavar="FILE", help="with MCP tools: write the whole agent run to FILE (dllm replay checks it)"
+    )
     for command in (generate, chat):
         command.add_argument("--max-tokens", type=int, default=64 if command is generate else 256)
         command.add_argument("--temperature", type=float, default=0.0)
@@ -205,7 +216,9 @@ def main(argv: list[str] | None = None) -> int:
     evaluate.add_argument("-o", "--output", help="also write the full report (JSON) to this file")
 
     replay = commands.add_parser("replay", help="re-run a generation receipt and check the output is the same")
-    replay.add_argument("receipt", metavar="RECEIPT", help="the receipt file (JSON), or - for standard input")
+    replay.add_argument(
+        "receipt", metavar="FILE", help="a receipt, a receipt chain (JSON list) or agent transcript; - reads stdin"
+    )
     replay.add_argument("--json", action="store_true", help="print the verification as JSON")
 
     from etalii_dllm.interpret import commands as interpret_commands
@@ -428,8 +441,12 @@ def _replay(engine: DllmEngine, args: argparse.Namespace) -> int:
     try:
         text = sys.stdin.read() if args.receipt == "-" else Path(args.receipt).read_text(encoding="utf-8")
         receipt = json.loads(text)
+        if isinstance(receipt, list):
+            return _replay_chain(engine, receipt, args.json)
         if not isinstance(receipt, dict):
             raise ValueError(f"not a {receipts.FORMAT} receipt")
+        if "transcript" in receipt:
+            return _replay_transcript(engine, receipt, args.json)
         verification = receipts.verify(engine, receipt)
     except (OSError, ValueError, KeyError) as error:
         print(f"dllm replay: {error}", file=sys.stderr)
@@ -445,6 +462,44 @@ def _replay(engine: DllmEngine, args: argparse.Namespace) -> int:
             print(f"differs:            {reason}")
         print("verified: the replay gave the same output, bit for bit" if verification.ok else "NOT verified")
     return 0 if verification.ok else 1
+
+
+def _replay_chain(engine: DllmEngine, chain: list, as_json: bool) -> int:
+    from etalii_dllm import receipts
+
+    if not all(isinstance(r, dict) for r in chain):
+        raise ValueError(f"a receipt chain is a list of {receipts.FORMAT} receipts")
+    outcome = receipts.verify_chain(engine, chain)
+    if as_json:
+        print(json.dumps(outcome.to_json(), indent=2, ensure_ascii=False))
+    else:
+        print(f"chain:              {len(chain)} turns, {chain[0].get('id')} .. {chain[-1].get('id')}")
+        print(f"model:              {chain[0].get('model')}  ({chain[0].get('system_fingerprint')})")
+        for note in outcome.notes:
+            print(f"note:               {note}")
+        for reason in outcome.reasons:
+            print(f"differs:            {reason}")
+        verdict = "verified: every turn gave the same output and continues the one before"
+        print(verdict if outcome.ok else "NOT verified")
+    return 0 if outcome.ok else 1
+
+
+def _replay_transcript(engine: DllmEngine, transcript: dict, as_json: bool) -> int:
+    from etalii_dllm import transcripts
+
+    outcome = transcripts.replay(engine, transcript)
+    if as_json:
+        print(json.dumps(outcome.to_json(), indent=2, ensure_ascii=False))
+    else:
+        print(f"transcript:         {transcript.get('id')}  ({len(transcript['rounds'])} rounds)")
+        print(f"model:              {transcript.get('model')}  ({transcript.get('system_fingerprint')})")
+        for note in outcome.notes:
+            print(f"note:               {note}")
+        for reason in outcome.reasons:
+            print(f"differs:            {reason}")
+        verdict = "verified: every round gave the same output, bit for bit"
+        print(verdict if outcome.ok else "NOT verified")
+    return 0 if outcome.ok else 1
 
 
 def _write_receipt(path: str | None, finished: Finished) -> None:
@@ -473,7 +528,7 @@ def _chat(engine: DllmEngine, args: argparse.Namespace, options: SamplingOptions
     request = ChatRequest(
         [*messages, ChatMessage("user", args.message)], args.max_tokens, options, response_format=response_format
     )
-    if args.mcp_config or args.mcp_server:
+    if args.mcp_config or args.mcp_server or args.tool:
         return _chat_with_mcp(engine, args, request)
     try:
         stream = engine.chat_stream(request)
@@ -496,16 +551,27 @@ def _chat(engine: DllmEngine, args: argparse.Namespace, options: SamplingOptions
 def _chat_with_mcp(engine: DllmEngine, args: argparse.Namespace, request: ChatRequest) -> int:
     import anyio
 
-    from etalii_dllm import mcp_host
+    from etalii_dllm import builtin_tools, mcp_host, transcripts
     from etalii_dllm.engine import ToolCallEvent
 
     async def run() -> int:
         finished: Finished | None = None
-        servers = mcp_host.load_config(args.mcp_config) if args.mcp_config else []
-        servers += [mcp_host.parse_server(spec) for spec in args.mcp_server]
+        configs = mcp_host.load_config(args.mcp_config) if args.mcp_config else []
+        configs += [mcp_host.parse_server(spec) for spec in args.mcp_server]
+        servers: list[mcp_host.McpServerConfig] | dict[str, Any] = configs
+        if args.tool:
+            names = [c.name for c in configs]
+            if len(set(names)) != len(names) or "tools" in names:
+                raise mcp_host.McpHostError("MCP server names must be unique ('tools' is the built-in tools)")
+            servers = {**{c.name: c for c in configs}, "tools": builtin_tools.server(args.tool, engine)}
         async with mcp_host.McpHost(servers) as host:
             print(f"tools: {', '.join(t.name for t in host.tools) or '(none)'}", file=sys.stderr)
+            recorder = None
+            if args.transcript:
+                recorder = transcripts.Recorder(engine, request, host.tools, args.max_tool_rounds, host.servers)
             async for event in mcp_host.chat(engine, request, host, args.max_tool_rounds):
+                if recorder is not None:
+                    recorder.add(event)
                 if isinstance(event, TextDelta):
                     _write(event.text)
                 elif isinstance(event, ToolCallEvent):
@@ -523,6 +589,11 @@ def _chat_with_mcp(engine: DllmEngine, args: argparse.Namespace, request: ChatRe
             file=sys.stderr,
         )
         _write_receipt(args.receipt, finished)  # the last round's request carries the tool results
+        if recorder is not None:
+            transcript = recorder.transcript()
+            text = json.dumps(transcript, indent=2, ensure_ascii=False) + "\n"
+            Path(args.transcript).write_text(text, encoding="utf-8")
+            print(f"transcript: {args.transcript} ({transcript['id']})", file=sys.stderr)
         return 0
 
     try:

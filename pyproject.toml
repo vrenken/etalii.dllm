@@ -38,6 +38,7 @@ reference = ["torch>=2.4", "transformers>=4.50", "peft>=0.13"]
 dllm = "etalii_dllm.cli:main"
 dllm-server = "etalii_dllm.server.app:main"
 dllm-mcp = "etalii_dllm.mcp_server:main"
+dllm-tools = "etalii_dllm.builtin_tools:main"
 
 [project.urls]
 Repository = "https://github.com/vrenken/etalii.dllm"

@@ -172,6 +172,7 @@ module map), with Mermaid diagrams.
 | 13. Speed without changing a bit ✅ | ✅ Activations on the thread pool and a fused SwiGLU; ✅ register-tiled float32 and Q8_0 matmuls; ✅ tiled prefill attention; ✅ a thread pool that spins briefly before sleeping, and kernels really built at `-O3`. Prefill is about 3× faster, decoding 1.7×, and every golden hash is unchanged. See [Phase 13](docs/kernels.md#phase-13-tiles) and [benchmarks](docs/benchmarks.md) |
 | 14. Lean and fast decoding ✅ | ✅ Speculative decoding that never changes a token (`--speculate`, `--draft-model`); ✅ 4-bit Q4_0 weights; ✅ one copy of the weights in memory; ✅ benchmarks after Phase 13. See [speculative decoding](docs/api.md#speculative-decoding), [Q4_0](docs/kernels.md#q4_0-quantisation) and [memory](docs/kernels.md#memory) |
 | 15. Verifiable outputs ✅ | ✅ Receipts for every response that anyone can check later (#133); ✅ `dllm replay` to verify a receipt bit for bit (#134); ✅ a prompt cache that survives restarts with the same bits (`--persistent-cache`, #135); ✅ reproducible evaluation with `dllm eval` (#136). See [receipts](docs/receipts.md) and [evaluation](docs/evaluation.md) |
+| 16. Reproducible agents ✅ | ✅ Agent transcripts of MCP tool loops (#139); ✅ offline replay of an agent run with the recorded tool results (#140); ✅ built-in deterministic tools (#141); ✅ receipt chains for whole conversations (#142). See [reproducible agents](docs/agents.md) |
 
 ## Working with Claude Code
 

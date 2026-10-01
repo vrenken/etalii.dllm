@@ -39,7 +39,8 @@ streamed answer carries the same receipt as the non-streamed one.
   "output": {
     "tokens": "3a7f...", "content": "e4c2...", "tool_calls": "4f53...",
     "finish_reason": "stop", "prompt_tokens": 31, "completion_tokens": 9
-  }
+  },
+  "previous": "rcpt_..."
 }
 ```
 
@@ -50,6 +51,7 @@ streamed answer carries the same receipt as the non-streamed one.
   passages are added; the index is part of the fingerprint.
 - `output.tokens` is the SHA-256 fingerprint of the generated token ids (the one `dllm generate` prints),
   `output.content` the SHA-256 of the answer text and `output.tool_calls` of the canonical JSON of the tool calls.
+- `previous`, only in a conversation, is the receipt of the turn before ([receipt chains](agents.md#receipt-chains)).
 - `id` is `rcpt_` plus the first 32 hex digits of the SHA-256 of the canonical JSON (sorted keys, no spaces) of
   everything else, so any edit to a receipt is detected.
 
@@ -83,5 +85,7 @@ note: versions that keep the kernels and the sampler give the same output, and t
 - A receipt proves that these weights give this answer to this request. It does not prove who ran the request; sign
   receipts with your own key if you need that.
 - With the MCP host (`dllm chat --mcp-server`), the receipt covers the last round: its request holds the tool
-  results the earlier rounds produced.
+  results the earlier rounds produced. An [agent transcript](agents.md#transcripts) (`--transcript`) records every
+  round's receipt and replays the whole run.
+- One receipt covers one turn; a [receipt chain](agents.md#receipt-chains) covers a whole conversation.
 - Logprobs are not hashed; they follow from the same computation as the tokens.

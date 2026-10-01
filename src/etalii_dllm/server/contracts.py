@@ -95,6 +95,8 @@ class ChatCompletionRequest(BaseModel):
     top_logprobs: int | None = None
     receipt: bool | None = None
     """Extension: add a ``receipt`` to the response (see docs/receipts.md)."""
+    previous_receipt: str | None = None
+    """Extension: the receipt id of the conversation's previous turn, recorded as the new receipt's ``previous``."""
 
 
 class TopLogprob(BaseModel):

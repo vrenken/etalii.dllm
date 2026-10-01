@@ -53,18 +53,24 @@ def chat(
     seed: int = 0,
     json_schema: dict[str, Any] | None = None,
     receipt: bool = False,
+    previous_receipt: str = "",
 ) -> str:
     """Answers a conversation with the EtAlii deterministic LLM, using the model's own chat template.
 
     ``messages`` is a list of {"role": "system" | "user" | "assistant", "content": "..."}. With ``json_schema`` the
     answer is JSON valid under that schema (constrained decoding). The same arguments always return the same text.
     With ``receipt`` the result is JSON {"content", "receipt"}: the receipt lets anyone re-run and check the answer
-    (``verify_receipt``, ``dllm replay``).
+    (``verify_receipt``, ``dllm replay``). ``previous_receipt``, the receipt id of the previous turn, chains the
+    receipts of a conversation.
     """
     conversation = [ChatMessage(m.get("role", "user"), m.get("content", "")) for m in messages]
     response_format = ResponseFormat("json_schema", json_schema) if json_schema is not None else ResponseFormat()
     request = ChatRequest(
-        conversation, max_tokens, SamplingOptions(temperature=temperature, seed=seed), response_format=response_format
+        conversation,
+        max_tokens,
+        SamplingOptions(temperature=temperature, seed=seed),
+        response_format=response_format,
+        previous_receipt=previous_receipt or None,
     )
     result = default_engine().chat_completion(request)
     if receipt:
