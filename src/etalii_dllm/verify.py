@@ -15,6 +15,7 @@ import hashlib
 import math
 import platform
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from importlib import metadata
 from typing import Any
@@ -166,3 +167,61 @@ def run(engine: Any) -> Report:
     parts["sampled"] = engine.complete(PROMPT, MAX_TOKENS, SAMPLED).fingerprint
     mismatches = [name for name, value in REFERENCE.items() if value and parts[name] != value]
     return Report(parts, environment(engine), mismatches)
+
+
+@dataclass
+class ReferenceCheck:
+    """``dllm verify --reference``: the engine against the independent reference implementation (issue #162)."""
+
+    results: dict[str, str]
+    """``logits``, ``greedy`` and ``sampled``: ``"equal"``, or where the two first differ."""
+
+    @property
+    def equal(self) -> bool:
+        return all(value == "equal" for value in self.results.values())
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"equal": self.equal, **self.results}
+
+
+def _first_difference(engine_tokens: Sequence[int], reference_tokens: Sequence[int]) -> str:
+    if list(engine_tokens) == list(reference_tokens):
+        return "equal"
+    common = 0
+    for a, b in zip(engine_tokens, reference_tokens, strict=False):
+        if a != b:
+            break
+        common += 1
+    return (
+        f"differ from token {common}: engine {list(engine_tokens[common : common + 4])}, "
+        f"reference {list(reference_tokens[common : common + 4])}"
+    )
+
+
+def check_reference(engine: Any, max_tokens: int = MAX_TOKENS) -> ReferenceCheck:
+    """Runs the verify prompt through the engine and through :mod:`etalii_dllm.reference`, which shares no code with
+    the compiled kernels, and compares the prompt's logits and a greedy and a sampled answer bit for bit. A difference
+    means the kernels (a SIMD path, the thread pool, the GPU, the compiler) do not compute what the specification
+    says on this machine."""
+    from etalii_dllm import reference
+    from etalii_dllm.transformer import Transformer
+
+    if not isinstance(engine.model, Transformer):
+        raise ValueError("--reference needs a model file (--model or DLLM_MODEL)")
+    twin = reference.ReferenceTransformer.from_engine_model(engine.model)
+    context = engine.tokenizer.encode(PROMPT)
+    logits = np.asarray(engine.model.forward(context), dtype=np.float32).reshape(-1)
+    expected = twin.forward(context)
+    results = {}
+    if logits.tobytes() == expected.tobytes():
+        results["logits"] = "equal"
+    else:
+        differing = np.flatnonzero(logits.view(np.uint32) != expected.view(np.uint32))
+        results["logits"] = f"{len(differing)} of {len(logits)} differ, first at token id {int(differing[0])}"
+    stops = sorted(engine.stop_tokens)
+    for name, options in (("greedy", GREEDY), ("sampled", SAMPLED)):
+        answer = engine.complete(PROMPT, max_tokens, options)
+        sampler = reference.Sampler(options.temperature, options.top_k, options.top_p, options.seed)
+        tokens, _ = twin.generate(context, max_tokens, sampler, stops)
+        results[name] = _first_difference(answer.tokens, tokens)
+    return ReferenceCheck(results)

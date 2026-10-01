@@ -190,7 +190,7 @@ inline double cos_kernel(double r) {
 }
 
 // x = n * pi/2 + r with |r| <= pi/4 (Cody-Waite, the three 33-bit parts of pi/2 from fdlibm, so n * part is exact
-// for |n| < 2^20, i.e. |x| below about 1.6e6). Larger arguments stay deterministic but lose accuracy.
+// for |n| < 2^20, i.e. |x| below about 1.6e6). Larger arguments lose accuracy but stay deterministic everywhere.
 inline double reduce_half_pi(double x, int* quadrant) {
     constexpr double two_over_pi = 6.36619772367581382433e-01;
     constexpr double pio2_1 = 1.57079632673412561417e+00;
@@ -198,11 +198,20 @@ inline double reduce_half_pi(double x, int* quadrant) {
     constexpr double pio2_3 = 2.02226624871116645580e-21;
     constexpr double pio2_3t = 8.47842766036889956997e-32;
 
+    constexpr double two_52 = 4503599627370496.0;
+    constexpr double two_62 = 4611686018427387904.0;
+
     const double nd = x * two_over_pi;
-    const double n = nd >= 0 ? static_cast<double>(static_cast<long long>(nd + 0.5))
-                             : static_cast<double>(static_cast<long long>(nd - 0.5));
+    // From 2^52 on nd is already an integer; it is used as is, because converting a double beyond 2^63 to an integer
+    // gives different results on x86-64 and arm64.
+    double n = nd;
+    if (nd < two_52 && nd > -two_52) {
+        n = nd >= 0 ? static_cast<double>(static_cast<long long>(nd + 0.5))
+                    : static_cast<double>(static_cast<long long>(nd - 0.5));
+    }
     const double r = (((x - n * pio2_1) - n * pio2_2) - n * pio2_3) - n * pio2_3t;
-    *quadrant = static_cast<int>(static_cast<long long>(n) & 3);
+    // n mod 4; from 2^62 on n is a multiple of 4.
+    *quadrant = (n < two_62 && n > -two_62) ? static_cast<int>(static_cast<long long>(n) & 3) : 0;
     return r;
 }
 

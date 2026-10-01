@@ -1,5 +1,8 @@
 # Kernels
 
+[The determinism specification](specification.md) states the exact operation sequence of every kernel in one place;
+this page explains how the kernels compute it quickly.
+
 The numeric kernels live in `cpp/include/dllm/` (header-only C++17) and are exposed through
 `etalii_dllm.numerics`. This page documents the evaluation order each one commits to, because that order is what
 makes the output reproducible. Changing it is a deliberate, golden-value-changing act (see `CLAUDE.md`).
@@ -52,10 +55,12 @@ FTZ/DAZ on and requires the kernels' subnormal results and golden fingerprints t
 | `erf`, `erfc` | 60-term Maclaurin series below 2.5, Laplace continued fraction (depth 80) for erfc above | erf < 1e-14 absolute, erfc < 1e-13 relative |
 
 Beyond `|x| = 1.6e6` the sine/cosine reduction loses accuracy but stays deterministic; RoPE angles
-(`position * inv_freq`) stay far below that for any realistic context length.
+(`position * inv_freq`) stay far below that for any realistic context length. From `|x| = 2^52 · π/2` on, the
+multiple of `π/2` is used as it is rather than converted to an integer, because converting a double beyond 2^63
+gives different results on x86-64 and arm64 (found by the [reference implementation](specification.md), Phase 20).
 
 `softmax` and `log_softmax` subtract the maximum (first index on ties), sum `exp(l_j - max)` over `j` ascending in
-double, and round each output once: `softmax = e_i / total`, `log_softmax = (l_i - max) - log(total)`. The sampler
+double, and round each output once: `softmax = e_i * (1 / total)`, `log_softmax = (l_i - max) - log(total)`. The sampler
 uses the first, API `logprobs` the second.
 
 ## Linear algebra (`nn.hpp`)
@@ -107,7 +112,7 @@ For each (query, head), independently:
 1. scores `s_j = (sum_i q_i k_ji) * scale`, dot over `i` ascending, kept in double; with a positive `softcap`
    (Gemma 2), `s_j = softcap * tanh(s_j / softcap)` with `math.hpp`'s `tanh`, still in double;
 2. `m = max_j s_j`; `p_j = exp(s_j - m)`; `Z = sum_j p_j` over `j` ascending;
-3. `out_i = (sum_j p_j v_ji) / Z`, the sum over `j` ascending, rounded once.
+3. `out_i = (sum_j p_j v_ji) * (1 / Z)`, the sum over `j` ascending, rounded once.
 
 Keys beyond the causal horizon (or before the window) are never read, so the result does not depend on how long the
 KV cache is, and a

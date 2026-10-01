@@ -4,7 +4,9 @@ EtAlii.Dllm promises one thing above everything else: the same inputs give the s
 whatever else the machine is doing, and on every supported machine (Phase 10). This page shows what "the same inputs" means, where a normal
 LLM stack loses determinism, and which part of this code base removes each cause. The research behind it is in
 [deterministic inference](../research/deterministic-inference.md); the exact kernel orders are in
-[kernels](../kernels.md).
+[kernels](../kernels.md), and every operation from the weights to the chosen token is in the
+[determinism specification](../specification.md), which an independent second implementation (`reference.py`) and
+the conformance vectors check.
 
 ## The contract
 

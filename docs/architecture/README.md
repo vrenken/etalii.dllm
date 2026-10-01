@@ -145,7 +145,9 @@ AdamW from `grad.hpp`.
 | `batching.py` | Continuous batching: concurrent generations share one `forward_batch` per step, each keeping its solo bits. |
 | `sampling.py` | Temperature, top-k and top-p sampling with a seeded generator and ties broken on token id. |
 | `tokenization.py`, `bpe.py` | The byte tokenizer of the placeholder model, and BPE (byte-level or SentencePiece-style) driven by a `tokenizer.json`. |
-| `verify.py` | `dllm verify`: one fingerprint of a fixed workload (kernels, Unicode, tokenizer, logits, answers) to compare machines. |
+| `verify.py` | `dllm verify`: one fingerprint of a fixed workload (kernels, Unicode, tokenizer, logits, answers) to compare machines; `--reference` compares the model's answers with `reference.py`. |
+| `reference.py` | A second, independent implementation of the [specification](../specification.md) (transcendentals, kernels, RNG, sampler, decoder) in Python and elementwise NumPy, sharing no code with the C++ kernels. |
+| `conformance.py` | `dllm conformance write/check`: test vectors (inputs and exact outputs of every kernel, the sampler and two decoders) for any implementation. |
 | `unicode.py` | Normalisation, lower-casing and regex categories from Unicode 15.1 tables shipped in the package, so the Python version cannot change tokenization. |
 | `models.py` | The `LanguageModel` protocol and the seeded placeholder `BigramModel`. |
 | `transformer.py` | The Llama/Qwen2/Qwen3 decoder (RMSNorm, QK-norm, RoPE, grouped-query attention, SwiGLU) and its KV cache, on CPU or GPU, float32, Q8_0 or Q4_0. |

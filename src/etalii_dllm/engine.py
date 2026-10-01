@@ -348,6 +348,11 @@ class DllmEngine:
 
     # -- text ---------------------------------------------------------------------------------------------------
 
+    @property
+    def stop_tokens(self) -> frozenset[int]:
+        """The token ids that end a generation (the tokenizer's end of sequence and the model's own)."""
+        return self._generator.stop_tokens
+
     def complete(self, prompt: str, max_tokens: int, options: SamplingOptions) -> GenerationResult:
         return self._generator.generate(prompt, max_tokens, options)
 
