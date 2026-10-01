@@ -19,6 +19,7 @@ from etalii_dllm.models import LanguageModel
 from etalii_dllm.numerics import fingerprint, log_softmax
 from etalii_dllm.prompt_cache import PromptCache
 from etalii_dllm.sampling import Sampler, SamplingOptions
+from etalii_dllm.speculative import Drafter, DraftModel, PromptLookup
 from etalii_dllm.tokenization import Tokenizer
 
 MAX_TOP_LOGPROBS = 20
@@ -116,6 +117,9 @@ class Generation:
             cache, self.cached_tokens = generator.prompt_cache.acquire(context)
         elif new_cache is not None:
             cache = new_cache()
+        self.drafted_tokens = 0
+        """Tokens speculative decoding proposed; how many were kept is ``accepted_tokens``."""
+        self.accepted_tokens = 0
         self._tokens: list[int] = []
         self._logprobs: list[TokenLogprobs] = []
         self._text = ""
@@ -173,21 +177,38 @@ class Generation:
         strip_leading_space = self._strip_leading_space
         emitted = ""
         finish_reason = "length"
+        drafter = generator.new_drafter() if cache is not None else None
+        vocabulary = model.vocabulary_size if drafter is not None else 0
+        draft: list[int] = []
+        """Drafted tokens not yet checked, after the ones ``pending`` holds the logits for."""
+        pending: list[np.ndarray] = []
+        """Logits already computed for the next positions (speculative decoding, :mod:`etalii_dllm.speculative`)."""
 
         while len(self._tokens) < max_tokens:
             if constraint is not None and constraint.finished:
                 finish_reason = "stop"
                 break
-            if cache is None:
-                logits = model.forward(context)
-            elif generator.batcher is not None:
-                logits = generator.batcher.forward_cached(context, cache)
-            else:
-                logits = model.forward_cached(context, cache)
+            if not pending:
+                room = max_tokens - len(self._tokens) - 1
+                draft = self._draft(drafter, context, generator.speculate, room, vocabulary)
+                if cache is None:
+                    pending = [model.forward(context)]
+                elif draft:
+                    pending = list(model.forward_cached_last([*context, *draft], cache, len(draft) + 1))
+                elif generator.batcher is not None:
+                    pending = [generator.batcher.forward_cached(context, cache)]
+                else:
+                    pending = [model.forward_cached(context, cache)]
+            logits = pending.pop(0)
             token = self._choose(sampler, logits, generator.stop_tokens, constraint)
             if token is None or token in generator.stop_tokens:
                 finish_reason = "stop"
                 break
+            if draft and draft[0] == token:
+                del draft[0]  # the next pending logits follow exactly this token
+                self.accepted_tokens += 1
+            else:
+                draft, pending = [], []
             if constraint is not None:
                 constraint.accept(token)
             self._tokens.append(token)
@@ -218,6 +239,20 @@ class Generation:
         self._text = bytes(data).decode("utf-8", errors="replace")
         self._finish_reason = finish_reason
         yield Step(None, self._text[len(emitted) :], None, finish_reason)
+
+    def _draft(
+        self, drafter: Drafter | None, context: list[int], speculate: int, room: int, vocabulary: int
+    ) -> list[int]:
+        """Up to ``speculate`` drafted tokens (fewer when only ``room`` more can be used); ``[]`` without one."""
+        if drafter is None or speculate <= 0 or room <= 0:
+            return []
+        draft = drafter.propose(context, min(speculate, room))
+        for i, token in enumerate(draft):
+            if not 0 <= token < vocabulary:  # a draft model's own tokens past the model's vocabulary
+                del draft[i:]
+                break
+        self.drafted_tokens += len(draft)
+        return draft
 
     @staticmethod
     def _choose(
@@ -251,12 +286,26 @@ class Generation:
 
 class Generator:
     def __init__(
-        self, model: LanguageModel, tokenizer: Tokenizer, stop_tokens: Iterable[int] = (), prompt_cache: int = 0
+        self,
+        model: LanguageModel,
+        tokenizer: Tokenizer,
+        stop_tokens: Iterable[int] = (),
+        prompt_cache: int = 0,
+        speculate: int = 0,
+        draft_model: Any = None,
     ) -> None:
         """``prompt_cache`` is how many KV caches of finished generations to keep for reuse by later prompts that
         share a prefix (:mod:`etalii_dllm.prompt_cache`); 0, or a model without a KV cache, disables it. It never
         changes the output. Models that can run several sequences in one pass (``forward_batch``) decode concurrent
-        generations together (:mod:`etalii_dllm.batching`), which never changes the output either."""
+        generations together (:mod:`etalii_dllm.batching`), which never changes the output either. ``speculate``
+        drafts that many tokens per step and checks them in one pass (:mod:`etalii_dllm.speculative`), with
+        ``draft_model`` or else from the text so far; it never changes the output either."""
+        if speculate < 0:
+            raise ValueError("speculate must be non-negative")
+        if not hasattr(model, "forward_cached_last"):
+            speculate = 0
+        self.speculate = speculate
+        self.draft_model = draft_model
         self.model = model
         self.tokenizer = tokenizer
         self.stop_tokens = frozenset(t for t in [tokenizer.end_of_sequence, *stop_tokens] if t >= 0)
@@ -265,6 +314,12 @@ class Generator:
         self.prompt_cache: PromptCache | None = (
             PromptCache(new_cache, prompt_cache) if new_cache is not None and prompt_cache > 0 else None
         )
+
+    def new_drafter(self) -> Drafter | None:
+        """A drafter for one generation, or ``None`` when speculation is off."""
+        if self.speculate <= 0:
+            return None
+        return DraftModel(self.draft_model) if self.draft_model is not None else PromptLookup()
 
     def stream(
         self,

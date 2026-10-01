@@ -319,6 +319,20 @@ class Transformer:
         linear layer as one stacked batch, attention runs per sequence against its own cache. Every kernel computes
         each row on its own in a fixed order, so each sequence gets exactly the bits of a lone :meth:`forward_cached`
         (``tests/test_batch_invariance.py``). ``caches`` (one per sequence, distinct) default to fresh ones."""
+        return [rows[0] for rows in self._forward(sequences, caches, 1)]
+
+    def forward_cached_last(self, tokens: Sequence[int], cache: KVCache, count: int) -> FloatArray:
+        """The logits ``[count, vocabulary]`` after each of the last ``count`` tokens, reusing ``cache`` like
+        :meth:`forward_cached`. A prefill gives each position the bits that decoding the tokens one at a time gives,
+        so row ``i`` equals ``forward_cached(tokens[: len(tokens) - count + 1 + i])``; speculative decoding checks
+        several drafted tokens with one call (:mod:`etalii_dllm.speculative`)."""
+        if not 1 <= count <= len(tokens):
+            raise ValueError("count must be between 1 and the number of tokens")
+        return self._forward([tokens], [cache], count)[0]
+
+    def _forward(
+        self, sequences: Sequence[Sequence[int]], caches: Sequence[KVCache] | None, last: int
+    ) -> list[FloatArray]:
         if caches is None:
             caches = [self.new_cache() for _ in sequences]
         if len(caches) != len(sequences):
@@ -334,24 +348,25 @@ class Transformer:
                 if cached != token:
                     break
                 common += 1
-            if common == len(tokens):  # nothing new: recompute the last position so there is a hidden state
-                common -= 1
+            # The last positions are recomputed even when cached, so there are hidden states to read logits from.
+            common = min(common, len(tokens) - last)
             cache.truncate(common)
             segments.append((list(tokens[common:]), common, cache))
         ends = np.cumsum([len(tokens) for tokens, _, _ in segments]) - 1
+        rows = np.concatenate([np.arange(end - last + 1, end + 1) for end in ends])
         if self.device == "cuda":
             states = self._layers_gpu(segments)
-            last = CudaTensor.empty((len(ends), self.config.hidden_size))
-            for i, end in enumerate(ends):
-                states[end : end + 1].copy_to(last[i : i + 1])
-            logits = cuda.linear(last, self._lm_head).numpy()  # type: ignore[arg-type]
+            picked = CudaTensor.empty((len(rows), self.config.hidden_size))
+            for i, row in enumerate(rows):
+                states[row : row + 1].copy_to(picked[i : i + 1])
+            logits = cuda.linear(picked, self._lm_head).numpy()  # type: ignore[arg-type]
             logits = self._finish_logits(logits)
         else:
             hidden = self._layers(segments).numpy()
-            logits = self.logits_from_hidden(hidden[ends])
+            logits = self.logits_from_hidden(hidden[rows])
         for tokens, _, cache in segments:
             cache.tokens.extend(tokens)
-        return [row.copy() for row in logits]
+        return [logits[i * last : (i + 1) * last].copy() for i in range(len(segments))]
 
     def logits_from_hidden(self, hidden: npt.ArrayLike) -> FloatArray:
         """Logits ``[rows, vocabulary]`` of final-norm hidden states ``[rows, hidden]``: the LM head, then the

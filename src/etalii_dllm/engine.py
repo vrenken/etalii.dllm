@@ -31,6 +31,7 @@ from etalii_dllm.numerics import QUANTIZATIONS, linear, set_threads, sum_squares
 from etalii_dllm.prompt_cache import DEFAULT_PROMPT_CACHE_SIZE
 from etalii_dllm.retrieval import DEFAULT_TOP, Retriever
 from etalii_dllm.sampling import GREEDY, SamplingOptions
+from etalii_dllm.speculative import DEFAULT_DRAFT_TOKENS
 from etalii_dllm.tokenization import ByteTokenizer, Tokenizer
 from etalii_dllm.tools import AUTO, Tool, ToolChoice
 
@@ -55,6 +56,10 @@ INDEX_TOP_ENVIRONMENT_VARIABLE = "DLLM_INDEX_TOP"
 """How many passages grounding adds (default 3)."""
 EMBEDDING_MODEL_ENVIRONMENT_VARIABLE = "DLLM_EMBEDDING_MODEL"
 """The index's embedding model, when it is not at the path the index records."""
+SPECULATE_ENVIRONMENT_VARIABLE = "DLLM_SPECULATE"
+"""Tokens speculative decoding drafts per step (0 or unset: off). Never changes the output."""
+DRAFT_MODEL_ENVIRONMENT_VARIABLE = "DLLM_DRAFT_MODEL"
+"""A smaller ``model.dllm`` with the same tokenizer that drafts for speculative decoding. Never changes the output."""
 
 
 @dataclass(frozen=True)
@@ -170,9 +175,13 @@ class DllmEngine:
         prompt_cache: int = 0,
         embedding: Mapping[str, Any] | None = None,
         retriever: Retriever | None = None,
+        speculate: int = 0,
+        draft_model: LanguageModel | None = None,
     ) -> None:
         """``prompt_cache`` keeps that many KV caches to reuse for prompts sharing a prefix with an earlier one
-        (:mod:`etalii_dllm.prompt_cache`); it saves work and never changes the output. ``embedding`` holds an
+        (:mod:`etalii_dllm.prompt_cache`); it saves work and never changes the output. ``speculate`` drafts that many
+        tokens per step, with ``draft_model`` or from the text so far, and checks them in one pass
+        (:mod:`etalii_dllm.speculative`); that saves work and never changes the output either. ``embedding`` holds an
         embedding model's pooling settings (:attr:`etalii_dllm.modelfile.ModelFile.embedding`). ``retriever`` grounds
         chats in a document index (:class:`etalii_dllm.retrieval.Retriever`); its fingerprint joins the
         ``system_fingerprint``."""
@@ -186,7 +195,7 @@ class DllmEngine:
         self.system_fingerprint = system_fingerprint
         """Identifies the exact weights and engine; equal fingerprints plus equal requests give equal output."""
         self.chat_template = chat_template
-        self._generator = Generator(model, tokenizer, stop_tokens, prompt_cache)
+        self._generator = Generator(model, tokenizer, stop_tokens, prompt_cache, speculate, draft_model)
         self._trie: TokenTrie | None = None
 
     @staticmethod
@@ -202,6 +211,8 @@ class DllmEngine:
         index: str | Path | None = None,
         index_top: int | None = None,
         embedding_model: str | Path | None = None,
+        speculate: int | None = None,
+        draft_model: str | Path | None = None,
     ) -> DllmEngine:
         """An engine for an imported ``model.dllm``: its decoder, BPE tokenizer and chat template. ``quantize``
         (``"q8_0"``) runs the linear layers on quantised weights; that changes the output, and so the
@@ -211,7 +222,9 @@ class DllmEngine:
         vector file, is added to the residual stream after its layer at ``steer_strength`` (default: the file's);
         that changes the output and the ``system_fingerprint``. ``index``, a document index, grounds every chat in
         the ``index_top`` passages it finds for the last user message, embedded with ``embedding_model`` (default:
-        the model the index records); that changes the output and the ``system_fingerprint`` too."""
+        the model the index records); that changes the output and the ``system_fingerprint`` too. ``speculate``
+        drafts that many tokens per step (default: 8 with a ``draft_model``, else off) with ``draft_model``, a smaller
+        ``model.dllm`` with the same tokenizer, or from the text so far; it never changes the output."""
         from etalii_dllm.bpe import from_model_header, special_token_text
         from etalii_dllm.modelfile import ModelFile
         from etalii_dllm.transformer import Transformer
@@ -256,6 +269,16 @@ class DllmEngine:
             )
         stops = [*file.config.eos_token_ids, tokenizer.end_of_sequence]
         fingerprint = "fp_" + model.weights_fingerprint[:12]
+        drafter = None
+        if draft_model:
+            draft = ModelFile(draft_model, verify=verify)
+            if _vocabulary(draft.tokenizer) != _vocabulary(file.tokenizer):
+                raise ValueError(f"{draft_model}: the draft model's tokenizer differs from the model's")
+            drafter = Transformer(
+                draft.config, draft.tensors, weights_fingerprint=draft.fingerprint, quantize=quantize, device=device
+            )
+            if speculate is None:
+                speculate = DEFAULT_DRAFT_TOKENS
         return DllmEngine(
             model,
             tokenizer,
@@ -265,6 +288,8 @@ class DllmEngine:
             prompt_cache=prompt_cache,
             embedding=file.embedding,
             retriever=Retriever.open(index, index_top or DEFAULT_TOP, embedding_model) if index else None,
+            speculate=speculate or 0,
+            draft_model=drafter,
         )
 
     @staticmethod
@@ -502,6 +527,8 @@ def use_model_file(
     index: str | Path | None = None,
     index_top: int | None = None,
     embedding_model: str | Path | None = None,
+    speculate: int | None = None,
+    draft_model: str | Path | None = None,
 ) -> None:
     """Makes the front ends serve ``path`` (sets ``DLLM_MODEL``, and ``DLLM_QUANTIZE``/``DLLM_DEVICE``/
     ``DLLM_PROMPT_CACHE``/``DLLM_ADAPTER`` when ``quantize``/``device``/``prompt_cache``/``adapter`` are given) and
@@ -527,6 +554,10 @@ def use_model_file(
         os.environ[INDEX_TOP_ENVIRONMENT_VARIABLE] = str(index_top)
     if embedding_model:
         os.environ[EMBEDDING_MODEL_ENVIRONMENT_VARIABLE] = str(embedding_model)
+    if speculate is not None:
+        os.environ[SPECULATE_ENVIRONMENT_VARIABLE] = str(speculate)
+    if draft_model:
+        os.environ[DRAFT_MODEL_ENVIRONMENT_VARIABLE] = str(draft_model)
     if threads is not None:
         set_threads(threads)
     default_engine.cache_clear()
@@ -534,7 +565,8 @@ def use_model_file(
 
 def add_runtime_arguments(parser: argparse.ArgumentParser) -> None:
     """The ``--model``, ``--adapter``, ``--quantize``, ``--threads``, ``--device``, ``--steer``, ``--steer-strength``,
-    ``--index``, ``--index-top``, ``--embedding-model`` and ``--prompt-cache`` options every front end shares."""
+    ``--index``, ``--index-top``, ``--embedding-model``, ``--prompt-cache``, ``--speculate`` and ``--draft-model``
+    options every front end shares."""
     parser.add_argument("--model", help="model.dllm file to use (default: $DLLM_MODEL, else the placeholder model)")
     parser.add_argument(
         "--adapter",
@@ -579,6 +611,20 @@ def add_runtime_arguments(parser: argparse.ArgumentParser) -> None:
         help="KV caches kept to reuse shared prompt prefixes across requests (default: $DLLM_PROMPT_CACHE, else "
         f"{DEFAULT_PROMPT_CACHE_SIZE}; 0 disables); never changes output",
     )
+    parser.add_argument(
+        "--speculate",
+        type=int,
+        nargs="?",
+        const=DEFAULT_DRAFT_TOKENS,
+        metavar="N",
+        help=f"speculative decoding: draft N tokens per step (default N: {DEFAULT_DRAFT_TOKENS}; default: "
+        "$DLLM_SPECULATE, else off, or on with --draft-model); never changes output",
+    )
+    parser.add_argument(
+        "--draft-model",
+        help="smaller model.dllm with the same tokenizer to draft with (default: $DLLM_DRAFT_MODEL, else the text "
+        "so far); never changes output",
+    )
 
 
 def configured_quantization() -> str | None:
@@ -620,6 +666,27 @@ def configured_index_top() -> int:
     return int(value)
 
 
+def configured_speculate() -> int | None:
+    """``$DLLM_SPECULATE``, or ``None`` when it is unset or empty."""
+    value = os.environ.get(SPECULATE_ENVIRONMENT_VARIABLE, "").strip()
+    if not value:
+        return None
+    if not value.isdigit():
+        raise ValueError(f"{SPECULATE_ENVIRONMENT_VARIABLE}={value!r}; expected a non-negative integer")
+    return int(value)
+
+
+def _vocabulary(tokenizer: Mapping[str, Any] | None) -> Any:
+    """What decides token ids in a ``model.dllm`` tokenizer header: the vocabulary and the added tokens."""
+    if not tokenizer:
+        return None
+    if tokenizer.get("format") == "huggingface":
+        spec = tokenizer.get("tokenizer_json") or {}
+        added = [(t.get("id"), t.get("content")) for t in spec.get("added_tokens") or []]
+        return (spec.get("model") or {}).get("vocab"), added
+    return {k: v for k, v in tokenizer.items() if k.startswith("tokenizer.ggml.") and "token" in k}
+
+
 def configured_prompt_cache() -> int:
     """``$DLLM_PROMPT_CACHE``, or the default when it is unset or empty."""
     value = os.environ.get(PROMPT_CACHE_ENVIRONMENT_VARIABLE, "").strip()
@@ -648,4 +715,6 @@ def default_engine() -> DllmEngine:
         index=os.environ.get(INDEX_ENVIRONMENT_VARIABLE) or None,
         index_top=configured_index_top(),
         embedding_model=os.environ.get(EMBEDDING_MODEL_ENVIRONMENT_VARIABLE) or None,
+        speculate=configured_speculate(),
+        draft_model=os.environ.get(DRAFT_MODEL_ENVIRONMENT_VARIABLE) or None,
     )
