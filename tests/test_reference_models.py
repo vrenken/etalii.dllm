@@ -358,11 +358,11 @@ def _last_logits(model: Transformer, tokenizer: BpeTokenizer) -> str:
     return fingerprint(np.concatenate([np.asarray(model.forward(tokenizer.encode(p))) for p in PROMPTS]))
 
 
-@pytest.mark.parametrize("quantize", ["none", "q8_0"])
+@pytest.mark.parametrize("quantize", ["none", "q8_0", "q4_0"])
 def test_logits_golden(model_key, imported, quantize):
     directory, result = imported
     ours = Transformer.from_file(result.path, quantize=None if quantize == "none" else quantize)
-    key = "logits" if quantize == "none" else "logits_q8_0"
+    key = "logits" if quantize == "none" else f"logits_{quantize}"
     assert _last_logits(ours, reference_tokenizer(directory)) == REFERENCE_MODEL_FINGERPRINTS[model_key].get(key)
 
 

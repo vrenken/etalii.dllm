@@ -71,6 +71,8 @@ original checkpoint import to the same bytes and the same fingerprint.
 - **Quantised GGUF.** `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q8_0`, `Q4_K`, `Q5_K` and `Q6_K` are dequantised with
   elementwise float32 operations in llama.cpp's order; tests check the result is bit-identical to `gguf-py`. The
   import is deterministic, but a quantised source is of course only as precise as its quantisation.
+  Running quantised (`--quantize q8_0` or `q4_0`) requantises the float32 tensors at load time; the file itself
+  stays float32, so one file serves every precision.
 - **Fail loudly.** Unknown tensors, unsupported families (anything but Gemma 2, Gemma 3 text, Granite, Llama, Mistral, OLMo 2, Phi-3, Qwen2 and Qwen3),
   activations other than SiLU and GELU (tanh), MLP biases and RoPE scaling other than `linear`/`llama3`/`longrope` stop the import. Sliding-window
   attention comes from `sliding_window` (Mistral: every layer; Qwen2/Qwen3 with `use_sliding_window`: the layers from

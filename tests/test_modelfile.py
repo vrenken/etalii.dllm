@@ -284,3 +284,52 @@ def test_architecture_round_trips_through_its_dictionary():
         values = json.loads(json.dumps(config.to_dict()))
         assert ("qk_norm" in values) == config.qk_norm
         assert TransformerConfig.from_dict(values) == config
+
+
+# --- memory --------------------------------------------------------------------------------------------------------
+
+
+def _rss_file_kb() -> int | None:
+    try:
+        lines = Path("/proc/self/status").read_text().splitlines()
+    except OSError:
+        return None
+    return next((int(line.split()[1]) for line in lines if line.startswith("RssFile:")), None)
+
+
+def test_released_tensors_read_back_the_same_bits(tmp_path):
+    big = dataclasses.replace(CONFIG, vocabulary_size=1 << 20)  # a 16 MB embedding: whole pages to drop
+    values = weights(big)
+    write_model_file(tmp_path / "big.dllm", big, sources(values), METADATA)
+    model = ModelFile(tmp_path / "big.dllm")  # verify() already released the pages it read
+    embedding = model.tensors["token_embedding.weight"]
+    before = _rss_file_kb()
+    checksum = int(embedding.view("<u4").astype(np.uint64).sum())  # touch every page
+    touched = _rss_file_kb()
+    model.release("token_embedding.weight")
+    released = _rss_file_kb()
+    if before is not None and touched is not None and released is not None:
+        assert touched - released > 8 * 1024  # most of the 16 MB left the process
+    assert np.array_equal(embedding.view("<u4"), values["token_embedding.weight"].view("<u4"))  # read back
+    assert int(embedding.view("<u4").astype(np.uint64).sum()) == checksum
+    model.release()
+    for name, tensor in model.tensors.items():
+        assert np.array_equal(tensor.view("<u4"), values[name].view("<u4"))
+
+
+def test_release_is_a_no_op_without_madvise(model_path, monkeypatch):
+    import mmap
+
+    monkeypatch.delattr(mmap, "MADV_DONTNEED", raising=False)
+    model = ModelFile(model_path)
+    model.release()
+    assert np.array_equal(model.tensors["token_embedding.weight"], weights()["token_embedding.weight"])
+
+
+def test_release_with_large_pages(model_path, monkeypatch):
+    import mmap
+
+    monkeypatch.setattr(mmap, "PAGESIZE", 1 << 16)  # 16 KB pages (macOS arm64) and larger: the file is one partial page
+    model = ModelFile(model_path)
+    model.release()
+    assert np.array_equal(model.tensors["token_embedding.weight"], weights()["token_embedding.weight"])

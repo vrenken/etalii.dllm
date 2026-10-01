@@ -276,6 +276,8 @@ def main(argv: list[str] | None = None) -> int:
         index=args.index,
         index_top=args.index_top,
         embedding_model=args.embedding_model,
+        speculate=args.speculate,
+        draft_model=args.draft_model,
     )
     try:
         engine = default_engine()

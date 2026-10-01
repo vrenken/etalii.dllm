@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import mmap
 import re
 import struct
 from collections.abc import Callable, Iterable, Mapping
@@ -171,13 +172,18 @@ class ModelFile:
         self.config = TransformerConfig.from_dict(self.header["architecture"])
         data_start = _PREFIX.size + header_length
         data_length = self.path.stat().st_size - data_start
-        self._data = np.memmap(self.path, dtype=np.uint8, mode="r", offset=data_start, shape=(data_length,))
+        with self.path.open("rb") as stream:
+            self._mmap = mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ)
+        self._data_start = data_start
+        self._data = np.frombuffer(self._mmap, dtype=np.uint8, count=data_length, offset=data_start)
+        self._ranges: dict[str, tuple[int, int]] = {}
         self.tensors: dict[str, np.ndarray] = {}
         for entry in self.header["tensors"]:
             begin, nbytes = entry["offset"], entry["nbytes"]
             if entry["dtype"] != "F32" or begin % ALIGNMENT or begin + nbytes > data_length:
                 raise ModelFileError(f"{self.path}: tensor {entry['name']!r} has an invalid layout")
             self.tensors[entry["name"]] = self._data[begin : begin + nbytes].view(_DTYPE).reshape(entry["shape"])
+            self._ranges[entry["name"]] = (begin, begin + nbytes)
         expected = self.config.tensor_shapes()
         if set(self.tensors) != set(expected):
             raise ModelFileError(f"{self.path}: tensors do not match the architecture")
@@ -229,11 +235,30 @@ class ModelFile:
         """The model edits (``dllm edit``) applied to the weights, oldest first; empty for unedited files."""
         return list(self.header.get("edits") or [])
 
+    def release(self, name: str | None = None) -> None:
+        """Lets the operating system drop the pages of tensor ``name`` (all tensor data when ``None``) from this
+        process's memory, once a copy (packed, quantised or on the GPU) has been made. Nothing changes: the pages are
+        read back from the file if the tensor is used again. A no-op where ``madvise`` is unavailable (Windows)."""
+        begin, end = self._ranges[name] if name is not None else (0, len(self._data))
+        self._drop(begin, end)
+
+    def _drop(self, begin: int, end: int) -> None:
+        if not hasattr(self._mmap, "madvise") or not hasattr(mmap, "MADV_DONTNEED"):
+            return
+        page = mmap.PAGESIZE
+        end = min(end, len(self._data))
+        first = -(-(self._data_start + begin) // page) * page  # whole pages inside the range only
+        last = (self._data_start + end) // page * page
+        if last > first:
+            self._mmap.madvise(mmap.MADV_DONTNEED, first, last - first)
+
     def verify(self) -> None:
-        """Re-hashes the tensor data and checks it against the recorded fingerprint."""
+        """Re-hashes the tensor data and checks it against the recorded fingerprint. The pages read are released
+        as it goes, so checking a large file does not keep it resident."""
         digest = hashlib.sha256()
         step = 64 * 1024 * 1024
         for begin in range(0, len(self._data), step):
             digest.update(self._data[begin : begin + step])
+            self._drop(begin, begin + step)
         if digest.hexdigest() != self.fingerprint:
             raise ModelFileError(f"{self.path}: tensor data does not match the fingerprint (corrupt file?)")

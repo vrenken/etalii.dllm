@@ -187,11 +187,11 @@ def test_kernels_called_from_many_threads_at_once():
 # -- Q8_0 --------------------------------------------------------------------------------------------------------
 
 
-def quantize_reference(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def quantize_reference(x: np.ndarray, levels: int = 127) -> tuple[np.ndarray, np.ndarray]:
     blocks = x.astype(np.float32).reshape(-1, 32)
-    d = np.max(np.abs(blocks), axis=1) / np.float32(127)
+    d = np.max(np.abs(blocks), axis=1) / np.float32(levels)
     inverse = np.where(d != 0, np.float32(1) / np.where(d != 0, d, np.float32(1)), np.float32(0)).astype(np.float32)
-    q = np.clip(np.rint(blocks * inverse[:, None]), -127, 127)  # np.rint rounds half to even
+    q = np.clip(np.rint(blocks * inverse[:, None]), -levels, levels)  # np.rint rounds half to even
     return q.astype(np.int8).reshape(x.shape), d.astype(np.float32).reshape(*x.shape[:-1], -1)
 
 
@@ -209,10 +209,30 @@ def test_quantization_matches_reference_and_rounds_half_to_even():
     assert list(values[0, :6]) == [-2, -2, 0, 0, 2, 2]
 
 
+def test_q4_0_quantization_and_packing():
+    w = gaussian(18, 12, 96)
+    w[0, :32] = 0.0
+    w[1, :32] = (np.arange(32, dtype=np.float32) - 16.0) * np.float32(0.4375)  # d = 1: x = k * 7/16, ties at 3.5
+    packed, scales = _kernels.quantize_q4_0(w)
+    assert packed.shape == (12, 48) and scales.shape == (12, 3)
+    expected_values, expected_scales = quantize_reference(w, levels=7)
+    values = _kernels.unpack_q4_0(packed)
+    assert values.tobytes() == expected_values.tobytes()
+    assert scales.tobytes() == expected_scales.tobytes()
+    raw = packed.view(np.uint8).astype(np.int16)
+    assert np.array_equal(raw[:, :16] & 15, values[:, :16] + 8)  # byte j: q_j + 8 low, q_(j+16) + 8 high
+    assert np.array_equal(raw[:, :16] >> 4, values[:, 16:32] + 8)
+    weight = QuantizedWeight(w, "q4_0")
+    assert weight.int8_values().tobytes() == values.tobytes()
+    assert np.array_equal(weight.dequantize(), values.astype(np.float32) * np.repeat(scales, 32, axis=1))
+
+
+@pytest.mark.parametrize("kind", ["q8_0", "q4_0"])
 @pytest.mark.parametrize(("rows", "outputs", "inputs"), [(3, 5, 64), (7, 37, 96)])  # ragged row and output tiles
-def test_quantized_linear_matches_exact_reference(rows, outputs, inputs):
+def test_quantized_linear_matches_exact_reference(rows, outputs, inputs, kind):
     w, x, b = gaussian(19, outputs, inputs), gaussian(20, rows, inputs), gaussian(21, outputs)
-    wq, ws = _kernels.quantize_q8_0(w)
+    weight = QuantizedWeight(w, kind)
+    wq, ws = weight.int8_values(), weight.scales
     xq, xs = _kernels.quantize_q8_0(x)
     expected = np.empty((rows, outputs), dtype=np.float32)
     for r in range(rows):
@@ -224,16 +244,16 @@ def test_quantized_linear_matches_exact_reference(rows, outputs, inputs):
                 acc += (float(xs[r, block]) * float(ws[n, block])) * float(isum)
             expected[r, n] = np.float32(acc + float(b[n]))
     for setting in every_setting():
-        assert numerics.linear(x, QuantizedWeight(w), b).numpy().tobytes() == expected.tobytes(), setting
+        assert numerics.linear(x, weight, b).numpy().tobytes() == expected.tobytes(), setting
     approx = numerics.linear(x, w, b).numpy()
-    assert np.abs(expected - approx).max() < 0.05 * np.abs(approx).max()
+    assert np.abs(expected - approx).max() < (0.05 if kind == "q8_0" else 0.25) * np.abs(approx).max()
 
 
 def test_quantized_weight_rejects_unsupported_shapes():
     with pytest.raises(ValueError):
         QuantizedWeight(gaussian(22, 4, 40))
     with pytest.raises(ValueError):
-        QuantizedWeight(gaussian(22, 4, 64), "q4_0")
+        QuantizedWeight(gaussian(22, 4, 64), "q2_0")
 
 
 # -- model -------------------------------------------------------------------------------------------------------

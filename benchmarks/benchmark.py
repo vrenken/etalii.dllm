@@ -257,6 +257,31 @@ def run_dllm(args: argparse.Namespace) -> dict[str, Any]:
     result["determinism"]["batch_invariant"] = bool(np.array_equal(alone, batched))
     result["determinism"]["batch_max_abs_diff"] = float(np.max(np.abs(alone - batched)))
 
+    # Speculative decoding: a prompt that ends by starting to repeat itself, decoded greedily with and without
+    # drafts; the tokens must be the same, only the speed may differ.
+    from etalii_dllm.generation import Generator
+    from etalii_dllm.speculative import DEFAULT_DRAFT_TOKENS
+
+    echo = [*tokens[:96], *tokens[:8]]
+    speculation: dict[str, Any] = {"prompt": len(echo), "tokens": args.tg}
+    outputs = {}
+    for speculate in (0, DEFAULT_DRAFT_TOKENS):
+        generator = Generator(model, engine.tokenizer, engine._generator.stop_tokens, 0, speculate)
+        rates, accepted = [], 0
+        for _ in range(max(1, args.reps // 2) + 1):  # the first is a warm-up
+            generation = generator.stream(echo, args.tg, GREEDY)
+            steps = iter(generation)
+            first = next(steps)  # the prompt pass, timed separately as pp
+            begin = time.perf_counter()
+            produced = [step.token for step in [first, *steps] if step.token is not None]
+            rates.append((len(produced) - 1) / (time.perf_counter() - begin))
+            accepted = generation.accepted_tokens
+        outputs[speculate] = produced
+        speculation[f"tps_{speculate}"] = summary(rates[1:])["mean"]
+        speculation[f"accepted_{speculate}"] = accepted
+    speculation["identical"] = outputs[0] == outputs[DEFAULT_DRAFT_TOKENS]
+    result["speculation"] = speculation
+
     # Concurrency (vLLM benchmark_serving style): N requests at once share batched decode steps.
     solo: dict[str, tuple[int, ...]] = {}
     concurrency = []
@@ -752,7 +777,7 @@ def suite(args: argparse.Namespace) -> dict[str, Any]:
         entry["import_s"] = time.perf_counter() - begin
         entry["dllm_file_mb"] = dllm_file.stat().st_size / 2**20
         kld = work / f"{name}-kld"
-        for quantize in ("none", "q8_0"):
+        for quantize in ("none", "q8_0", "q4_0"):
             run = child(
                 [
                     "dllm",
@@ -848,7 +873,7 @@ def report(results: dict[str, Any]) -> str:
     lines.append("|---|---|---|---:|---:|---:|---:|---:|")
 
     def label(run: dict[str, Any]) -> str:
-        return {"none": "f32", "q8_0": "Q8_0"}.get(run.get("quantize", ""), str(run.get("quantize")))
+        return {"none": "f32", "q8_0": "Q8_0", "q4_0": "Q4_0"}.get(run.get("quantize", ""), str(run.get("quantize")))
 
     for name, entry in results["models"].items():
         for run in entry["runs"]:
@@ -931,6 +956,20 @@ def report(results: dict[str, Any]) -> str:
                     f"| {name} | {run['engine']} | {label(run)} | {row['users']} | {fmt(row['output_tps'])} | "
                     f"{fmt(row['ttft_ms_p50'], 0)} / {fmt(row['ttft_ms_p99'], 0)} |"
                 )
+    rows = [(name, run) for name, entry in results["models"].items() for run in entry["runs"] if "speculation" in run]
+    if rows:
+        lines.append("")
+        lines.append(f"### Speculative decoding (greedy, a prompt that repeats itself, {s['tg']} tokens)")
+        lines.append("")
+        lines.append("| Model | Weights | Plain t/s | Speculative t/s | Speed-up | Drafts kept | Same tokens |")
+        lines.append("|---|---|---:|---:|---:|---:|---|")
+        for name, run in rows:
+            spec = run["speculation"]
+            plain, fast = spec["tps_0"], spec["tps_8"]
+            lines.append(
+                f"| {name} | {label(run)} | {fmt(plain)} | {fmt(fast)} | {fast / plain:.2f}x | {spec['accepted_8']} | "
+                f"{'yes' if spec['identical'] else '**no**'} |"
+            )
     return "\n".join(lines) + "\n"
 
 

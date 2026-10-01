@@ -75,8 +75,8 @@ VERIFY_FINGERPRINT = "3ffd534d1fadce8a267c510806baa2fc"
 
 # Phase 2 real models (tests/test_reference_models.py): the import fingerprint of the pinned checkpoint, and
 # GenerationResult.fingerprint of the greedy chat answer to test_reference_models.CHAT. Phase 10 (#99) adds the
-# sampled answer (SAMPLED) and the float32 bits of the last-position logits of PROMPTS (float32 and Q8_0 weights);
-# they must be the same on every release platform, SIMD path and device.
+# sampled answer (SAMPLED) and the float32 bits of the last-position logits of PROMPTS (float32 and Q8_0 weights;
+# Q4_0 since Phase 14); they must be the same on every release platform, SIMD path and device.
 REFERENCE_MODEL_FINGERPRINTS = {
     "smollm2": {
         "import": "2e4d93db18c1ce202f44a8fd4da1333532827e2b84b7979ddcba6c918bfc132f",
@@ -84,6 +84,7 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "sampled": "5f3620a368decf6e7ad82105879f8ee37cc346961a2332298f700144a3eec488",
         "logits": "939f4dab80703cf2dcfff45656a84cc8fbd6602a8a9c3e6d75ada13ce0c5a5fb",
         "logits_q8_0": "000765286f26f9e922fc23f5dfcbae1b7b53b5574525015b2a956b272252b3f9",
+        "logits_q4_0": "5cd1ce3aa760e2917c64c1815e9b32543b4b54059b9eedcb8de09044a3cb61fa",
     },
     "qwen2.5": {
         "import": "9bf78203fabbc1d93a5f387456ff1d755d7fef36396351c911f51656c898eb99",
@@ -91,6 +92,7 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "sampled": "7a75f8d55b99478a282d601c155df0fd6c5066b613db230b610612abbdc05c37",  # the same answer
         "logits": "cafb17dbac5ba9251af7a494246a70f258d6de372bab1a273897f07e74993404",
         "logits_q8_0": "e599b1133d04f3c72c0e6e32c24f78c9ea4d67db3424e7e8f0f54c05aa6fa831",
+        "logits_q4_0": "67b3cd51a74b369fb4833eaf6392aaf08cd423315df2af9644695e736e3d4925",
     },
     "qwen2.5-1.5b": {
         "import": "626d11f6abd38e28450448eae2574b29de3212825a143f37bdbf145673e8556d",
@@ -99,6 +101,7 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "sampled": "7a75f8d55b99478a282d601c155df0fd6c5066b613db230b610612abbdc05c37",
         "logits": "a4eff454791a62e4cfe01c24bd57f9af78809387ae9d699ecf162eeb1007a0a4",
         "logits_q8_0": "fc6ded7859eb616f4baa45870d5e3ad3af9f45757378f288db62d368986b3a73",
+        "logits_q4_0": "e4a63bc4b199dfbed9767082df34718a07d3d91230a0209e1161c7bb6138e4a5",
     },
     "qwen3": {  # greedy chat rendered with enable_thinking=False
         "import": "c34b4666335e7e0dbe110ee9b9fc78936b84391a57a420688fd78036ad6df5b7",
@@ -106,6 +109,7 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "sampled": "109ee1a8513bf1dad8a34b0483a0f3045fe18cbf7c03820e4e359cc20912201c",  # the same answer
         "logits": "54400823b346fbacdb126d5ccca19e12f7e8d3c0d04a94ee546abfa840d1523a",
         "logits_q8_0": "21cd894f2d19253192801ec012209624721e1e401bf530b63d39c7e79900eb5a",
+        "logits_q4_0": "c49da076a0b5ddb18fcf4984f706eccdc1a044048c334c75b6d021eade247080",
     },
     "tinyllama": {
         "import": "b02b4f3085396f3a0b20e07f5b875c9e4a0fbf996dcbc954953bc7d7346b4a4e",
@@ -113,6 +117,7 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "sampled": "12608d6f03ed2ea7892990ed181b39a3d0df693637f168ca34008af1403d4bc3",
         "logits": "1b40cd4dc37c6179feee4abb69e05b42edc3468200e98390685965d893241a1b",
         "logits_q8_0": "5474bab37def485b16798648b8fe338db268e03f1b6544dcb98bc861ff976f53",
+        "logits_q4_0": "f0b07f628f930e3f568f480b6bcb0d2c3be737e45495cac2263b03cd38a28f0f",
     },
     "olmo2": {
         "import": "183baa6ee6dcc08d855a34f1531b7e5cd1d918c21c6e8bef4cebde7ec675d118",
@@ -120,6 +125,7 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "sampled": "28bbe79bdd0ca41816a367ee7bb30120cb7072991d1eefa2e0cb16a1f1ca8767",
         "logits": "41db902b34618b95d3c185d772cf1f10fa58ee3fbd4094a6fb257252528eb5ba",
         "logits_q8_0": "114b3719f3601bfe781d74af647bb13de3345b6fe9a43b11d49825c6ad461b74",
+        "logits_q4_0": "e8488c34ee031d82c7faaaca629aa58ab3766afb3c9b9028a705e6a475249457",
     },
     "llama3.2": {
         "import": "1abe366cb3879f73b5fc2c1a6ad191eab99a70b943942bcb98788eff17010f41",
@@ -128,6 +134,7 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "sampled": "28bbe79bdd0ca41816a367ee7bb30120cb7072991d1eefa2e0cb16a1f1ca8767",
         "logits": "ba7281c7d31afaeb55ed8b259592efd11f71587705584be75ac71197ad02cb73",
         "logits_q8_0": "cea6797804d5b332e889f6d26d7611b31cfa708c296b502a04171198905214e6",
+        "logits_q4_0": "44e3f9fc78a682bfddfb99aab425250e8ee49ce7d044ef28f76c8184870042e5",
     },
     "gemma3": {  # the licence text is the Gemma terms link (the repository has no licence file)
         "import": "b03e32d2236a67ff0f06e85c69285df2067ec6951bd3f52c502f13f00915e5e9",
@@ -135,6 +142,7 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "sampled": "1d3dbbe6c3c890ff1f1215cbd59962f2ced76b538b394b00e1c8d1c97444907f",  # the same answer
         "logits": "38a0996f57e80c1602e23e89b2897b0cca5422ab49b212e0ee38dfb4886d5360",
         "logits_q8_0": "7546cc1c60e56ed7cc4efd617b81c11ac7f7ebfa8f23e843313be6f850eb864b",
+        "logits_q4_0": "0628e1c83908df847416569b6df78cff54766af22258ed98e31a8b7dd83bcf1b",
     },
     # Embedding model: the float32 bits of the EMBEDDING_TEXTS embeddings (last-token pooling, query prompt).
     "qwen3-embedding": {

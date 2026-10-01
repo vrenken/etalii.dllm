@@ -308,5 +308,7 @@ def main() -> None:
         index=args.index,
         index_top=args.index_top,
         embedding_model=args.embedding_model,
+        speculate=args.speculate,
+        draft_model=args.draft_model,
     )
     uvicorn.run(app, host=args.host, port=args.port)

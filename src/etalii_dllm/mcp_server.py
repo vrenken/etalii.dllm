@@ -198,5 +198,7 @@ def main(argv: list[str] | None = None) -> None:
         index=args.index,
         index_top=args.index_top,
         embedding_model=args.embedding_model,
+        speculate=args.speculate,
+        draft_model=args.draft_model,
     )
     server.run("stdio")

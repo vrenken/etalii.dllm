@@ -200,6 +200,38 @@ Quantised output is deterministic but not the float output: it gets its own `sys
 fingerprint hashed with `:q8_0`), and the tests check it against an exact reference and its golden hash. Layers
 whose input size is not a multiple of 32 stay float32. Embedding lookups stay float32; the LM head is quantised.
 
+## Q4_0 quantisation
+
+`--quantize q4_0` stores the linear layers in 4 bits, half of Q8_0's weight memory. Blocks are the same 32 inputs
+with a float32 scale: `d = amax / 7`, `q_i = round_half_even(x_i * (1 / d))` clamped to ±7, computed with the same
+exact operations as Q8_0. Two values share a byte: byte `j` of a block holds `(q_j + 8) | ((q_(j+16) + 8) << 4)`,
+llama.cpp's `Q4_0` order.
+
+The kernel does not have an arithmetic of its own. It unpacks the weights of a panel of outputs back to `int8` (an
+exact operation) and runs exactly the Q8_0 computation on them: activations quantised to Q8_0, exact `int32` block
+sums, blocks combined in double in ascending order. So `linear_q4` equals `linear_q8` on the unpacked values bit for
+bit on every SIMD path (`tests/test_batch_invariance.py`), the GPU uploads the unpacked values and runs its Q8_0
+kernel, and Q4_0 has its own `system_fingerprint` (`:q4_0`) and golden hashes. Unpacking happens per group of four
+outputs for every call, whatever the number of rows, so the strategy does not depend on the batch.
+
+## Speculative decoding
+
+`Transformer.forward_cached_last(tokens, cache, n)` returns the logits of the last `n` positions of one pass. Each
+row is the bits a one-at-a-time decode of that prefix gives, because the tiles and attention compute every row on
+its own (the property continuous batching relies on). `generation.py` uses it to check drafted tokens: it asks the
+sampler for each position in turn, with that position's own random draw, and keeps a draft token only when it is
+the chosen token. The KV cache rows of rejected tokens are dropped at the next call by the usual common-prefix
+match. See [speculative decoding](api.md#speculative-decoding).
+
+## Memory
+
+`ModelFile` maps the file read-only. Once the `Transformer` has made the kernels' copy of a matrix (packed panels,
+Q8_0/Q4_0 blocks or a GPU buffer) it calls `ModelFile.release(name)`, which tells the operating system with
+`madvise(MADV_DONTNEED)` that those file pages are no longer needed, so only one copy of each weight stays
+resident. Nothing is lost: a page that is touched again is read back from the file, byte for byte. On Windows,
+which has no `madvise`, release does nothing. SmolLM2-135M after a chat: float32 1.09 GB to 607 MB, Q8_0 713 MB to
+229 MB, Q4_0 163 MB.
+
 ## Portable determinism
 
 Since Phase 10 the same inputs give the same bits on every supported machine, not only run to run on one. Nothing in

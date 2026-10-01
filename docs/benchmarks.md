@@ -5,8 +5,39 @@ transformers](https://github.com/huggingface/transformers) (PyTorch) and [llama.
 on the same machine, for the same pinned open-weight models. Speed, memory, output quality and determinism are measured
 side by side, the way the established LLM comparisons measure them.
 
-First run: 2026-09-30. Harness: [`benchmarks/benchmark.py`](../benchmarks/benchmark.py); workflow:
+First run: 2026-09-30; latest: 2026-10-01. Harness: [`benchmarks/benchmark.py`](../benchmarks/benchmark.py); workflow:
 [`Benchmark`](../.github/workflows/benchmark.yml). Raw results: [`docs/benchmarks/`](benchmarks/).
+
+## Results (2026-10-01, after Phase 13)
+
+The same runner, models and settings, rerun on the Phase 13 kernels (register tiles, a spinning thread pool; PR #127).
+Full tables: [2026-10-01-github-runner.md](benchmarks/2026-10-01-github-runner.md).
+
+- **Determinism is unchanged: 48 of 48 checks bit-identical**, and every golden hash is the same as before the
+  speed work. transformers and llama.cpp give the same differences as on 2026-09-30.
+- **Prompt processing is 1.9 to 2.5× faster** than on 2026-09-30, on every model and both weight types. It is now
+  0.69 to 0.85× transformers (was 0.33 to 0.38×) and 0.57 to 0.62× llama.cpp in float32 (was 0.26 to 0.30×).
+- **Decoding is 5 to 40 % faster**, most on the smallest model where the thread pool's wake-ups dominated. float32
+  decoding is now 0.85 to 0.93× llama.cpp from 0.5B parameters up (0.62× on SmolLM2).
+- Perplexity, KL divergence and top-1 agreement are identical to the last digit, as they must be.
+- Peak memory is unchanged in this run; keeping only one copy of the weights resident is Phase 14 (#130).
+
+| Model | Weights | pp128 before | pp128 after | tg64 before | tg64 after | llama.cpp pp128 / tg64 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| SmolLM2-135M | f32 | 139 | 309 | 31.9 | 44.5 | 538 / 71.7 |
+| SmolLM2-135M | Q8_0 | 124 | 262 | 40.7 | 56.9 | 538 / 224.0 |
+| Qwen2.5-0.5B | f32 | 50.3 | 109 | 15.4 | 17.1 | 177 / 20.0 |
+| Qwen2.5-0.5B | Q8_0 | 48.5 | 113 | 25.0 | 28.0 | 179 / 69.8 |
+| Qwen3-0.6B | f32 | 39.2 | 79.8 | 12.5 | 14.1 | 132 / 16.5 |
+| Qwen3-0.6B | Q8_0 | 39.2 | 88.7 | 20.8 | 23.2 | 139 / 55.2 |
+| OLMo-2-1B | f32 | 19.0 | 36.9 | 7.2 | 6.9 | 64.1 / 7.9 |
+| OLMo-2-1B | Q8_0 | 19.7 | 48.6 | 14.4 | 16.6 | 62.5 / 28.6 |
+| TinyLlama-1.1B | f32 | 20.4 | 41.5 | 8.3 | 9.0 | 69.5 / 9.7 |
+| TinyLlama-1.1B | Q8_0 | 20.9 | 51.2 | 15.9 | 18.8 | 67.9 / 34.1 |
+| Qwen2.5-1.5B | f32 | 15.2 | 31.1 | 5.7 | 6.0 | 50.3 / 6.6 |
+| Qwen2.5-1.5B | Q8_0 | 15.3 | 38.0 | 10.9 | 12.5 | 50.3 / 23.6 |
+
+Tokens per second, 4 threads, mean of 5 runs. OLMo-2-1B float32 decoding is within run-to-run noise of before.
 
 ## Results (2026-09-30)
 
@@ -86,6 +117,9 @@ in `tests/test_reference_models.py`. Follow-up: compare the three token streams 
 
 ### Where EtAlii.Dllm loses time
 
+As measured on 2026-09-30. Phase 13 added the register-tiled kernels the first point asks for (prompt processing
+2× faster, see above), and Phase 14 releases the memory-mapped copy once the kernels' copy exists (#130).
+
 - **Prompt processing.** The float32 matmul computes each output with its own fixed-order `double` accumulation;
   llama.cpp and PyTorch use cache-blocked GEMM kernels that reuse loaded weights across many tokens. A blocked kernel
   that keeps the per-output summation order would close much of the gap without touching the bits.
@@ -120,7 +154,9 @@ weights, so their accuracy differs only as much as their logits do, which perple
 
 - **Models**: the pinned revisions from `tests/test_reference_models.py`: SmolLM2-135M-Instruct, Qwen2.5-0.5B-Instruct,
   Qwen3-0.6B, OLMo-2-0425-1B-Instruct, TinyLlama-1.1B-Chat-v1.0 and Qwen2.5-1.5B-Instruct.
-- **EtAlii.Dllm**: `dllm import`, float32 and Q8_0 (`--quantize q8_0`), all cores, prompt cache off.
+- **EtAlii.Dllm**: `dllm import`, float32, Q8_0 and Q4_0 (`--quantize`; Q4_0 from the 2026-10-01 harness on), all
+  cores, prompt cache off. Speculative decoding is measured on its own: 64 greedy tokens after a prompt that starts
+  to repeat itself, with and without 8-token drafts, checking that the tokens are the same.
 - **transformers**: float32 on CPU PyTorch, `torch.set_num_threads`, a KV cache for decoding.
 - **llama.cpp**: tag `b11260` built from source with `GGML_NATIVE=ON`; models converted with its
   `convert_hf_to_gguf.py` to f32 and Q8_0. Speed from `llama-bench`, perplexity from `llama-perplexity`, raw logits for

@@ -140,6 +140,7 @@ AdamW from `grad.hpp`.
 | `tools.py` | Tool calling in the Hermes `<tool_call>` format: presenting tools, constraining and parsing calls. |
 | `grammar.py` | Constrained decoding: byte-level JSON grammars and the token masks they induce over a token trie. |
 | `generation.py` | The autoregressive loop: forward pass, sample, append, repeat; stop sequences, logprobs, result fingerprint. |
+| `speculative.py` | Drafters for speculative decoding (prompt lookup, a draft model); the loop in `generation.py` keeps only drafted tokens it would have chosen. |
 | `prompt_cache.py` | KV caches of earlier requests, lent to the next prompt that shares their prefix; saves work, never changes tokens. |
 | `batching.py` | Continuous batching: concurrent generations share one `forward_batch` per step, each keeping its solo bits. |
 | `sampling.py` | Temperature, top-k and top-p sampling with a seeded generator and ties broken on token id. |
@@ -147,7 +148,7 @@ AdamW from `grad.hpp`.
 | `verify.py` | `dllm verify`: one fingerprint of a fixed workload (kernels, Unicode, tokenizer, logits, answers) to compare machines. |
 | `unicode.py` | Normalisation, lower-casing and regex categories from Unicode 15.1 tables shipped in the package, so the Python version cannot change tokenization. |
 | `models.py` | The `LanguageModel` protocol and the seeded placeholder `BigramModel`. |
-| `transformer.py` | The Llama/Qwen2/Qwen3 decoder (RMSNorm, QK-norm, RoPE, grouped-query attention, SwiGLU) and its KV cache, on CPU or GPU, float32 or Q8_0. |
+| `transformer.py` | The Llama/Qwen2/Qwen3 decoder (RMSNorm, QK-norm, RoPE, grouped-query attention, SwiGLU) and its KV cache, on CPU or GPU, float32, Q8_0 or Q4_0. |
 | `lora.py` | LoRA adapters: merging `W + scale · B·A` with the `linear` kernel, adapter gradients, and the PEFT directory format. |
 | `architecture.py` | `TransformerConfig`: the shape of a decoder, independent of where its weights came from. |
 | `modelfile.py` | Reading and writing the `model.dllm` container ([format](../model-format.md)). |
@@ -171,7 +172,7 @@ AdamW from `grad.hpp`.
 | `include/dllm/nn.hpp` | Matmul, RMSNorm, activations, RoPE and attention; every output element has its own accumulation in one order. |
 | `include/dllm/grad.hpp` | Backward kernels, cross-entropy and the AdamW update, with the same ordering rules. |
 | `include/dllm/interp.hpp` | Attention probabilities, cosine similarity, column means and a Cholesky solve for the interpretability and editing tools. |
-| `include/dllm/quant.hpp` | Q8_0 quantisation with exact integer block sums. |
+| `include/dllm/quant.hpp` | Q8_0 and Q4_0 quantisation with exact integer block sums. |
 | `include/dllm/parallel.hpp` | A thread pool whose tasks own disjoint outputs, so the thread count never changes a bit. |
 | `include/dllm/fpenv.hpp` | Runs every binding in the IEEE default floating point state (no flush-to-zero), whatever the process set. |
 | `include/dllm/simd.hpp` | AVX2, SSE2 or NEON variants picked once per machine; lanes hold different outputs, never parts of one sum. |

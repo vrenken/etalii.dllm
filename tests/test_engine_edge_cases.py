@@ -124,14 +124,14 @@ def test_zero_embedding_is_not_normalised():
 # Configuration from the environment
 
 
-@pytest.mark.parametrize("value", ["q4_0", "int8", "fp16"])
+@pytest.mark.parametrize("value", ["q2_k", "int8", "fp16"])
 def test_unknown_quantization_setting_is_refused(monkeypatch, value):
     monkeypatch.setenv(engine_module.QUANTIZE_ENVIRONMENT_VARIABLE, value.upper())
-    with pytest.raises(ValueError, match=f"DLLM_QUANTIZE='{value}'; supported: none, q8_0"):
+    with pytest.raises(ValueError, match=f"DLLM_QUANTIZE='{value}'; supported: none, q8_0, q4_0"):
         configured_quantization()
 
 
-@pytest.mark.parametrize(("value", "expected"), [("", None), (" None ", None), ("Q8_0", "q8_0")])
+@pytest.mark.parametrize(("value", "expected"), [("", None), (" None ", None), ("Q8_0", "q8_0"), ("q4_0", "q4_0")])
 def test_quantization_setting(monkeypatch, value, expected):
     monkeypatch.setenv(engine_module.QUANTIZE_ENVIRONMENT_VARIABLE, value)
     assert configured_quantization() == expected

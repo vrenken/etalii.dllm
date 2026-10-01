@@ -88,25 +88,27 @@ class PackedWeight:
         return self.out_features, self.in_features
 
 
-QUANTIZATIONS = ("q8_0",)
+QUANTIZATIONS = ("q8_0", "q4_0")
 """Weight quantisations :class:`QuantizedWeight` supports."""
 
 
 class QuantizedWeight:
-    """A linear weight ``[out, in]`` quantised to Q8_0: int8 values in blocks of 32 along ``in`` with one float32
-    scale per block (round half to even, docs/kernels.md). :func:`linear` with it quantises the activations the same
-    way and sums each block exactly in int32, so the result is deterministic but only approximates the float layer.
-    """
+    """A linear weight ``[out, in]`` quantised in blocks of 32 along ``in`` with one float32 scale per block (round
+    half to even, docs/kernels.md): ``q8_0`` stores int8 values, ``q4_0`` 4-bit values packed two to a byte (half the
+    memory). :func:`linear` with it quantises the activations to Q8_0 and sums each block exactly in int32, so the
+    result is deterministic but only approximates the float layer."""
 
     def __init__(self, weight: npt.ArrayLike | Tensor, kind: str = "q8_0") -> None:
         if kind not in QUANTIZATIONS:
             raise ValueError(f"unknown quantisation {kind!r}; supported: {', '.join(QUANTIZATIONS)}")
         w = _float32(weight)
         if w.ndim != 2 or w.shape[1] % 32:
-            raise ValueError("Q8_0 needs a [out_features, in_features] weight with in_features a multiple of 32")
+            raise ValueError(f"{kind} needs a [out_features, in_features] weight with in_features a multiple of 32")
         self.kind = kind
         self.out_features, self.in_features = int(w.shape[0]), int(w.shape[1])
-        self.values, self.scales = _kernels.quantize_q8_0(w)
+        quantize = _kernels.quantize_q4_0 if kind == "q4_0" else _kernels.quantize_q8_0
+        self.values, self.scales = quantize(w)
+        """int8 values ``[out, in]`` (``q8_0``) or packed bytes ``[out, in / 2]`` (``q4_0``)."""
 
     @staticmethod
     def supports(weight: npt.ArrayLike | Tensor) -> bool:
@@ -117,9 +119,13 @@ class QuantizedWeight:
     def shape(self) -> tuple[int, int]:
         return self.out_features, self.in_features
 
+    def int8_values(self) -> np.ndarray:
+        """The quantised values as int8 ``[out, in]`` (``q4_0`` unpacked)."""
+        return _kernels.unpack_q4_0(self.values) if self.kind == "q4_0" else self.values
+
     def dequantize(self) -> FloatArray:
         """The float32 weight this quantisation represents (elementwise ``value * scale``)."""
-        return self.values.astype(np.float32) * np.repeat(self.scales, 32, axis=1)
+        return self.int8_values().astype(np.float32) * np.repeat(self.scales, 32, axis=1)
 
 
 def _gpu(device: str) -> bool:
@@ -137,7 +143,8 @@ def linear(
     bias: npt.ArrayLike | Tensor | None = None,
 ) -> Tensor:
     """``x[..., in] @ weight[out, in]^T + bias``. Each output is summed over ``in`` ascending in double; plain and
-    packed weights give identical bits, on any number of threads. A :class:`QuantizedWeight` runs the Q8_0 kernel.
+    packed weights give identical bits, on any number of threads. A :class:`QuantizedWeight` runs the Q8_0 or Q4_0
+    kernel.
     :class:`CudaWeight` and :class:`CudaQuantizedWeight` run the same kernels on the GPU, with the same bits."""
     b = None if bias is None else _float32(bias)
     if isinstance(weight, CudaWeight | CudaQuantizedWeight):
@@ -146,7 +153,8 @@ def linear(
     if isinstance(weight, PackedWeight):
         return Tensor(_kernels.linear_packed(_float32(x), weight.data, weight.out_features, b))
     if isinstance(weight, QuantizedWeight):
-        return Tensor(_kernels.linear_q8(_float32(x), weight.values, weight.scales, b))
+        kernel = _kernels.linear_q4 if weight.kind == "q4_0" else _kernels.linear_q8
+        return Tensor(kernel(_float32(x), weight.values, weight.scales, b))
     return Tensor(_kernels.linear(_float32(x), _float32(weight), b))
 
 

@@ -174,13 +174,24 @@ Speed options (they work the same for `dllm`, `dllm-server` and `dllm-mcp`):
 ```bash
 dllm --model smollm2-135m.dllm --threads 2 chat "Hi"            # default: all cores ($DLLM_THREADS)
 dllm --model smollm2-135m.dllm --quantize q8_0 chat "Hi"         # 8-bit weights ($DLLM_QUANTIZE)
+dllm --model smollm2-135m.dllm --quantize q4_0 chat "Hi"         # 4-bit weights, half of Q8_0's memory
 dllm --model smollm2-135m.dllm --quantize q8_0 info              # shows the quantised system_fingerprint
+dllm --model smollm2-135m.dllm --speculate chat "Repeat: a b c"  # speculative decoding ($DLLM_SPECULATE)
+dllm --model qwen2.5-1.5b.dllm --draft-model qwen2.5-0.5b.dllm chat "Hi"   # drafts from a smaller model
 dllm --model smollm2-135m.dllm --device cuda chat "Hi"           # NVIDIA GPU ($DLLM_DEVICE)
 ```
 
 `--threads` never changes the output, only the speed. `--quantize q8_0` runs the linear layers on 8-bit weights:
 faster and a quarter of the memory traffic, still deterministic, but the numbers differ slightly from the float
-model, so it reports its own `system_fingerprint`. Details: [kernels](kernels.md#threads-and-simd).
+model, so it reports its own `system_fingerprint`. Details: [kernels](kernels.md#threads-and-simd). `--quantize q4_0`
+halves the weight memory again at a larger accuracy cost, with its own fingerprint too
+([Q4_0](kernels.md#q4_0-quantisation)). Only one copy of the weights stays in memory: SmolLM2-135M needs about
+600 MB in float32, 230 MB with Q8_0 and 160 MB with Q4_0.
+
+`--speculate` (8 guesses per step, or `--speculate N`) makes output that repeats earlier text faster, such as code,
+quotes or edits of your prompt; `--draft-model` lets a smaller model with the same tokenizer make the guesses.
+Unlike any other engine's speculative decoding it never changes a single token or logprob, only the speed
+([speculative decoding](api.md#speculative-decoding)).
 
 `--device cuda` runs the model on an NVIDIA GPU and gives exactly the same output as the CPU (same tokens, same
 `system_fingerprint`), about twice as fast in float32 and about three times as fast with `--quantize q8_0`. It needs
@@ -419,13 +430,13 @@ machine already shows `(as released)` or `(DIFFERS from release)`; `--json` prin
   Qwen3, not yet for OLMo 2, Granite, Gemma or Phi models that use LongRoPE; Phi-3/Phi-4-mini with LongRoPE run up to their
   original context (4096 tokens) rather than the advertised 128k. If one misbehaves,
   please open an issue with the `dllm inspect` output.
-- Speed: on a 4-core cloud VM, SmolLM2-135M reads a prompt at about 150 tokens per second and generates about 20
-  tokens per second (about 35 with `--quantize q8_0`); Qwen2.5-0.5B is roughly four times slower. On an RTX 4080,
+- Speed: on a 4-core cloud VM, SmolLM2-135M reads a prompt at about 300 tokens per second and generates about 45
+  tokens per second (about 57 with `--quantize q8_0`); Qwen2.5-0.5B is roughly three times slower. On an RTX 4080,
   Qwen2.5-0.5B generates about 40 tokens per second (about 110 with `--quantize q8_0`). The GPU backend computes in
   double precision to match the CPU bits, so it is far slower than float32 GPU engines. Fine-tuning runs on the CPU
   only and costs roughly three times as much per token as reading a prompt. [Benchmarks](benchmarks.md) compares
   six models side by side with transformers and llama.cpp: generation is faster than transformers and somewhat
-  slower than llama.cpp, prompt reading is about three times slower than both, and only EtAlii.Dllm gives the same
+  slower than llama.cpp, prompt reading is about 0.8× transformers and 0.6× llama.cpp, and only EtAlii.Dllm gives the same
   bits whatever the batch, thread count or concurrent load. `python benchmarks/benchmark.py` reproduces it.
 - Tool calling works best with models trained for it (Qwen2.5-Instruct uses the same `<tool_call>` format the
   engine asks for). SmolLM2-135M does not know tools, so expect clumsy calls from it; constrained decoding still
