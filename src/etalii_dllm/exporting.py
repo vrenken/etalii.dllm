@@ -232,7 +232,7 @@ def export_safetensors(model: ModelFile, directory: str | Path) -> list[Path]:
         (directory / name).write_bytes(data)
     tensors = {hf_tensor_name(name, config): model.tensors[name] for name in model.tensors}
     write_safetensors(directory / "model.safetensors", tensors)
-    return sorted(directory / name for name in [*files, "model.safetensors"])
+    return [directory / name for name in sorted([*files, "model.safetensors"])]  # by name: WindowsPath sorts casefolded
 
 
 # -- GGUF -------------------------------------------------------------------------------------------------------------
