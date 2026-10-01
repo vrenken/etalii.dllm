@@ -430,13 +430,13 @@ machine already shows `(as released)` or `(DIFFERS from release)`; `--json` prin
   Qwen3, not yet for OLMo 2, Granite, Gemma or Phi models that use LongRoPE; Phi-3/Phi-4-mini with LongRoPE run up to their
   original context (4096 tokens) rather than the advertised 128k. If one misbehaves,
   please open an issue with the `dllm inspect` output.
-- Speed: on a 4-core cloud VM, SmolLM2-135M reads a prompt at about 150 tokens per second and generates about 20
-  tokens per second (about 35 with `--quantize q8_0`); Qwen2.5-0.5B is roughly four times slower. On an RTX 4080,
+- Speed: on a 4-core cloud VM, SmolLM2-135M reads a prompt at about 300 tokens per second and generates about 45
+  tokens per second (about 57 with `--quantize q8_0`); Qwen2.5-0.5B is roughly three times slower. On an RTX 4080,
   Qwen2.5-0.5B generates about 40 tokens per second (about 110 with `--quantize q8_0`). The GPU backend computes in
   double precision to match the CPU bits, so it is far slower than float32 GPU engines. Fine-tuning runs on the CPU
   only and costs roughly three times as much per token as reading a prompt. [Benchmarks](benchmarks.md) compares
   six models side by side with transformers and llama.cpp: generation is faster than transformers and somewhat
-  slower than llama.cpp, prompt reading is about three times slower than both, and only EtAlii.Dllm gives the same
+  slower than llama.cpp, prompt reading is about 0.8× transformers and 0.6× llama.cpp, and only EtAlii.Dllm gives the same
   bits whatever the batch, thread count or concurrent load. `python benchmarks/benchmark.py` reproduces it.
 - Tool calling works best with models trained for it (Qwen2.5-Instruct uses the same `<tool_call>` format the
   engine asks for). SmolLM2-135M does not know tools, so expect clumsy calls from it; constrained decoding still
