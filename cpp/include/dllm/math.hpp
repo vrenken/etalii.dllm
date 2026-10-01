@@ -275,7 +275,12 @@ inline double acos(double x) {
     if (x == -1.0) {
         return 3.14159265358979323846;
     }
-    return 2.0 * atan(std::sqrt((1.0 - x) / (1.0 + x)));
+#ifdef __CUDACC_RTC__
+    const double root = __dsqrt_rn((1.0 - x) / (1.0 + x));  // NVRTC has no <cmath>; both are the IEEE square root
+#else
+    const double root = std::sqrt((1.0 - x) / (1.0 + x));
+#endif
+    return 2.0 * atan(root);
 }
 
 // tanh from exp: tanh(x) = sign(x) * (1 - 2 / (e^(2|x|) + 1)); a Taylor polynomial near 0 avoids cancellation.
