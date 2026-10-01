@@ -354,7 +354,24 @@ dllm --model smollm2-135m.dllm sae features smollm2.sae --corpus my-text.txt
 Steering and edits are reproducible too: a steered model has its own `system_fingerprint`, and equal edits or SAE runs
 write byte-identical files. Details: [interpretability](interpretability.md).
 
-## 8. Docker
+## 8. Answer from your documents
+
+An embedding model turns your documents into an index, and a chat model can then answer from them. Both steps are
+exact: the same documents give a byte-identical index, and the same question finds the same passages everywhere.
+
+```bash
+dllm import hf:Qwen/Qwen3-Embedding-0.6B -o qwen3-embedding.dllm
+dllm --model qwen3-embedding.dllm index build my-notes/ -o notes.index      # .md, .txt, ... files
+dllm index search notes.index "When is the next release?" --top 3           # uses the index's embedding model
+dllm --model smollm2-135m.dllm --index notes.index chat "When is the next release?"
+dllm-server --model smollm2-135m.dllm --index notes.index                   # every front end; also DLLM_INDEX
+```
+
+With `--index`, each chat gets the passages found for its last user message in its system message, and the
+`system_fingerprint` changes to show it. `dllm-mcp --index notes.index` also gives MCP clients a `search_documents`
+tool. Details: [retrieval](retrieval.md).
+
+## 9. Docker
 
 The server also comes as an image for linux/amd64 and linux/arm64, published with every release as
 `ghcr.io/vrenken/etalii-dllm:<version>` and `:latest` (`:edge` follows `develop`). It runs `dllm-server` on port
@@ -396,7 +413,7 @@ machine already shows `(as released)` or `(DIFFERS from release)`; `--json` prin
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
   Qwen2.5-0.5B-Instruct, Qwen2.5-1.5B-Instruct, Qwen3-0.6B, TinyLlama-1.1B-Chat, OLMo-2-1B-Instruct,
   Llama-3.2-1B-Instruct and gemma-3-270m-it (tokenizer, chat template, logits within 1e-3 and the
-  same greedy answer; see `tests/test_reference_models.py`). Other Llama/Qwen2/Qwen3 models should work but are not
+  same greedy answer; see `tests/test_reference_models.py`), and so is the embedding model Qwen3-Embedding-0.6B. Other Llama/Qwen2/Qwen3 models should work but are not
   checked. Mistral, Granite, Phi-3 and Gemma 2 are checked against `transformers` only on tiny synthetic models (their real
   checkpoints are gated or too large for a CI runner in float32). Fine-tuning works for Llama, Mistral, Qwen2 and
   Qwen3, not yet for OLMo 2, Granite, Gemma or Phi models that use LongRoPE; Phi-3/Phi-4-mini with LongRoPE run up to their

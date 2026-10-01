@@ -273,7 +273,7 @@ def embeddings(request: EmbeddingsRequest, engine: Engine) -> EmbeddingsResponse
     tokens = 0
     try:
         for index, item in enumerate(inputs):
-            embedding = engine.embed(item, request.dimensions)  # type: ignore[arg-type]
+            embedding = engine.embed(item, request.dimensions, request.input_type)  # type: ignore[arg-type]
             tokens += embedding.tokens
             vector = embedding.vector
             if request.encoding_format == "base64":
@@ -305,5 +305,8 @@ def main() -> None:
         args.adapter,
         steer=args.steer,
         steer_strength=args.steer_strength,
+        index=args.index,
+        index_top=args.index_top,
+        embedding_model=args.embedding_model,
     )
     uvicorn.run(app, host=args.host, port=args.port)

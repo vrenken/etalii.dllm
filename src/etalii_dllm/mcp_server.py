@@ -65,6 +65,21 @@ def chat(
     return default_engine().chat_completion(request).content
 
 
+@server.tool(name="search_documents", annotations=_DETERMINISTIC)
+def search_documents(query: str, top: int = 5) -> str:
+    """Finds the passages of the server's document index (``--index``) closest to the query, best first.
+
+    Returns a JSON list of {"rank", "score", "source", "start", "end", "text"}. The search is exact, so the same
+    query always returns the same passages.
+    """
+    retriever = default_engine().retriever
+    if retriever is None:
+        raise ValueError("this server has no document index; start it with --index (dllm index build)")
+    hits = retriever.search(query, top)
+    rows = [{"rank": h.rank, "score": h.score, **h.chunk.to_json()} for h in hits]
+    return json.dumps(rows, ensure_ascii=False, indent=2)
+
+
 @server.tool(name="model_info", annotations=_DETERMINISTIC)
 def model_info() -> str:
     """Returns the model id and the system fingerprint that identifies the exact weights."""
@@ -180,5 +195,8 @@ def main(argv: list[str] | None = None) -> None:
         args.adapter,
         steer=args.steer,
         steer_strength=args.steer_strength,
+        index=args.index,
+        index_top=args.index_top,
+        embedding_model=args.embedding_model,
     )
     server.run("stdio")

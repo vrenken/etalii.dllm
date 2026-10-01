@@ -197,6 +197,8 @@ class EmbeddingsRequest(BaseModel):
     model: str | None = None
     encoding_format: Literal["float", "base64"] = "float"
     dimensions: int | None = None
+    input_type: str | None = None
+    """Extension: the embedding model's prompt to prefix (e.g. ``"query"`` or ``"document"``)."""
 
 
 class EmbeddingData(BaseModel):

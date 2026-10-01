@@ -218,9 +218,11 @@ def test_server_main_serves_the_app(monkeypatch):
     monkeypatch.setattr(app_module, "use_model_file", lambda *args, **kwargs: calls.setdefault("model", (args, kwargs)))
     monkeypatch.setattr("uvicorn.run", lambda application, **kwargs: calls.setdefault("run", (application, kwargs)))
     argv = ["dllm-server", "--port", "6000", "--model", "m.dllm", "--threads", "2", "--prompt-cache", "0"]
-    monkeypatch.setattr(sys, "argv", [*argv, "--steer", "v.json", "--steer-strength", "2"])
+    monkeypatch.setattr(sys, "argv", [*argv, "--steer", "v.json", "--steer-strength", "2", "--index", "d.index"])
     app_module.main()
-    assert calls["model"] == (("m.dllm", None, 2, None, 0, None), {"steer": "v.json", "steer_strength": 2.0})
+    expected = {"steer": "v.json", "steer_strength": 2.0, "index": "d.index", "index_top": None}
+    expected["embedding_model"] = None
+    assert calls["model"] == (("m.dllm", None, 2, None, 0, None), expected)
     assert calls["run"] == (app, {"host": "127.0.0.1", "port": 6000})
 
 

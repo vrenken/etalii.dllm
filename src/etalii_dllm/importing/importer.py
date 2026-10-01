@@ -8,6 +8,7 @@ The source files' hashes, the repository and revision, and the licence text and 
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import math
@@ -53,6 +54,7 @@ class _Converted:
     name: str | None
     tokenizer: dict[str, Any] | None
     chat_template: str | None
+    embedding: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -385,13 +387,50 @@ def _file_hashes(paths: list[Path], root: Path) -> list[dict[str, Any]]:
     return entries
 
 
+_POOLING_MODES = {"pooling_mode_lasttoken": "last_token", "pooling_mode_mean_tokens": "mean"}
+
+
+def _embedding_settings(directory: Path) -> dict[str, Any] | None:
+    """How a sentence-transformers model turns hidden states into an embedding (``modules.json``, the pooling
+    module's ``config.json`` and the prompts of ``config_sentence_transformers.json``); None for other models."""
+    modules = _read_json(directory / "modules.json")
+    if not isinstance(modules, list) or not modules:
+        return None
+    pooling = next((m for m in modules if str(m.get("type", "")).endswith("Pooling")), None)
+    if pooling is None:
+        raise ModelImportError(f"{directory}: modules.json has no pooling module")
+    settings = _read_json(directory / str(pooling.get("path", "")) / "config.json")
+    chosen = [mode for key, mode in _POOLING_MODES.items() if settings.get(key)]
+    modes = [key for key, value in settings.items() if key.startswith("pooling_mode") and value]
+    if len(chosen) != 1 or len(modes) != 1:
+        raise ModelImportError(f"{directory}: only mean or last-token pooling is supported, not {settings}")
+    if not settings.get("include_prompt", True):
+        raise ModelImportError(f"{directory}: pooling that leaves out the prompt is not supported")
+    extra = _read_json(directory / "config_sentence_transformers.json")
+    prompts = extra.get("prompts") or {}
+    return {
+        "pooling": chosen[0],
+        "normalize": any(str(m.get("type", "")).endswith("Normalize") for m in modules),
+        "prompts": {str(k): str(v) for k, v in sorted(prompts.items())},
+        "default_prompt_name": extra.get("default_prompt_name"),
+    }
+
+
 def _convert_huggingface(directory: Path) -> _Converted:
     config_path = directory / "config.json"
     if not config_path.exists():
         raise ModelImportError(f"{directory}: no config.json")
     raw_config = _read_json(config_path)
     config = hf_config(raw_config, _read_json(directory / "generation_config.json"))
+    pooling = _embedding_settings(directory)
     checkpoint = open_checkpoint(directory)
+    if pooling is not None and "model.embed_tokens.weight" not in checkpoint:
+        # Embedding models are often saved without the causal LM wrapper: no "model." prefix and no LM head.
+        checkpoint = {
+            f"model.{name}": dataclasses.replace(tensor, name=f"model.{name}") for name, tensor in checkpoint.items()
+        }
+    if pooling is not None and "lm_head.weight" not in checkpoint and not config.tie_word_embeddings:
+        config = dataclasses.replace(config, tie_word_embeddings=True)  # no head to generate with: reuse the embedding
 
     tensors: dict[str, TensorSource] = {}
     for tensor in checkpoint.values():
@@ -440,6 +479,7 @@ def _convert_huggingface(directory: Path) -> _Converted:
         name=directory.name,
         tokenizer=tokenizer,
         chat_template=template,
+        embedding=pooling,
     )
 
 
@@ -676,6 +716,7 @@ def import_model(
             "licence": licence_record,
             "tokenizer": converted.tokenizer,
             "chat_template": converted.chat_template,
+            "embedding": converted.embedding,
         },
     )
     return ImportResult(Path(output), fingerprint, converted.config, source_record, licence_record)

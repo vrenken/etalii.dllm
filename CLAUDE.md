@@ -48,7 +48,8 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
   adapters, always merged into the weights; the PEFT format), `grammar`
   (JSON-schema constrained decoding over a token trie), `tools` (tool calling in the Hermes `<tool_call>` format), `interpret/` (activation tracing via `LayerHook`, logit lens,
   embedding explorer, attention maps, steering vectors, ROME edits, sparse autoencoders; `dllm lens|attention|
-  neighbours|steer|edit|sae`, `docs/interpretability.md`).
+  neighbours|steer|edit|sae`, `docs/interpretability.md`), `retrieval` (exact document index, `dllm index`, chats
+  grounded with `--index`, embedding-model pooling in `engine.embed`; `docs/retrieval.md`).
   Tests compare against the reference packages `gguf`, `safetensors` and `tokenizers` (dev dependencies).
 - `src/etalii_dllm/server/` (OpenAI `app.py` and `responses_api.py`, Anthropic `anthropic_api.py`, Ollama `ollama_api.py`, the browser chat page `static/chat.html`
   served at `/`; `docs/api.md`), `mcp_server.py`,
