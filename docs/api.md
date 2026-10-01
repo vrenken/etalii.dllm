@@ -240,6 +240,11 @@ curl -s localhost:5080/v1/chat/completions -H 'content-type: application/json' -
 }'
 ```
 
+## Batches
+
+`POST /v1/files` and `/v1/batches` run OpenAI batch files with output that is the same bytes on every machine and at
+every concurrency; `dllm batch` does the same from the command line. See [batch jobs](batches.md).
+
 ## Tools
 
 OpenAI `tools`/`tool_choice` and Anthropic `tools`/`tool_choice` map onto one mechanism. Models call tools in the

@@ -179,6 +179,7 @@ module map), with Mermaid diagrams.
 | 19. Reproducible model building ✅ | ✅ Exact model merges recorded in the lineage (`dllm merge`: linear, SLERP, TIES, #156); ✅ exports back to safetensors and GGUF that import to the same weights (`dllm export`, #157); ✅ distillation on a teacher's answers that replays bit for bit (`dllm distill`, #158). See [building models](docs/model-building.md) |
 | 20. Independent verification ✅ | ✅ A second, independent implementation that gives the same bits (#161); ✅ `dllm verify --reference` to check a machine against it (#162); ✅ conformance vectors for other implementations (`dllm conformance`, #163); ✅ a written determinism specification (#164). See [specification](docs/specification.md) |
 | 21. Deterministic decoding controls ✅ | ✅ Repetition, frequency and presence penalties, min-p and logit bias with a fixed order (#166); ✅ several choices per request, each with its solo bits (`n`, #167); ✅ regex-constrained output (#168); ✅ all of them in the specification, the reference implementation and the conformance vectors (#169). See [decoding controls](docs/api.md#decoding-controls) |
+| 22. Reproducible batch jobs ✅ | ✅ `dllm batch` with byte-identical output at any concurrency (#171); ✅ exact resume of an interrupted batch (#172); ✅ the OpenAI Files and Batches API with content-derived ids (#173); ✅ a verifiable, signable digest per batch and `--verify` (#174). See [batch jobs](docs/batches.md) |
 
 ## Working with Claude Code
 

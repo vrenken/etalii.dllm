@@ -58,11 +58,12 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
   `docs/serving.md`; `chat_stream(fresh=True)` bypasses both and is what replays use), `merging`/`exporting`
   (`dllm merge`, `dllm export` to safetensors/GGUF; distillation in `training/distill.py`; `docs/model-building.md`),
   `reference` (an independent second implementation of `docs/specification.md` in Python/elementwise NumPy that must
-  give the kernels' bits; `dllm verify --reference`) and `conformance` (`dllm conformance write|check` test vectors), `evaluation` (`dllm eval`,
+  give the kernels' bits; `dllm verify --reference`) and `conformance` (`dllm conformance write|check` test vectors), `batch_jobs` (`dllm batch`, byte-identical OpenAI batch output, resume, digests; the Files/Batches API is
+  `server/batches_api.py`; `docs/batches.md`), `evaluation` (`dllm eval`,
   `docs/evaluation.md`), `retrieval` (exact document index, `dllm index`, chats
   grounded with `--index`, embedding-model pooling in `engine.embed`; `docs/retrieval.md`).
   Tests compare against the reference packages `gguf`, `safetensors` and `tokenizers` (dev dependencies).
-- `src/etalii_dllm/server/` (OpenAI `app.py` and `responses_api.py`, Anthropic `anthropic_api.py`, Ollama `ollama_api.py`, the browser chat page `static/chat.html`
+- `src/etalii_dllm/server/` (OpenAI `app.py`, `responses_api.py` and `batches_api.py`, Anthropic `anthropic_api.py`, Ollama `ollama_api.py`, the browser chat page `static/chat.html`
   served at `/`; `docs/api.md`), `mcp_server.py`,
   `cli.py`: thin front ends over `DllmEngine.chat_stream`. Keep logic out of them so all stay output-identical;
   non-streamed responses are assembled from the same event stream as streamed ones. `mcp_host.py` is the MCP client

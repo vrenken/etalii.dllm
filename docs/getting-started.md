@@ -527,6 +527,18 @@ order, so the same flags give the same answer everywhere. `--n 3` prints three c
 answer you get with `--seed SEED+i`. `--regex` only lets the model write text that matches the pattern in full. The
 HTTP API has all of them too: [decoding controls](api.md#decoding-controls).
 
+## 18. Run a batch of requests
+
+```bash
+dllm --model smollm2-135m.dllm batch requests.jsonl -o results.jsonl --workers 8
+dllm --model smollm2-135m.dllm batch requests.jsonl -o results.jsonl --verify
+```
+
+`requests.jsonl` is an OpenAI batch file (one `{"custom_id", "method", "url", "body"}` per line). The results file
+is the same bytes whatever `--workers` says. If the run is interrupted, the same command resumes it to that exact
+file. `--verify` re-runs the requests and checks every line. The server has the OpenAI Files and Batches API too.
+Details: [batch jobs](batches.md).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,

@@ -200,3 +200,7 @@ CONFORMANCE_MANIFEST_SHA256 = "78f2307713e42db142b03d6d25eb4f7755d0913f5635f9962
 # Phase 21: the placeholder model continuing "Deterministic decoding controls are" with every decoding control set
 # (tests/test_decoding_controls.py::CONTROLLED): penalties, min-p and logit bias.
 DECODING_CONTROLS_FINGERPRINT = "469d2f4cf54e7b6659fa2b1c34b3a6ae3039be211bb516280f28fc762424b04c"
+
+# Phase 22: SHA-256 of the `dllm batch` output for tests/test_batch_jobs.py's six chat requests and one embedding on
+# the placeholder model. The same at every --workers count, on every platform, and after any resume.
+BATCH_OUTPUT_SHA256 = "3901563bd7af75cfae606f18f14f0961093583bea2f2963723e778284c5bd934"
