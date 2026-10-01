@@ -7,6 +7,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 from etalii_dllm import cuda
 from etalii_dllm.chat import ChatMessage
@@ -188,6 +189,13 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         metavar="[NAME=]COMMAND|URL",
         help="an MCP server whose tools the model may call (repeatable), e.g. 'time=uvx mcp-server-time'",
+    )
+    chat.add_argument(
+        "--tool",
+        action="append",
+        default=[],
+        metavar="NAME[=ARG]",
+        help="a built-in deterministic tool the model may call (repeatable): calculator, files=DIR, documents",
     )
     chat.add_argument("--max-tool-rounds", type=int, default=8, help="MCP tool rounds before the answer is cut off")
     chat.add_argument("--receipt", metavar="FILE", help="write the answer's generation receipt to FILE (JSON)")
@@ -496,7 +504,7 @@ def _chat(engine: DllmEngine, args: argparse.Namespace, options: SamplingOptions
     request = ChatRequest(
         [*messages, ChatMessage("user", args.message)], args.max_tokens, options, response_format=response_format
     )
-    if args.mcp_config or args.mcp_server:
+    if args.mcp_config or args.mcp_server or args.tool:
         return _chat_with_mcp(engine, args, request)
     try:
         stream = engine.chat_stream(request)
@@ -519,13 +527,19 @@ def _chat(engine: DllmEngine, args: argparse.Namespace, options: SamplingOptions
 def _chat_with_mcp(engine: DllmEngine, args: argparse.Namespace, request: ChatRequest) -> int:
     import anyio
 
-    from etalii_dllm import mcp_host, transcripts
+    from etalii_dllm import builtin_tools, mcp_host, transcripts
     from etalii_dllm.engine import ToolCallEvent
 
     async def run() -> int:
         finished: Finished | None = None
-        servers = mcp_host.load_config(args.mcp_config) if args.mcp_config else []
-        servers += [mcp_host.parse_server(spec) for spec in args.mcp_server]
+        configs = mcp_host.load_config(args.mcp_config) if args.mcp_config else []
+        configs += [mcp_host.parse_server(spec) for spec in args.mcp_server]
+        servers: list[mcp_host.McpServerConfig] | dict[str, Any] = configs
+        if args.tool:
+            names = [c.name for c in configs]
+            if len(set(names)) != len(names) or "tools" in names:
+                raise mcp_host.McpHostError("MCP server names must be unique ('tools' is the built-in tools)")
+            servers = {**{c.name: c for c in configs}, "tools": builtin_tools.server(args.tool, engine)}
         async with mcp_host.McpHost(servers) as host:
             print(f"tools: {', '.join(t.name for t in host.tools) or '(none)'}", file=sys.stderr)
             recorder = None
