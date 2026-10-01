@@ -461,6 +461,19 @@ the recording, so no server is started. A conversation over the HTTP APIs chains
 or automatically with `previous_response_id`), and `dllm replay` of the list checks every turn. Details:
 [reproducible agents](agents.md).
 
+## 13. Check where a model came from
+
+```bash
+dllm inspect my-model.dllm                    # its lineage: import, fine-tunes, edits
+dllm finetune base.dllm --data notes.txt -o tuned.dllm --receipt tuned.train.json
+dllm replay tuned.train.json --base base.dllm  # trains again: "the same weights, bit for bit"
+dllm sign --keygen me.key && dllm sign tuned.dllm --key me.key
+dllm inspect tuned.dllm --trust me.key.pub     # checks tuned.dllm.sig
+```
+
+`dllm import` prints the file's SHA-256, which is the same on every platform. Signing needs
+`pip install "etalii-dllm[sign]"`. Details: [verifiable models](provenance.md).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,

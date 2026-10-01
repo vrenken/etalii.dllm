@@ -195,6 +195,9 @@ per platform.
 - A bug report is reproducible: the request plus the `system_fingerprint` is enough to get the exact same output
   again, on any supported machine. A [receipt](../receipts.md) packs exactly that, plus hashes of the output, into
   one JSON document that `dllm replay` checks.
+- A model is checkable too: its file records its [lineage](../provenance.md#lineage), a fine-tune's
+  [training receipt](../provenance.md#training-receipts) replays to the same weights, the same import gives the same
+  file on every platform, and an Ed25519 [signature](../provenance.md#signatures) says who vouches for any of these.
 - Determinism is not robustness. The model is as sensitive to its input as any LLM: a different file in the
   context, a timestamp in a tool result or a reworded question can change everything after it. And a wrong answer
   is wrong every time.

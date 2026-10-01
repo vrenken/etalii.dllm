@@ -83,7 +83,8 @@ note: versions that keep the kernels and the sampler give the same output, and t
 ## Limits
 
 - A receipt proves that these weights give this answer to this request. It does not prove who ran the request; sign
-  receipts with your own key if you need that.
+  it (`dllm sign`, or `--sign-key` on any front end) and check with `dllm replay --trust KEY` if you need that
+  ([signatures](provenance.md#signatures)). The receipt's id leaves the signature out.
 - With the MCP host (`dllm chat --mcp-server`), the receipt covers the last round: its request holds the tool
   results the earlier rounds produced. An [agent transcript](agents.md#transcripts) (`--transcript`) records every
   round's receipt and replays the whole run.

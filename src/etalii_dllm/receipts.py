@@ -160,8 +160,8 @@ def make_receipt(
 
 
 def receipt_id(receipt: Mapping[str, Any]) -> str:
-    """``rcpt_`` and the hash of the receipt without its id, so any edit to a receipt is detected."""
-    body = {k: v for k, v in receipt.items() if k != "id"}
+    """``rcpt_`` and the hash of the receipt without its id (and signature), so any edit to a receipt is detected."""
+    body = {k: v for k, v in receipt.items() if k not in ("id", "signature")}
     return "rcpt_" + _sha256(canonical_json(body))[:32]
 
 

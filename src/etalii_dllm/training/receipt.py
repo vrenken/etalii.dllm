@@ -53,7 +53,7 @@ def load_data(engine: DllmEngine, base: ModelFile, path: str | Path, sequence_le
 
 
 def receipt_id(receipt: Mapping[str, Any]) -> str:
-    body = {k: v for k, v in receipt.items() if k != "id"}
+    body = {k: v for k, v in receipt.items() if k not in ("id", "signature")}
     return "trn_rcpt_" + hashlib.sha256(receipts.canonical_json(body).encode()).hexdigest()[:32]
 
 

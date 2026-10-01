@@ -82,6 +82,7 @@ VERIFY_FINGERPRINT = "3ffd534d1fadce8a267c510806baa2fc"
 REFERENCE_MODEL_FINGERPRINTS = {
     "smollm2": {
         "import": "2e4d93db18c1ce202f44a8fd4da1333532827e2b84b7979ddcba6c918bfc132f",
+        "file": "0d82929bf93b8fad1efb114046ae1f913e5c134e09cd939f713cd24d1da8774c",
         "chat": "cb555f4a6519d8b67bc7e1c304b08c0c13852cea297e0fdc644b0b77f70a8f1d",
         "sampled": "5f3620a368decf6e7ad82105879f8ee37cc346961a2332298f700144a3eec488",
         "logits": "939f4dab80703cf2dcfff45656a84cc8fbd6602a8a9c3e6d75ada13ce0c5a5fb",
@@ -91,6 +92,7 @@ REFERENCE_MODEL_FINGERPRINTS = {
     },
     "qwen2.5": {
         "import": "9bf78203fabbc1d93a5f387456ff1d755d7fef36396351c911f51656c898eb99",
+        "file": "a7d03b3a04fd4c792738a1474e6bd84513d2f05c5517f1124c461a4254108314",
         "chat": "7a75f8d55b99478a282d601c155df0fd6c5066b613db230b610612abbdc05c37",
         "sampled": "7a75f8d55b99478a282d601c155df0fd6c5066b613db230b610612abbdc05c37",  # the same answer
         "logits": "cafb17dbac5ba9251af7a494246a70f258d6de372bab1a273897f07e74993404",

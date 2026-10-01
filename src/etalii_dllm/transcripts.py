@@ -45,7 +45,7 @@ def _calls(calls: Sequence[ToolCall]) -> list[dict[str, str]]:
 
 def transcript_id(transcript: Mapping[str, Any]) -> str:
     """``trn_`` and the hash of the transcript without its id, so any edit is detected."""
-    body = {k: v for k, v in transcript.items() if k != "id"}
+    body = {k: v for k, v in transcript.items() if k not in ("id", "signature")}
     return "trn_" + receipts._sha256(receipts.canonical_json(body))[:32]
 
 
@@ -103,7 +103,8 @@ class Recorder:
             "max_rounds": self.max_rounds,
             "rounds": self.rounds,
         }
-        return {**body, "id": transcript_id(body)}
+        transcript = {**body, "id": transcript_id(body)}
+        return self.engine.signer.sign(transcript) if self.engine.signer is not None else transcript
 
 
 class RecordedTools:

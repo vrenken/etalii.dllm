@@ -151,15 +151,17 @@ AdamW from `grad.hpp`.
 | `transformer.py` | The Llama/Qwen2/Qwen3 decoder (RMSNorm, QK-norm, RoPE, grouped-query attention, SwiGLU) and its KV cache, on CPU or GPU, float32, Q8_0 or Q4_0. |
 | `lora.py` | LoRA adapters: merging `W + scale · B·A` with the `linear` kernel, adapter gradients, and the PEFT directory format. |
 | `architecture.py` | `TransformerConfig`: the shape of a decoder, independent of where its weights came from. |
-| `modelfile.py` | Reading and writing the `model.dllm` container ([format](../model-format.md)). |
+| `modelfile.py` | Reading and writing the `model.dllm` container ([format](../model-format.md)), its lineage and whole-file hash ([verifiable models](../provenance.md)). |
 | `numerics.py`, `tensor.py` | Thin wrappers over the C++ kernels, fingerprints, `DeterministicRandom`, and the 64-byte aligned float32 `Tensor`. |
 | `cuda.py` | The GPU backend: finding NVRTC, `CudaTensor`, device-side operations. |
 | `importing/` | Readers for safetensors and GGUF (with GGML dequantisation), the Hugging Face download pinned to a commit, the licence policy, and `dllm import`. |
 | `interpret/` | Interpretability tools on the decoder's own pass: activation tracing through `LayerHook` (observation cannot change a bit), the logit lens, the embedding explorer, attention maps and their HTML/SVG views (`dllm lens`, `attention`, `neighbours`), steering vectors (`steer`, `--steer`), ROME edits (`edit`) and sparse autoencoders (`sae`); [interpretability](../interpretability.md). |
 | `evaluation.py` | `dllm eval`: log-likelihood scoring (perplexity and multiple choice, as lm-evaluation-harness does) with fixed-order sums and a fingerprint over every log-probability; [evaluation](../evaluation.md). |
 | `receipts.py` | Generation receipts: the engine request and hashes of the output as content-addressed JSON, and `verify`, which replays a receipt (`dllm replay`, `POST /v1/receipts/verify`); [receipts](../receipts.md). |
+| `transcripts.py`, `builtin_tools.py` | Agent transcripts and their offline replay; deterministic built-in tools ([reproducible agents](../agents.md)). |
+| `signing.py` | Deterministic Ed25519 signatures on receipts, transcripts and model files (`dllm sign`, `--sign-key`, `--trust`); [verifiable models](../provenance.md#signatures). |
 | `retrieval.py` | Exact document retrieval: fixed chunking, the `dllm index` file (vectors plus chunks in safetensors), cosine search with a total order, and the `Retriever` that grounds chats (`--index`); [retrieval](../retrieval.md). |
-| `training/` | Gradients of the decoder, AdamW, fixed data order and checkpoints that resume bit for bit (`dllm finetune`), for all parameters or LoRA adapters. |
+| `training/` | Gradients of the decoder, AdamW, fixed data order and checkpoints that resume bit for bit (`dllm finetune`), for all parameters or LoRA adapters; training receipts that replay a run (`training/receipt.py`). |
 | `server/` | The OpenAI Chat Completions (`app.py`, `contracts.py`), OpenAI Responses (`responses_api.py`), Anthropic (`anthropic_api.py`, `anthropic_contracts.py`) and Ollama (`ollama_api.py`) wire formats, and the chat page `static/chat.html`. |
 | `mcp_server.py` | The model as an MCP server over stdio (tools, prompts, resources). |
 | `mcp_host.py` | The MCP client host: the model calls external MCP tools in a loop over `chat_stream`. |

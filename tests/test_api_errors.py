@@ -223,6 +223,7 @@ def test_server_main_serves_the_app(monkeypatch):
     app_module.main()
     expected = {"steer": "v.json", "steer_strength": 2.0, "index": "d.index", "index_top": None}
     expected |= {"embedding_model": None, "speculate": 8, "draft_model": None, "prompt_cache_dir": None}
+    expected |= {"sign_key": None}
     assert calls["model"] == (("m.dllm", None, 2, None, 0, None), expected)
     assert calls["run"] == (app, {"host": "127.0.0.1", "port": 6000})
 

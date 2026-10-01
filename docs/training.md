@@ -112,7 +112,12 @@ short fine-tuning run.
 **The fine-tuned model** is an ordinary `model.dllm` (see [the format](model-format.md)) with the base model's
 tokenizer, chat template, source and licence, plus a `fine_tuning` section: base model fingerprint, data fingerprint
 (SHA-256 of the token windows), all run settings, steps completed and the final loss. The licence attribution states
-that the weights were modified, as Apache-2.0 asks. Its `system_fingerprint` is new, as the weights are.
+that the weights were modified, as Apache-2.0 asks. Its `system_fingerprint` is new, as the weights are. Its
+`lineage` gains a `fine_tune` step.
+
+**A training receipt** (`--receipt FILE`) records the base and data, every setting, every step's loss and the
+resulting weights, so that `dllm replay FILE --base BASE` can train again and confirm the same weights, bit for bit
+(see [verifiable models](provenance.md#training-receipts)).
 
 **Checkpoints** (`.dllmckpt`) hold the whole training state:
 
