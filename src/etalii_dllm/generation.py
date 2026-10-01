@@ -18,6 +18,7 @@ from etalii_dllm.grammar import TokenConstraint
 from etalii_dllm.models import LanguageModel
 from etalii_dllm.numerics import fingerprint, log_softmax
 from etalii_dllm.prompt_cache import CacheStore, PromptCache
+from etalii_dllm.reasoning import Tracker, closing_text
 from etalii_dllm.sampling import Sampler, SamplingOptions
 from etalii_dllm.speculative import Drafter, DraftModel, PromptLookup
 from etalii_dllm.tokenization import Tokenizer
@@ -114,9 +115,12 @@ class Generation:
         top_logprobs: int | None,
         new_text: bool = False,
         overflow: str = "stop",
+        reasoning: Tracker | None = None,
     ) -> None:
         self.prompt_tokens = len(context)
         self._overflow = overflow
+        self.reasoning = reasoning
+        """Follows a thinking model's ``<think>`` block and closes it at the budget (:mod:`etalii_dllm.reasoning`)."""
         self.rolls = 0
         """How often the context rolled (``overflow="roll"``)."""
         # Models with a KV cache reuse it across steps; by construction that gives the same logits as forward().
@@ -197,6 +201,38 @@ class Generation:
         pending: list[np.ndarray] = []
         """Logits already computed for the next positions (speculative decoding, :mod:`etalii_dllm.speculative`)."""
 
+        tracker = self.reasoning
+
+        def emit(token: int, logprobs: TokenLogprobs | None) -> tuple[Step, bool]:
+            """Appends ``token`` to the output; the step to yield, and whether a stop sequence ended the output."""
+            nonlocal strip_leading_space, emitted
+            if constraint is not None:
+                constraint.accept(token)
+            sampler.accept(token)
+            self._tokens.append(token)
+            context.append(token)
+            if logprobs is not None:
+                self._logprobs.append(logprobs)
+            data.extend(tokenizer.decode_bytes([token]))
+            if strip_leading_space and data:
+                if data[0] == 0x20:
+                    del data[0]
+                strip_leading_space = False
+            text = bytes(data[: _complete_prefix(data)]).decode("utf-8", errors="replace")
+            if tracker is not None:
+                tracker.step(text)
+            found = [(i, n) for n, s in enumerate(stop) if (i := text.find(s, max(0, len(emitted) - len(s)))) >= 0]
+            if found:
+                stop_at, which = min(found)
+                self.stop_sequence = stop[which]
+                self._text = text[:stop_at]
+                self._finish_reason = "stop"
+                return Step(token, self._text[len(emitted) :], logprobs, "stop"), True
+            release = len(text) - _held_back(text, stop)
+            delta = text[len(emitted) : release] if release > len(emitted) else ""
+            emitted += delta
+            return Step(token, delta, logprobs), False
+
         while len(self._tokens) < max_tokens:
             if constraint is not None and constraint.finished:
                 finish_reason = "stop"
@@ -206,6 +242,19 @@ class Generation:
                     break  # finish_reason stays "length"
                 cache = self._roll(generator, context, window)
                 draft, pending = [], []
+            if tracker is not None and tracker.over_budget:
+                # The thinking budget is spent: the block is closed with fixed tokens, not sampled ones.
+                text = bytes(data[: _complete_prefix(data)]).decode("utf-8", errors="replace")
+                for token in tokenizer.encode(closing_text(text)):
+                    if len(self._tokens) >= max_tokens or (window is not None and len(context) >= window):
+                        break
+                    step, stopped = emit(token, None)
+                    yield step
+                    if stopped:
+                        return
+                tracker.close()
+                draft, pending = [], []
+                continue
             if not pending:
                 room = max_tokens - len(self._tokens) - 1
                 if window is not None:
@@ -229,33 +278,11 @@ class Generation:
                 self.accepted_tokens += 1
             else:
                 draft, pending = [], []
-            if constraint is not None:
-                constraint.accept(token)
-            sampler.accept(token)
-            self._tokens.append(token)
-            context.append(token)
             logprobs = self._logprobs_of(logits, token, top_logprobs) if top_logprobs is not None else None
-            if logprobs is not None:
-                self._logprobs.append(logprobs)
-
-            data.extend(tokenizer.decode_bytes([token]))
-            if strip_leading_space and data:
-                if data[0] == 0x20:
-                    del data[0]
-                strip_leading_space = False
-            text = bytes(data[: _complete_prefix(data)]).decode("utf-8", errors="replace")
-            found = [(i, n) for n, s in enumerate(stop) if (i := text.find(s, max(0, len(emitted) - len(s)))) >= 0]
-            if found:
-                stop_at, which = min(found)
-                self.stop_sequence = stop[which]
-                self._text = text[:stop_at]
-                self._finish_reason = "stop"
-                yield Step(token, self._text[len(emitted) :], logprobs, "stop")
+            step, stopped = emit(token, logprobs)
+            yield step
+            if stopped:
                 return
-            release = len(text) - _held_back(text, stop)
-            delta = text[len(emitted) : release] if release > len(emitted) else ""
-            emitted += delta
-            yield Step(token, delta, logprobs)
 
         self._text = bytes(data).decode("utf-8", errors="replace")
         self._finish_reason = finish_reason
@@ -376,6 +403,7 @@ class Generator:
         top_logprobs: int | None = None,
         new_text: bool = False,
         overflow: str = "stop",
+        reasoning: Tracker | None = None,
     ) -> Generation:
         """Starts a generation. ``stop`` ends it at the first occurrence of any of the strings (which are not part
         of the text); ``constraint`` restricts the tokens (structured output, tool calls); ``top_logprobs``
@@ -383,7 +411,9 @@ class Generator:
         starts a new text (a chat message) rather than continuing the prompt, so a SentencePiece-style tokenizer's
         leading space is dropped from it. ``overflow`` says what happens when the sequence fills the model's
         context window: the generation ends with ``length`` (``stop``), or the context rolls (``roll``, see
-        :meth:`Generation._roll`). A prompt that leaves no room raises :class:`ContextLengthError`."""
+        :meth:`Generation._roll`). A prompt that leaves no room raises :class:`ContextLengthError`. ``reasoning``
+        follows a thinking model's ``<think>`` block and closes it when its budget is spent
+        (:mod:`etalii_dllm.reasoning`)."""
         if overflow not in OVERFLOWS:
             raise ValueError(f"overflow must be one of {', '.join(OVERFLOWS)}")
         if max_tokens < 0:
@@ -401,7 +431,9 @@ class Generator:
             )
         if overflow == "roll" and window is not None and window <= 2 * ROLL_SINK:
             raise ValueError(f"a context window of {window} tokens is too small to roll")
-        return Generation(self, context, max_tokens, options, stop, constraint, top_logprobs, new_text, overflow)
+        return Generation(
+            self, context, max_tokens, options, stop, constraint, top_logprobs, new_text, overflow, reasoning
+        )
 
     def generate(
         self,
@@ -413,7 +445,15 @@ class Generator:
         constraint: TokenConstraint | None = None,
         top_logprobs: int | None = None,
         overflow: str = "stop",
+        reasoning: Tracker | None = None,
     ) -> GenerationResult:
         return self.stream(
-            prompt, max_tokens, options, stop=stop, constraint=constraint, top_logprobs=top_logprobs, overflow=overflow
+            prompt,
+            max_tokens,
+            options,
+            stop=stop,
+            constraint=constraint,
+            top_logprobs=top_logprobs,
+            overflow=overflow,
+            reasoning=reasoning,
         ).result()

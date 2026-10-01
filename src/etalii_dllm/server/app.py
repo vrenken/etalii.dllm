@@ -27,6 +27,7 @@ from etalii_dllm.engine import (
     ChatRequest,
     DllmEngine,
     Finished,
+    ReasoningDelta,
     ResponseFormat,
     TextDelta,
     ToolCallEvent,
@@ -62,6 +63,7 @@ from etalii_dllm.server.contracts import (
     ToolCallModel,
     TopLogprob,
     id_payload,
+    thinking_switch,
 )
 from etalii_dllm.tools import Tool, ToolChoice
 
@@ -186,6 +188,8 @@ def _chat_request(request: ChatCompletionRequest, engine: DllmEngine) -> ChatReq
         previous_receipt=request.previous_receipt,
         truncation=request.truncation or "disabled",
         context_overflow=request.context_overflow or "stop",
+        thinking=thinking_switch(request.reasoning_effort, request.chat_template_kwargs),
+        max_reasoning_tokens=request.max_reasoning_tokens,
     )
 
 
@@ -233,7 +237,11 @@ def chat_completions(
         choices.append(
             ChatCompletionChoice(
                 index=index,
-                message=AssistantMessage(content=result.content or (None if calls else ""), tool_calls=calls or None),
+                message=AssistantMessage(
+                    content=result.content or (None if calls else ""),
+                    tool_calls=calls or None,
+                    **({"reasoning_content": result.reasoning} if result.reasoning is not None else {}),
+                ),
                 logprobs=_logprobs(engine, result.logprobs) if chat.top_logprobs is not None else None,
                 finish_reason=result.finish_reason,
                 **({"receipt": result.receipt} if request.receipt and n > 1 else {}),
@@ -252,9 +260,15 @@ def chat_completions(
             completion_tokens=completion_tokens,
             total_tokens=first.prompt_tokens + completion_tokens,
             prompt_tokens_details=PromptTokensDetails(cached_tokens=first.cached_tokens),
+            **_reasoning_usage(sum(result.reasoning_tokens for result in results)),
         ),
         **({"receipt": first.receipt} if request.receipt else {}),
     )
+
+
+def _reasoning_usage(reasoning_tokens: int) -> dict:
+    """OpenAI's ``completion_tokens_details``, only when a thinking model thought (other responses keep their bytes)."""
+    return {"completion_tokens_details": {"reasoning_tokens": reasoning_tokens}} if reasoning_tokens else {}
 
 
 def _sse(chunk: ChatCompletionChunk) -> str:
@@ -281,7 +295,7 @@ def _chunks(
             **(extra or {}),
         )
 
-    first, completion_tokens = stream, 0
+    first, completion_tokens, reasoning_tokens = stream, 0, 0
     for index in range(n):
         if index > 0:
             stream = engine.chat_stream(engine.choice_request(chat, index))
@@ -290,6 +304,8 @@ def _chunks(
             if isinstance(event, TextDelta):
                 entries = _logprobs(engine, event.logprobs) if logprobs else None
                 yield _sse(chunk(index, ChunkDelta(content=event.text), logprobs=entries))
+            elif isinstance(event, ReasoningDelta):
+                yield _sse(chunk(index, ChunkDelta(reasoning_content=event.text)))
             elif isinstance(event, ToolCallEvent):
                 call = DeltaToolCall(
                     index=event.index,
@@ -302,12 +318,14 @@ def _chunks(
                 extra = {"receipt": event.receipt} if receipt else None
                 yield _sse(chunk(index, ChunkDelta(), extra, finish_reason=event.finish_reason))
                 completion_tokens += event.completion_tokens
+                reasoning_tokens += event.reasoning_tokens
     if include_usage:
         usage = ChatCompletionUsage(
             prompt_tokens=first.prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=first.prompt_tokens + completion_tokens,
             prompt_tokens_details=PromptTokensDetails(cached_tokens=first.cached_tokens),
+            **_reasoning_usage(reasoning_tokens),
         )
         final = ChatCompletionChunk(
             id=chat.request_id,

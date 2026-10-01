@@ -21,6 +21,7 @@ from typing import Any
 import numpy as np
 
 from etalii_dllm import __version__, receipts
+from etalii_dllm import reasoning as thinking_rules
 from etalii_dllm import tools as tooling
 from etalii_dllm.chat import TOOL_CALL_OPEN, ChatMessage, ToolCall, render
 from etalii_dllm.chat_template import ChatTemplate
@@ -141,7 +142,15 @@ class ChatRequest:
     """``stop`` ends an answer that fills the context window (``length``); ``roll`` keeps going on a rolled
     context (:meth:`etalii_dllm.generation.Generation._roll`)."""
 
+    thinking: bool | None = None
+    """For thinking models: ``True``/``False`` switches the ``<think>`` block on or off through the chat template
+    (``enable_thinking``); ``None`` keeps the model's default (docs/api.md#reasoning)."""
+    max_reasoning_tokens: int | None = None
+    """For thinking models: the most tokens the ``<think>`` block may take before the engine closes it."""
+
     def __post_init__(self) -> None:
+        if self.max_reasoning_tokens is not None and self.max_reasoning_tokens < 0:
+            raise ValueError("max_reasoning_tokens must be non-negative")
         if self.truncation not in TRUNCATIONS:
             raise ValueError(f"truncation must be one of {', '.join(TRUNCATIONS)}")
         if self.context_overflow not in OVERFLOWS:
@@ -150,6 +159,14 @@ class ChatRequest:
 
 @dataclass(frozen=True)
 class TextDelta:
+    text: str
+    logprobs: tuple[TokenLogprobs, ...] = ()
+
+
+@dataclass(frozen=True)
+class ReasoningDelta:
+    """Text of a thinking model's ``<think>`` block (without the tags), separate from the answer."""
+
     text: str
     logprobs: tuple[TokenLogprobs, ...] = ()
 
@@ -170,9 +187,11 @@ class Finished:
     """Hash of the generated token ids."""
     receipt: Mapping[str, Any] | None = None
     """What anyone needs to check this response later (:mod:`etalii_dllm.receipts`)."""
+    reasoning_tokens: int = 0
+    """Tokens of the ``<think>`` block (part of ``completion_tokens``)."""
 
 
-ChatEvent = TextDelta | ToolCallEvent | Finished
+ChatEvent = TextDelta | ReasoningDelta | ToolCallEvent | Finished
 
 
 @dataclass(frozen=True)
@@ -189,6 +208,9 @@ class ChatResult:
     """Prompt tokens served from the prompt cache; depends on earlier requests, never changes the output."""
     receipt: Mapping[str, Any] | None = field(default=None, compare=False)
     """What anyone needs to check this response later (:mod:`etalii_dllm.receipts`)."""
+    reasoning: str | None = None
+    """A thinking model's ``<think>`` block, without the tags; ``None`` when it did not think."""
+    reasoning_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -413,7 +435,9 @@ class DllmEngine:
 
     # -- chat ---------------------------------------------------------------------------------------------------
 
-    def fit_messages(self, messages: Sequence[ChatMessage], tools: Sequence[Tool] = ()) -> list[ChatMessage]:
+    def fit_messages(
+        self, messages: Sequence[ChatMessage], tools: Sequence[Tool] = (), *, thinking: bool | None = None
+    ) -> list[ChatMessage]:
         """``messages`` without their oldest ones, until the rendered prompt leaves room in the context window:
         the earliest message that is neither a system message nor the last message goes first, together with the
         tool results that directly follow it. Unchanged when it already fits or the model has no window; may still
@@ -422,7 +446,7 @@ class DllmEngine:
         kept = list(messages)
         if window is None:
             return kept
-        while len(self.tokenizer.encode(self.render_chat(kept, tools))) >= window:
+        while len(self.tokenizer.encode(self.render_chat(kept, tools, thinking=thinking))) >= window:
             first = next((i for i, m in enumerate(kept[:-1]) if m.role != "system"), None)
             if first is None:
                 break
@@ -432,13 +456,32 @@ class DllmEngine:
             del kept[first:end]
         return kept
 
-    def render_chat(self, messages: Iterable[ChatMessage], tools: Sequence[Tool] = ()) -> str:
+    @property
+    def thinks(self) -> bool:
+        """Whether the model is a thinking model (its chat template writes ``<think>`` blocks)."""
+        return self.chat_template is not None and thinking_rules.is_thinking_template(self.chat_template.source)
+
+    def render_chat(
+        self, messages: Iterable[ChatMessage], tools: Sequence[Tool] = (), *, thinking: bool | None = None
+    ) -> str:
         """The prompt for a conversation: the model's own chat template when it has one. Tools are presented by
         the template when it supports them, else by Hermes instructions in the system message. A final assistant
-        message without tool calls is a prefill: the answer continues its text."""
+        message without tool calls is a prefill: the answer continues its text. ``thinking`` switches a thinking
+        model's ``<think>`` block on or off (the template's ``enable_thinking``; a template that ignores it gets an
+        empty, closed block when thinking is off)."""
         messages = list(messages)
         if len(messages) > 1 and messages[-1].role == "assistant" and not messages[-1].tool_calls:
-            return self.render_chat(messages[:-1], tools) + messages[-1].content
+            return self.render_chat(messages[:-1], tools, thinking=thinking) + messages[-1].content
+        if thinking is not None and self.thinks:
+            prompt = self._render(messages, tools, enable_thinking=thinking)
+            if thinking or prompt != self._render(messages, tools, enable_thinking=True):
+                return prompt
+            if thinking_rules.starts_in_thinking(prompt):
+                return prompt + "\n" + thinking_rules.THINK_CLOSE + "\n\n"
+            return prompt + thinking_rules.THINK_OPEN + "\n\n" + thinking_rules.THINK_CLOSE + "\n\n"
+        return self._render(messages, tools)
+
+    def _render(self, messages: list[ChatMessage], tools: Sequence[Tool], **variables: Any) -> str:
         source = self.chat_template.source if self.chat_template is not None else None
         uses_tools = bool(tools) or any(m.tool_calls or m.role == "tool" for m in messages)
         if uses_tools and not tooling.template_supports_tools(source):
@@ -447,7 +490,7 @@ class DllmEngine:
         if self.chat_template is None:
             return render(messages)
         return self.chat_template.render(
-            tooling.template_messages(messages), tools=[t.to_openai() for t in tools] or None
+            tooling.template_messages(messages), tools=[t.to_openai() for t in tools] or None, **variables
         )
 
     def chat(self, messages: Iterable[ChatMessage], max_tokens: int, options: SamplingOptions) -> GenerationResult:
@@ -510,8 +553,16 @@ class DllmEngine:
         if self.retriever is not None and request.prompt is None:
             messages, _ = self.retriever.ground(messages)
         if request.prompt is None and request.truncation == "auto":
-            messages = self.fit_messages(messages, tools)
-        prompt = request.prompt if request.prompt is not None else self.render_chat(messages, tools)
+            messages = self.fit_messages(messages, tools, thinking=request.thinking)
+        prompt = (
+            request.prompt
+            if request.prompt is not None
+            else self.render_chat(messages, tools, thinking=request.thinking)
+        )
+        tracker = None
+        if request.prompt is None and self.thinks and (constraint is None or not constraint.active):
+            # Structured output and forced tool calls constrain the output from its first token: no thinking then.
+            tracker = thinking_rules.Tracker(thinking_rules.starts_in_thinking(prompt), request.max_reasoning_tokens)
         generation = self._generator.stream(
             prompt,
             request.max_tokens,
@@ -521,6 +572,7 @@ class DllmEngine:
             top_logprobs=request.top_logprobs,
             new_text=request.prompt is None,
             overflow=request.context_overflow,
+            reasoning=tracker,
         )
         return _ChatGeneration(
             generation.prompt_tokens, generation.cached_tokens, self._events(generation, request, tools)
@@ -545,28 +597,57 @@ class DllmEngine:
             yield event
 
     def _events(self, generation: Generation, request: ChatRequest, tools: Sequence[Tool]) -> Iterator[ChatEvent]:
+        tracker = generation.reasoning
+        raw = ""
+        """Everything generated; with a thinking model, ``text`` is only its answer part."""
         text = ""
         streamed = ""
+        thought: str | None = None
+        """Reasoning text already sent (``None``: nothing yet)."""
         tokens: list[int] = []
         last = None
         for step in generation:
             last = step
             if step.token is not None:
                 tokens.append(step.token)
-            text += step.text
+            raw += step.text
+            logprobs = (step.logprobs,) if step.logprobs is not None else ()
+            if tracker is not None:
+                reasoning, answer = thinking_rules.streamable(raw, tracker.started)
+                in_answer = thinking_rules.split(raw, tracker.started).state == "answer"
+                sent = thought or ""
+                if reasoning[len(sent) :] or (logprobs and not in_answer):
+                    yield ReasoningDelta(reasoning[len(sent) :], () if in_answer else logprobs)
+                    thought = reasoning
+                if not in_answer:
+                    logprobs = ()
+                delta_text = answer[len(text) :]
+                text = answer
+            else:
+                delta_text = step.text
+                text = raw
             if not tools:
-                if step.text or step.logprobs is not None:
-                    yield TextDelta(step.text, (step.logprobs,) if step.logprobs is not None else ())
+                if delta_text or logprobs:
+                    yield TextDelta(delta_text, logprobs)
                 continue
             # With tools, only text that is certainly answer text is streamed: not leading or trailing whitespace,
             # nothing from a <tool_call> on, and nothing at all when the reply starts like a bare JSON call.
             safe = _answer_prefix(text)
             delta = safe[len(streamed) :]
             streamed = safe
-            if delta or step.logprobs is not None:
-                yield TextDelta(delta, (step.logprobs,) if step.logprobs is not None else ())
+            if delta or logprobs:
+                yield TextDelta(delta, logprobs)
         assert last is not None and last.finish_reason is not None
         result = generation.result()
+        reasoning_text: str | None = None
+        if tracker is not None:
+            parts = thinking_rules.split(raw, tracker.started)
+            reasoning_text = parts.reasoning
+            if reasoning_text is not None and (thought is None or reasoning_text[len(thought) :]):
+                yield ReasoningDelta(reasoning_text[len(thought or "") :])
+            if not tools and parts.answer[len(text) :]:
+                yield TextDelta(parts.answer[len(text) :])
+            text = parts.answer
         finish_reason, calls, content = result.finish_reason, [], text
         if tools:
             content, parsed = tooling.parse_calls(text, tools)
@@ -585,10 +666,11 @@ class DllmEngine:
                 finish_reason = "tool_calls"
         stop_sequence = generation.stop_sequence if finish_reason == "stop" else None
         output = receipts.output_record(
-            result.fingerprint, content, calls, finish_reason, generation.prompt_tokens, len(tokens)
+            result.fingerprint, content, calls, finish_reason, generation.prompt_tokens, len(tokens), reasoning_text
         )
         receipt = receipts.make_receipt(__version__, self.model.id, self.system_fingerprint, request, output)
-        yield Finished(finish_reason, stop_sequence, len(tokens), result.fingerprint, receipt)
+        reasoning_tokens = tracker.tokens if tracker is not None else 0
+        yield Finished(finish_reason, stop_sequence, len(tokens), result.fingerprint, receipt, reasoning_tokens)
 
     def chat_completion(self, request: ChatRequest, *, fresh: bool = False) -> ChatResult:
         return self._collect(self.chat_stream(request, fresh=fresh))
@@ -596,6 +678,7 @@ class DllmEngine:
     @staticmethod
     def _collect(stream: ChatStream) -> ChatResult:
         content: list[str] = []
+        thought: list[str] | None = None
         calls: list[ToolCall] = []
         logprobs: list[TokenLogprobs] = []
         finished: Finished | None = None
@@ -603,6 +686,8 @@ class DllmEngine:
             if isinstance(event, TextDelta):
                 content.append(event.text)
                 logprobs.extend(event.logprobs)
+            elif isinstance(event, ReasoningDelta):
+                thought = [*(thought or []), event.text]
             elif isinstance(event, ToolCallEvent):
                 calls.append(event.call)
             else:
@@ -619,6 +704,8 @@ class DllmEngine:
             tuple(logprobs),
             stream.cached_tokens,
             finished.receipt,
+            "".join(thought) if thought is not None else None,
+            finished.reasoning_tokens,
         )
 
     @staticmethod

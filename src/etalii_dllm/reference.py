@@ -20,7 +20,7 @@ compiled kernels, their SIMD paths and the GPU on the machine itself: ``tests/te
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -667,6 +667,52 @@ def sampler(options: Any) -> Sampler:
 # -- the decoder --------------------------------------------------------------------------------------------------
 
 
+class ThinkingBudget:
+    """The thinking budget of the specification (``docs/specification.md#reasoning``): ``limit`` tokens of a
+    ``<think>`` block, which the output opens itself or (``started``) the prompt opened. ``decode`` gives the bytes of
+    output tokens and ``encode`` the tokens of a text (the model's tokenizer)."""
+
+    OPEN = "<think>"
+    CLOSE = "</think>"
+
+    def __init__(
+        self,
+        limit: int,
+        started: bool,
+        decode: Callable[[Sequence[int]], bytes],
+        encode: Callable[[str], list[int]],
+    ) -> None:
+        self.limit, self.started, self.decode, self.encode = limit, started, decode, encode
+
+    def text(self, tokens: Sequence[int]) -> str:
+        """The output text: its bytes without a trailing incomplete UTF-8 sequence, invalid bytes replaced."""
+        data = self.decode(tokens)
+        end = len(data)
+        for back in range(1, min(4, len(data)) + 1):
+            byte = data[-back]
+            if 0x80 <= byte < 0xC0:
+                continue
+            if byte >= 0xC0 and back < (2 if byte < 0xE0 else 3 if byte < 0xF0 else 4):
+                end = len(data) - back
+            break
+        return data[:end].decode("utf-8", errors="replace")
+
+    def state(self, tokens: Sequence[int]) -> tuple[bool, bool]:
+        """``(opened, closed)``: whether the output is in a block or past one; ``(False, True)`` when it does not
+        think, ``(False, False)`` while it may still open one."""
+        text = self.text(tokens)
+        if self.started:
+            return True, self.CLOSE in text
+        stripped = text.lstrip()
+        if stripped.startswith(self.OPEN):
+            return True, self.CLOSE in stripped[len(self.OPEN) :]
+        return False, not self.OPEN.startswith(stripped)
+
+    def closing(self, tokens: Sequence[int]) -> list[int]:
+        text = self.text(tokens)
+        return self.encode(("" if text.endswith("\n") else "\n") + self.CLOSE + "\n\n")
+
+
 class ReferenceTransformer:
     """The decoder of :class:`etalii_dllm.transformer.Transformer`, step for step, on this module's kernels.
 
@@ -798,13 +844,15 @@ class ReferenceTransformer:
         *,
         overflow: str = "stop",
         window: int | None = None,
+        thinking: ThinkingBudget | None = None,
     ) -> tuple[list[int], list[np.ndarray]]:
         """Generates from ``context`` (a fresh context) until a stop token or ``max_tokens``; returns the tokens
         (without the stop token) and the logits each was chosen from.
 
         The context window (``window``, else ``config.context_length``) is the specification's: a full window ends
         the generation (``overflow="stop"``) or rolls it (``"roll"``): the first :data:`ROLL_SINK` tokens and the
-        latest half window are kept and computed afresh, while the sampler keeps the whole history."""
+        latest half window are kept and computed afresh, while the sampler keeps the whole history. ``thinking``
+        closes a ``<think>`` block that has spent its budget with fixed tokens (:class:`ThinkingBudget`)."""
         window = window or self.config.context_length
         sequence = list(context)
         if window and len(sequence) >= window:
@@ -813,22 +861,41 @@ class ReferenceTransformer:
         sampler.begin(sequence)
         tokens: list[int] = []
         steps: list[np.ndarray] = []
-        logits = self.forward(list(sequence))
+        unfed = list(sequence)
+        """Tokens of ``sequence`` the cache does not hold yet."""
+        spent, forced = 0, False
+
+        def append(token: int) -> None:
+            nonlocal spent
+            before = thinking.state(tokens) if thinking is not None else None
+            sampler.accept(token)
+            tokens.append(token)
+            sequence.append(token)
+            unfed.append(token)
+            if thinking is not None and before is not None and not before[1] and thinking.state(tokens)[0]:
+                spent += 1
+
         while len(tokens) < max_tokens:
             if window and len(sequence) >= window:
                 if overflow != "roll":
                     break
                 sequence = sequence[:ROLL_SINK] + sequence[-(window // 2) :]
                 self.reset()
-                logits = self.forward(list(sequence))
+                unfed = list(sequence)
+            if thinking is not None and not forced:
+                opened, closed = thinking.state(tokens)
+                if opened and not closed and spent >= thinking.limit:
+                    for token in thinking.closing(tokens):
+                        if len(tokens) >= max_tokens or (window and len(sequence) >= window):
+                            break
+                        append(token)
+                    forced = True
+                    continue
+            logits = self.forward(unfed)
+            unfed = []
             token = sampler.sample(logits)
             steps.append(logits)
             if token in stop_tokens:
                 break
-            sampler.accept(token)
-            tokens.append(token)
-            sequence.append(token)
-            if len(tokens) == max_tokens or (window and len(sequence) >= window):
-                continue  # these logits would never be used
-            logits = self.forward([token])
+            append(token)
         return tokens, steps

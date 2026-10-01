@@ -16,14 +16,10 @@ from etalii_dllm.engine import Finished, TextDelta, ToolCallEvent, default_engin
 from etalii_dllm.importing import import_model
 from etalii_dllm.tools import Tool
 
-RUNTIME_VARIABLES = (
-    engine.MODEL_ENVIRONMENT_VARIABLE,
-    engine.ADAPTER_ENVIRONMENT_VARIABLE,
-    engine.QUANTIZE_ENVIRONMENT_VARIABLE,
-    engine.DEVICE_ENVIRONMENT_VARIABLE,
-    engine.PROMPT_CACHE_ENVIRONMENT_VARIABLE,
-    engine.PROMPT_CACHE_DIR_ENVIRONMENT_VARIABLE,
+RUNTIME_VARIABLES = tuple(
+    getattr(engine, name) for name in sorted(vars(engine)) if name.endswith("_ENVIRONMENT_VARIABLE")
 )
+"""Every runtime option variable (``main`` sets some of them, other tests may leave them set)."""
 
 
 @pytest.fixture(autouse=True)

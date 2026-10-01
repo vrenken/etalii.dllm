@@ -17,6 +17,7 @@ from etalii_dllm.engine import (
     ChatRequest,
     DllmEngine,
     Finished,
+    ReasoningDelta,
     ResponseFormat,
     TextDelta,
     add_runtime_arguments,
@@ -243,6 +244,15 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         metavar="NAME[=ARG]",
         help="a built-in deterministic tool the model may call (repeatable): calculator, files=DIR, documents",
+    )
+    chat.add_argument(
+        "--think",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="thinking models: think before answering, or not (default: the model's own default)",
+    )
+    chat.add_argument(
+        "--max-reasoning-tokens", type=int, metavar="N", help="thinking models: close the thinking after N tokens"
     )
     chat.add_argument(
         "--truncate", action="store_true", help="drop the oldest messages when the prompt does not fit the window"
@@ -1018,6 +1028,8 @@ def _chat(engine: DllmEngine, args: argparse.Namespace, options: SamplingOptions
         response_format=response_format,
         truncation="auto" if args.truncate else "disabled",
         context_overflow=args.context_overflow,
+        thinking=args.think,
+        max_reasoning_tokens=args.max_reasoning_tokens,
     )
     if args.mcp_config or args.mcp_server or args.tool:
         return _chat_with_mcp(engine, args, request)
@@ -1026,8 +1038,17 @@ def _chat(engine: DllmEngine, args: argparse.Namespace, options: SamplingOptions
     except ValueError as error:
         print(f"dllm chat: {error}", file=sys.stderr)
         return 1
+    thinking = False
     for event in stream:
-        if isinstance(event, TextDelta):
+        if isinstance(event, ReasoningDelta):
+            if not thinking:
+                sys.stderr.write("thinking: ")
+                thinking = True
+            sys.stderr.write(event.text)
+        elif isinstance(event, TextDelta):
+            if thinking:
+                sys.stderr.write("\n")
+                thinking = False
             _write(event.text)
         elif isinstance(event, Finished):
             _write("\n")
@@ -1065,6 +1086,8 @@ def _chat_with_mcp(engine: DllmEngine, args: argparse.Namespace, request: ChatRe
                     recorder.add(event)
                 if isinstance(event, TextDelta):
                     _write(event.text)
+                elif isinstance(event, ReasoningDelta):
+                    sys.stderr.write(event.text)
                 elif isinstance(event, ToolCallEvent):
                     print(f"\n-> {event.call.name}({event.call.arguments})", file=sys.stderr)
                 elif isinstance(event, mcp_host.ToolResult):

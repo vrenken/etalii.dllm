@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from etalii_dllm.chat import ChatMessage, ToolCall
-from etalii_dllm.engine import ChatEvent, ChatRequest, DllmEngine, Finished, ToolCallEvent
+from etalii_dllm.engine import ChatEvent, ChatRequest, DllmEngine, Finished, TextDelta, ToolCallEvent
 from etalii_dllm.tools import AUTO, Tool
 
 DEFAULT_MAX_ROUNDS = 8
@@ -248,7 +248,7 @@ async def chat(
                 calls.append(event.call)
             elif isinstance(event, Finished):
                 finished = event
-            else:
+            elif isinstance(event, TextDelta):  # a thinking model's reasoning stays out of the history
                 content.append(event.text)
             yield event
         assert finished is not None
