@@ -60,7 +60,7 @@ def test_calculator_errors(expression, message):
 
 
 def test_files_are_sorted_and_confined(tmp_path):
-    (tmp_path / "b.txt").write_text("one\ntwo\nthree\n")
+    (tmp_path / "b.txt").write_bytes(b"one\ntwo\nthree\n")  # bytes: no newline translation on Windows
     (tmp_path / "a").mkdir()
     (tmp_path / "a" / "deep.md").write_text("x")
     (tmp_path / "empty").mkdir()
