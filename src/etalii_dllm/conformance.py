@@ -76,7 +76,7 @@ def _decoder_tensors(name: str) -> Arrays:
         values = _gaussian(500 + index, *shape, scale=0.3)
         if tensor.endswith("norm.weight") and not config.norm_unit_offset:
             values = values + np.float32(1.0)
-        tensors["tensor:" + tensor] = values
+        tensors["tensor." + tensor] = values
     return tensors
 
 
@@ -219,7 +219,7 @@ def _kernels(kernel: str, params: Mapping[str, Any], inputs: Arrays) -> Arrays:
         from etalii_dllm.transformer import Transformer
 
         config = TransformerConfig.from_dict(params["config"])
-        tensors = {name[len("tensor:") :]: v for name, v in inputs.items() if name.startswith("tensor:")}
+        tensors = {name[len("tensor.") :]: v for name, v in inputs.items() if name.startswith("tensor.")}
         model = Transformer(config, tensors, quantize=params["quantize"])
         cache = model.new_cache()
         tokens = [int(t) for t in inputs["tokens"]]
@@ -283,7 +283,7 @@ def _reference(kernel: str, params: Mapping[str, Any], inputs: Arrays) -> Arrays
         from etalii_dllm.architecture import TransformerConfig
 
         config = TransformerConfig.from_dict(params["config"])
-        tensors = {name[len("tensor:") :]: v for name, v in inputs.items() if name.startswith("tensor:")}
+        tensors = {name[len("tensor.") :]: v for name, v in inputs.items() if name.startswith("tensor.")}
         model = r.ReferenceTransformer(config, tensors, quantize=params["quantize"])
         return {"logits": np.stack([model.forward([int(t)]) for t in inputs["tokens"]])}
     raise ValueError(f"unknown kernel {kernel!r}")
@@ -306,11 +306,17 @@ def _little_endian(values: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(values, dtype=values.dtype.newbyteorder("<"))
 
 
+_PORTABLE = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/")
+"""Characters every file system accepts in a name (``:`` is a stream separator on Windows)."""
+
+
 def _save(directory: Path, case: str, key: str, values: np.ndarray) -> dict[str, Any]:
     data = _little_endian(np.asarray(values))
     if data.dtype.kind == "f":  # NaN payloads and signs are not specified (they differ between CPUs): write one NaN
         data = np.where(np.isnan(data), data.dtype.type(math.nan), data).astype(data.dtype)
     relative = f"{case}/{key}.bin"
+    if not set(relative) <= _PORTABLE:
+        raise ValueError(f"{relative}: not a portable file name")
     path = directory / relative
     path.parent.mkdir(parents=True, exist_ok=True)
     raw = data.tobytes()

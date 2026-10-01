@@ -60,6 +60,11 @@ def test_a_wrong_output_fails_its_case(vectors, tmp_path):
     assert result.failed == {"softmax": "different bits in y"}
 
 
+def test_file_names_are_portable(tmp_path):
+    with pytest.raises(ValueError, match="not a portable file name"):
+        conformance._save(tmp_path, "case", "tensor:x", np.zeros(1, np.float32))
+
+
 def test_nans_match_any_nan_and_shapes_must_agree():
     assert conformance.same_bits(np.array([np.nan, 1.0]), np.array([-np.nan, 1.0]))
     assert not conformance.same_bits(np.array([0.0]), np.array([-0.0]))

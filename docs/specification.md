@@ -252,7 +252,7 @@ for SmolLM2-135M on every release platform and SIMD path, in float32 and Q8_0.
 - **Kernels covered.** The transcendentals, `linear` (float32 and quantised), `quantize`, `matmul`, `rms_norm`, the
   activations, `softmax`, `rope_inv_freq`, `rope`, `attention`, `random` (the `next_u64`, `next_double` and
   `next_gaussian` streams), `sample`, and `decoder`.
-- **The decoder cases.** Each holds a config, its tensors (inputs named `tensor:<name>`), and the logits after each
+- **The decoder cases.** Each holds a config, its tensors (inputs named `tensor.<name>`), and the logits after each
   token fed one at a time.
 
 An implementation conforms when it reproduces every output: the same shape and bits, where any NaN matches any NaN.
