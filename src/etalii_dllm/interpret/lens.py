@@ -47,7 +47,7 @@ def logit_lens(model: Transformer, tokens: Sequence[int], top: int = 5, recorded
     """The top ``top`` next-token predictions after every layer and position of ``tokens``."""
     if top < 1:
         raise ValueError("top must be at least 1")
-    recorded = recorded or trace(model, tokens, attention=False)
+    recorded = recorded or trace(model, tokens, attention=False, logits=False)
     predictions = []
     for stream in recorded.residual:
         logits = model.logits_from_hidden(model.final_norm(stream))

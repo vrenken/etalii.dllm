@@ -338,7 +338,21 @@ dllm --model smollm2-135m.dllm neighbours "king - man + woman" --top-k 8 --svg c
 
 `--html` writes a self-contained page (a grid of predictions per layer and position, or attention heatmaps) and
 `--svg` a word cloud. The Python API (`etalii_dllm.interpret.trace`) returns every activation of a forward pass.
-Details: [interpretability](interpretability.md).
+
+You can also change the model on purpose. A steering vector pushes every answer in a direction, a ROME edit changes
+one fact, and a sparse autoencoder finds the features a layer uses:
+
+```bash
+dllm --model smollm2-135m.dllm steer --positive "I love this, it is wonderful." --negative "I hate this, it is awful." -o love.json
+dllm --model smollm2-135m.dllm --steer love.json chat "Describe your morning."   # also dllm-server, dllm-mcp, DLLM_STEER
+dllm edit smollm2-135m.dllm --prompt "The Eiffel Tower is located in the city of" --subject "Eiffel Tower" \
+    --target " Rome" -o smollm2-rome.dllm
+dllm --model smollm2-135m.dllm sae train --corpus my-text.txt --steps 600 -o smollm2.sae
+dllm --model smollm2-135m.dllm sae features smollm2.sae --corpus my-text.txt
+```
+
+Steering and edits are reproducible too: a steered model has its own `system_fingerprint`, and equal edits or SAE runs
+write byte-identical files. Details: [interpretability](interpretability.md).
 
 ## 8. Docker
 

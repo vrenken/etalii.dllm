@@ -215,12 +215,12 @@ def test_openai_embeddings_reject_an_empty_list(gpt):
 
 def test_server_main_serves_the_app(monkeypatch):
     calls = {}
-    monkeypatch.setattr(app_module, "use_model_file", lambda *args: calls.setdefault("model", args))
+    monkeypatch.setattr(app_module, "use_model_file", lambda *args, **kwargs: calls.setdefault("model", (args, kwargs)))
     monkeypatch.setattr("uvicorn.run", lambda application, **kwargs: calls.setdefault("run", (application, kwargs)))
     argv = ["dllm-server", "--port", "6000", "--model", "m.dllm", "--threads", "2", "--prompt-cache", "0"]
-    monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.setattr(sys, "argv", [*argv, "--steer", "v.json", "--steer-strength", "2"])
     app_module.main()
-    assert calls["model"] == ("m.dllm", None, 2, None, 0, None)
+    assert calls["model"] == (("m.dllm", None, 2, None, 0, None), {"steer": "v.json", "steer_strength": 2.0})
     assert calls["run"] == (app, {"host": "127.0.0.1", "port": 6000})
 
 

@@ -44,6 +44,10 @@ DEVICE_ENVIRONMENT_VARIABLE = "DLLM_DEVICE"
 """Where the served model runs: ``cpu`` (default) or ``cuda``. Never changes the output."""
 PROMPT_CACHE_ENVIRONMENT_VARIABLE = "DLLM_PROMPT_CACHE"
 """How many KV caches the served model keeps for prompt caching (default 4, 0 disables). Never changes the output."""
+STEER_ENVIRONMENT_VARIABLE = "DLLM_STEER"
+"""A steering vector file (``dllm steer``) added to the model's residual stream; changes the output."""
+STEER_STRENGTH_ENVIRONMENT_VARIABLE = "DLLM_STEER_STRENGTH"
+"""Overrides the steering vector file's strength."""
 
 
 @dataclass(frozen=True)
@@ -176,12 +180,16 @@ class DllmEngine:
         device: str = "cpu",
         prompt_cache: int = DEFAULT_PROMPT_CACHE_SIZE,
         adapter: str | Path | None = None,
+        steer: str | Path | None = None,
+        steer_strength: float | None = None,
     ) -> DllmEngine:
         """An engine for an imported ``model.dllm``: its decoder, BPE tokenizer and chat template. ``quantize``
         (``"q8_0"``) runs the linear layers on quantised weights; that changes the output, and so the
         ``system_fingerprint``. ``device="cuda"`` runs the decoder on the GPU with the same output. ``adapter``, a
         PEFT LoRA adapter directory, is merged into the weights first, exactly as ``dllm import ADAPTER --base``
-        merges it, so the output and the ``system_fingerprint`` equal those of the merged file."""
+        merges it, so the output and the ``system_fingerprint`` equal those of the merged file. ``steer``, a steering
+        vector file, is added to the residual stream after its layer at ``steer_strength`` (default: the file's);
+        that changes the output and the ``system_fingerprint``."""
         from etalii_dllm.bpe import from_model_header, special_token_text
         from etalii_dllm.modelfile import ModelFile
         from etalii_dllm.transformer import Transformer
@@ -198,6 +206,14 @@ class DllmEngine:
 
             tensors, _ = apply_adapter(file.config, file.tensors, adapter)
             weights_fingerprint = data_fingerprint(tensors)
+        steering = None
+        if steer:
+            from etalii_dllm.interpret.steering import SteeringVector
+
+            vector = SteeringVector.load(steer)
+            if not 1 <= vector.layer <= file.config.layers or vector.vector.shape != (file.config.hidden_size,):
+                raise ValueError(f"{steer}: the steering vector does not fit this model")
+            steering = {vector.layer - 1: vector.scaled(steer_strength)}
         model = Transformer(
             file.config,
             tensors,
@@ -205,6 +221,7 @@ class DllmEngine:
             weights_fingerprint=weights_fingerprint,
             quantize=quantize,
             device=device,
+            steering=steering,
         )
         tokenizer = from_model_header(file.tokenizer)
         template = None
@@ -426,6 +443,8 @@ def use_model_file(
     device: str | None = None,
     prompt_cache: int | None = None,
     adapter: str | Path | None = None,
+    steer: str | Path | None = None,
+    steer_strength: float | None = None,
 ) -> None:
     """Makes the front ends serve ``path`` (sets ``DLLM_MODEL``, and ``DLLM_QUANTIZE``/``DLLM_DEVICE``/
     ``DLLM_PROMPT_CACHE``/``DLLM_ADAPTER`` when ``quantize``/``device``/``prompt_cache``/``adapter`` are given) and
@@ -441,14 +460,18 @@ def use_model_file(
         os.environ[PROMPT_CACHE_ENVIRONMENT_VARIABLE] = str(prompt_cache)
     if adapter:
         os.environ[ADAPTER_ENVIRONMENT_VARIABLE] = str(adapter)
+    if steer:
+        os.environ[STEER_ENVIRONMENT_VARIABLE] = str(steer)
+    if steer_strength is not None:
+        os.environ[STEER_STRENGTH_ENVIRONMENT_VARIABLE] = repr(float(steer_strength))
     if threads is not None:
         set_threads(threads)
     default_engine.cache_clear()
 
 
 def add_runtime_arguments(parser: argparse.ArgumentParser) -> None:
-    """The ``--model``, ``--adapter``, ``--quantize``, ``--threads``, ``--device`` and ``--prompt-cache`` options every
-    front end shares."""
+    """The ``--model``, ``--adapter``, ``--quantize``, ``--threads``, ``--device``, ``--steer``, ``--steer-strength``
+    and ``--prompt-cache`` options every front end shares."""
     parser.add_argument("--model", help="model.dllm file to use (default: $DLLM_MODEL, else the placeholder model)")
     parser.add_argument(
         "--adapter",
@@ -466,6 +489,14 @@ def add_runtime_arguments(parser: argparse.ArgumentParser) -> None:
         "--device",
         choices=DEVICES,
         help="run the model on the CPU or an NVIDIA GPU (default: $DLLM_DEVICE, else cpu); never changes output",
+    )
+    parser.add_argument(
+        "--steer", help="steering vector file (dllm steer) to add to the model (default: $DLLM_STEER); changes output"
+    )
+    parser.add_argument(
+        "--steer-strength",
+        type=float,
+        help="multiplier for the steering vector (default: $DLLM_STEER_STRENGTH, else the file's)",
     )
     parser.add_argument(
         "--prompt-cache",
@@ -494,6 +525,17 @@ def configured_device() -> str:
     return value
 
 
+def configured_steer_strength() -> float | None:
+    """``$DLLM_STEER_STRENGTH``, or ``None`` when it is unset or empty."""
+    value = os.environ.get(STEER_STRENGTH_ENVIRONMENT_VARIABLE, "").strip()
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        raise ValueError(f"{STEER_STRENGTH_ENVIRONMENT_VARIABLE}={value!r}; expected a number") from None
+
+
 def configured_prompt_cache() -> int:
     """``$DLLM_PROMPT_CACHE``, or the default when it is unset or empty."""
     value = os.environ.get(PROMPT_CACHE_ENVIRONMENT_VARIABLE, "").strip()
@@ -517,4 +559,6 @@ def default_engine() -> DllmEngine:
         device=configured_device(),
         prompt_cache=configured_prompt_cache(),
         adapter=os.environ.get(ADAPTER_ENVIRONMENT_VARIABLE) or None,
+        steer=os.environ.get(STEER_ENVIRONMENT_VARIABLE) or None,
+        steer_strength=configured_steer_strength(),
     )

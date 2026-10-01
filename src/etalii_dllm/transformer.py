@@ -83,6 +83,19 @@ def _prepare(weight: Tensor, quantize: str | None, device: str) -> Weight:
     return CudaWeight(weight) if device == "cuda" else PackedWeight(weight)
 
 
+def steered_fingerprint(fingerprint: str, steering: Mapping[int, np.ndarray] | None) -> str:
+    """The weights fingerprint of a model run with ``steering`` (layer index -> vector added to that layer's
+    output): unchanged without it, else the SHA-256 of the fingerprint and every layer's vector bits, so a steered
+    model never shares a ``system_fingerprint`` with the plain one."""
+    if not steering:
+        return fingerprint
+    digest = hashlib.sha256(f"{fingerprint}:steering".encode())
+    for layer in sorted(steering):
+        digest.update(f":{layer}:".encode())
+        digest.update(np.ascontiguousarray(steering[layer], dtype="<f4").tobytes())
+    return digest.hexdigest()
+
+
 def quantized_fingerprint(fingerprint: str, quantize: str | None) -> str:
     """The weights fingerprint of a model run with ``quantize``: unchanged without quantisation, else the SHA-256
     of ``"<fingerprint>:<quantisation>"``, so quantised and float runs never share a ``system_fingerprint``."""
@@ -178,7 +191,11 @@ class Transformer:
         weights_fingerprint: str = "",
         quantize: str | None = None,
         device: str = "cpu",
+        steering: Mapping[int, npt.ArrayLike] | None = None,
     ) -> None:
+        """``steering`` maps 0-based layer indices to vectors ``[hidden]`` added (elementwise, float32) to the
+        residual stream after that layer at every position (activation steering); it changes the output and so the
+        fingerprint."""
         expected = config.tensor_shapes()
         missing = sorted(set(expected) - set(tensors))
         if missing:
@@ -187,7 +204,17 @@ class Transformer:
         self.quantization = quantize
         self.device = cuda.check_device(device)
         """``"cpu"`` or ``"cuda"``; never changes the output, so it is not part of the fingerprint."""
-        self.weights_fingerprint = quantized_fingerprint(weights_fingerprint, quantize)
+        self.steering: dict[int, np.ndarray] = {}
+        for layer, vector in (steering or {}).items():
+            values = np.ascontiguousarray(vector, dtype=np.float32)
+            if not 0 <= layer < config.layers or values.shape != (config.hidden_size,):
+                raise ValueError(
+                    f"steering needs a layer in 0..{config.layers - 1} and a vector of {config.hidden_size}"
+                )
+            self.steering[int(layer)] = values
+        self.weights_fingerprint = quantized_fingerprint(
+            steered_fingerprint(weights_fingerprint, self.steering), quantize
+        )
         self._id = model_id
         weights = {name: Tensor(tensors[name]) for name in expected}
         for name, shape in expected.items():
@@ -237,7 +264,12 @@ class Transformer:
 
     @classmethod
     def from_file(
-        cls, path: str | Path, verify: bool = True, quantize: str | None = None, device: str = "cpu"
+        cls,
+        path: str | Path,
+        verify: bool = True,
+        quantize: str | None = None,
+        device: str = "cpu",
+        steering: Mapping[int, npt.ArrayLike] | None = None,
     ) -> Transformer:
         model = ModelFile(path, verify=verify)
         source = model.source.get("repository") or Path(path).stem
@@ -248,6 +280,7 @@ class Transformer:
             weights_fingerprint=model.fingerprint,
             quantize=quantize,
             device=device,
+            steering=steering,
         )
 
     @property
@@ -441,7 +474,10 @@ class Transformer:
                 out = norm(out, p + "mlp_post_norm.weight")
             if hook is not None:
                 hook.mlp_output(layer, out.numpy().copy())
-            x = observe(layer, "output", x + out.numpy())
+            x = x + out.numpy()
+            if layer in self.steering:
+                x = x + self.steering[layer]
+            x = observe(layer, "output", x)
         return norm(x, "final_norm.weight")
 
     def _embeddings(self, tokens: list[int]) -> np.ndarray:
@@ -525,4 +561,7 @@ class Transformer:
             if config.has_post_norms:
                 out = norm(out, p + "mlp_post_norm.weight")
             x = cuda.add(x, out)
+            if layer in self.steering:
+                rows = np.ascontiguousarray(np.broadcast_to(self.steering[layer], (count, config.hidden_size)))
+                x = cuda.add(x, CudaTensor.upload(rows))
         return norm(x, "final_norm.weight")
