@@ -98,7 +98,18 @@ Every box with a sum inside (linear, RMSNorm, RoPE's angles, attention) is a C++
 the residual additions and the SwiGLU product are elementwise float32 operations, exactly as in the reference
 implementations. With `--device cuda` the same steps run on `CudaTensor`s through `cuda.py`, weights and cache stay
 on the GPU, and only the embedding rows go up and the logits come back. With `--quantize q8_0` the linear layers
-use 8-bit weights with exact integer block sums.
+use 8-bit weights with exact integer block sums; `q4_0` stores 4-bit weights and unpacks them into the same
+computation.
+
+### Speculative decoding
+
+With `--speculate` the generation loop asks a drafter (`speculative.py`: `PromptLookup` over the tokens so far, or
+`DraftModel`, a smaller model with the same tokenizer) for the next few tokens and runs `context + draft` through
+`forward_cached_last`, which returns the logits of every drafted position in one pass. The sampler then chooses
+the token for each position in order, as plain decoding would, and a drafted token is kept only when it is the chosen
+one; at the first difference the remaining logits are dropped and the cache rows of the rejected tokens are
+overwritten at the next call. Because each row's logits are the one-at-a-time bits, the output is identical with
+and without speculation (`tests/test_speculative.py`).
 
 ## KV cache
 

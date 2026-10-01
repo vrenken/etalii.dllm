@@ -76,6 +76,23 @@ fixed order and attention runs per request, so a request gets exactly the bits i
 share its steps and whenever they arrived (`tests/test_batching.py`, and `tests/test_batch_invariance.py` fires 36
 overlapping requests at the server and compares every response with a lone run). Nothing needs configuring.
 
+## Speculative decoding
+
+`--speculate [N]` (or `DLLM_SPECULATE=N`) guesses up to N next tokens cheaply, checks them all in one forward pass
+and keeps the ones the model would have chosen, so repetitive output (code, quotes, edits of the prompt, JSON) comes
+out several tokens per pass. The guesses come from the text so far (the tokens that followed the last earlier
+occurrence of the current two or three tokens), or, with `--draft-model FILE` (`DLLM_DRAFT_MODEL`), from a smaller
+model with the same tokenizer, which turns speculation on with N = 8.
+
+Other engines accept a draft token when a random test says its probability is high enough, which keeps the
+distribution but not the tokens. Here a drafted token is kept only when it *is* the token plain decoding picks at that
+position, from the same logits and that position's own random draw, so tokens, text, logprobs, finish reasons and
+`system_fingerprint` are identical with and without it, at any temperature, with structured output, tools and stop
+sequences (`tests/test_speculative.py`). The check pass gives each position the bits of one-at-a-time decoding
+because every kernel computes each row on its own. Speculation only changes the speed: on SmolLM2-135M an answer that
+repeats its prompt is about 1.6× faster, code about 1.3×, free chat about the same. A step that checks a draft runs
+on its own rather than in the shared batch of concurrent requests; either way every request keeps its solo bits.
+
 ## Responses API
 
 OpenAI's newer Responses API works with the official SDK's `client.responses`:

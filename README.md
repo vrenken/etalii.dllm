@@ -170,6 +170,7 @@ module map), with Mermaid diagrams.
 | 11. Interpretability and editing ✅ | ✅ Activation tracing that cannot change a bit of the output; ✅ logit lens (`dllm lens`); ✅ embedding explorer, analogies and word clouds (`dllm neighbours`); ✅ attention maps (`dllm attention`); ✅ steering vectors (`dllm steer`, `--steer`); ✅ ROME model edits (`dllm edit`); ✅ sparse autoencoders (`dllm sae`). See [interpretability](docs/interpretability.md) |
 | 12. Retrieval and grounding ✅ | ✅ Embedding models with their own pooling and query prompts, verified Qwen3-Embedding-0.6B; ✅ exact, reproducible document index (`dllm index build`/`search`); ✅ chats grounded in your documents in every front end (`--index`) and an MCP `search_documents` tool. See [retrieval](docs/retrieval.md) |
 | 13. Speed without changing a bit ✅ | ✅ Activations on the thread pool and a fused SwiGLU; ✅ register-tiled float32 and Q8_0 matmuls; ✅ tiled prefill attention; ✅ a thread pool that spins briefly before sleeping, and kernels really built at `-O3`. Prefill is about 3× faster, decoding 1.7×, and every golden hash is unchanged. See [Phase 13](docs/kernels.md#phase-13-tiles) and [benchmarks](docs/benchmarks.md) |
+| 14. Lean and fast decoding | ✅ Speculative decoding that never changes a token (`--speculate`, `--draft-model`); ✅ 4-bit Q4_0 weights; ✅ one copy of the weights in memory; ✅ benchmarks after Phase 13. See [speculative decoding](docs/api.md#speculative-decoding), [Q4_0](docs/kernels.md#q4_0-quantisation) and [memory](docs/kernels.md#memory) |
 
 ## Working with Claude Code
 

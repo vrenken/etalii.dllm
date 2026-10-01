@@ -154,7 +154,9 @@ weights, so their accuracy differs only as much as their logits do, which perple
 
 - **Models**: the pinned revisions from `tests/test_reference_models.py`: SmolLM2-135M-Instruct, Qwen2.5-0.5B-Instruct,
   Qwen3-0.6B, OLMo-2-0425-1B-Instruct, TinyLlama-1.1B-Chat-v1.0 and Qwen2.5-1.5B-Instruct.
-- **EtAlii.Dllm**: `dllm import`, float32 and Q8_0 (`--quantize q8_0`), all cores, prompt cache off.
+- **EtAlii.Dllm**: `dllm import`, float32, Q8_0 and Q4_0 (`--quantize`; Q4_0 from the 2026-10-01 harness on), all
+  cores, prompt cache off. Speculative decoding is measured on its own: 64 greedy tokens after a prompt that starts
+  to repeat itself, with and without 8-token drafts, checking that the tokens are the same.
 - **transformers**: float32 on CPU PyTorch, `torch.set_num_threads`, a KV cache for decoding.
 - **llama.cpp**: tag `b11260` built from source with `GGML_NATIVE=ON`; models converted with its
   `convert_hf_to_gguf.py` to f32 and Q8_0. Speed from `llama-bench`, perplexity from `llama-perplexity`, raw logits for

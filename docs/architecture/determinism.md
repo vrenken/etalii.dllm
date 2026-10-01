@@ -151,7 +151,7 @@ fingerprint of its own.
 | Change | Effect | Visible in |
 | --- | --- | --- |
 | Another model, or a fine-tuned or edited (`dllm edit`) `model.dllm` | New weights | `system_fingerprint` |
-| `--quantize q8_0` | Different (quantised) arithmetic | A different `system_fingerprint` |
+| `--quantize q8_0` or `q4_0` | Different (quantised) arithmetic | A different `system_fingerprint` |
 | `--steer FILE` (a steering vector) | A vector added to the residual stream | A different `system_fingerprint` (it includes the vector's bits) |
 | `--index FILE` (a document index) | Passages added to the system message | A different `system_fingerprint` (it includes the index fingerprint and `--index-top`) |
 | A new engine version with new kernel or sampler semantics | New bits, documented in the commit | Golden hashes in `tests/golden_values.py` |

@@ -133,8 +133,9 @@ Two properties matter for the rest of the system:
 without a copy. From the header it builds the `TransformerConfig`, the BPE tokenizer (`bpe.py`, from the stored
 `tokenizer.json`) and the `ChatTemplate` (with the special tokens from `tokenizer_config.json`), and collects the
 stop tokens (the configuration's end-of-sequence ids plus the tokenizer's). The `Transformer` then prepares its
-weights once: packed into the 16-output panels the SIMD kernels read, quantised to Q8_0 with `--quantize q8_0`
-(which changes the fingerprint), or uploaded to the GPU with `--device cuda` (which does not). A `--adapter` is merged into the tensors before any of
+weights once: packed into the 16-output panels the SIMD kernels read, quantised to Q8_0 or Q4_0 with `--quantize`
+(which changes the fingerprint), or uploaded to the GPU with `--device cuda` (which does not). After each matrix it
+calls `ModelFile.release`, so the mapped file pages of that tensor leave memory and only one copy stays resident. A `--adapter` is merged into the tensors before any of
 this happens.
 
 ```mermaid
