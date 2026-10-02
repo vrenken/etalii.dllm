@@ -78,6 +78,33 @@ Gaussian (standard deviation `1 / rank`) from `--seed` and `B` zero, so step 0 i
 and that merged and load-time adapters give the same bits; `tests/test_reference_models.py` checks both PEFT
 directions against the `peft` library.
 
+### Quantised bases
+
+`--base-quantize q8_0` or `q4_0` keeps the frozen base quantised in memory while LoRA trains, as QLoRA does:
+
+```bash
+dllm finetune qwen2.5-1.5b.dllm --data my-data.jsonl --lora-rank 8 --base-quantize q4_0 \
+    --adapter-output my-adapter -o qwen-qlora.dllm --steps 200 --learning-rate 1e-3
+dllm import my-adapter --base qwen2.5-1.5b.dllm --base-quantize q4_0 -o merged.dllm   # the same bytes as -o
+```
+
+- **What is quantised.** The attention and MLP matrices (every expert's and the shared expert's too) whose input
+  size is a multiple of 32 are held as Q8_0 (about 28% of their float32 size) or Q4_0 (about 16%); embeddings, the
+  LM head, norms, biases, routers and gates stay float32. `dllm finetune` prints what the matrices take.
+- **What the base is.** The run is defined as LoRA on the dequantised base: each block's integers times its float32
+  scale (`QuantizedWeight.dequantize`, elementwise). A matrix is dequantised, and the adapters merged into it, each
+  time a step reads it, so only the weights in use exist in float32. The bits are exactly those of a plain LoRA run
+  on the dequantised weights, on every machine (`tests/test_quantized_finetuning.py` checks it for every model
+  family the tests cover, with DPO too). The decoder's own `--quantize` also quantises the activations, so a model
+  served with `--quantize` is not this base; serve the merged file instead, which holds the dequantised base with
+  the adapters merged in.
+- **Records.** `base_quantize` is part of the run: in `fine_tuning.run`, the lineage step, checkpoints (which resume
+  only as the same run) and training receipts (`dllm replay` trains the quantised run again). `dllm import ADAPTER
+  --base BASE --base-quantize KIND` merges an adapter into the dequantised base and records the quantisation in the
+  file's `adapter` section and lineage, so the merged file can be rebuilt from the adapter alone.
+- **Cost.** Dequantising and merging on every read costs time: a step is two to three times slower than a plain
+  LoRA step on the tiny test models, in exchange for a quarter or an eighth of the base's matrix memory.
+
 ## Data
 
 - A `.txt` file is one document.
@@ -232,4 +259,6 @@ load. A checkpoint refuses to resume with data whose fingerprint differs.
 Training runs on the same single-threaded kernels as inference, and one training token costs roughly three times
 what reading one prompt token costs. That is fine for small experiments and tests, but fine-tuning SmolLM2-135M on
 more than a few thousand tokens will take hours until the Phase 6 performance work lands. Memory is about four
-times the model size (weights, gradients and two AdamW moments) plus the activations of one window.
+times the model size (weights, gradients and two AdamW moments) plus the activations of one window. LoRA needs the
+base weights plus small adapters and their moments, and `--base-quantize` shrinks the base's matrices to a quarter
+(Q8_0) or an eighth (Q4_0) of that ([quantised bases](#quantised-bases)).

@@ -56,8 +56,9 @@ def _import(args: argparse.Namespace) -> int:
             cache=args.cache,
             base=args.base,
             context_length=args.context_length,
+            base_quantize=args.base_quantize,
         )
-    except (ModelImportError, GgufError, SafetensorsError, OSError) as error:
+    except (ModelImportError, GgufError, SafetensorsError, OSError, ValueError) as error:
         print(f"dllm import: {error}", file=sys.stderr)
         return 1
     config = result.config
@@ -139,6 +140,7 @@ def _inspect(args: argparse.Namespace) -> int:
 
 def _finetune(args: argparse.Namespace) -> int:
     from etalii_dllm.engine import DllmEngine
+    from etalii_dllm.lora import QuantizedBase
     from etalii_dllm.modelfile import ModelFile, ModelFileError
     from etalii_dllm.training import (
         AdamWConfig,
@@ -204,6 +206,7 @@ def _finetune(args: argparse.Namespace) -> int:
                 lora,
                 **({"objective": "dpo", "beta": args.beta} if args.dpo else {}),
                 router_aux_loss=args.router_aux_loss,
+                base_quantize=args.base_quantize,
             )
             tuner = FineTuner.from_model_file(base, data, run)
         tuner.distillation = distillation
@@ -211,6 +214,11 @@ def _finetune(args: argparse.Namespace) -> int:
         print(f"dllm finetune: {error}", file=sys.stderr)
         return 1
 
+    if isinstance(tuner.base, QuantizedBase):
+        print(
+            f"base:               {tuner.base.kind}, {tuner.base.nbytes / 2**20:.1f} MiB of matrices"
+            f" (float32: {tuner.base.float_nbytes / 2**20:.1f} MiB)"
+        )
     unit = "pairs" if args.dpo else "windows"
     print(f"data:               {len(data)} {unit} of up to {data.sequence_length} tokens, {data.fingerprint[:16]}")
     total = tuner.run.steps
@@ -459,6 +467,11 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         help="context window in tokens; longer than the model's own uses YaRN, or LongRoPE's long factors",
     )
+    importer.add_argument(
+        "--base-quantize",
+        choices=("q8_0", "q4_0"),
+        help="merge the adapter into the base as a quantised LoRA run (finetune --base-quantize) defines it",
+    )
 
     inspect = commands.add_parser("inspect", help="show a model.dllm file's architecture, source and licence")
     inspect.add_argument("path")
@@ -512,6 +525,11 @@ def main(argv: list[str] | None = None) -> int:
         default=0.0,
         metavar="COEF",
         help="mixture-of-experts models: add COEF times the router load-balancing loss",
+    )
+    finetune.add_argument(
+        "--base-quantize",
+        choices=("q8_0", "q4_0"),
+        help="LoRA runs: keep the frozen base quantised in memory (exactly LoRA on the dequantised base)",
     )
 
     sign = commands.add_parser("sign", help="sign a receipt, chain, transcript or model file with an Ed25519 key")

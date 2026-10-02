@@ -37,7 +37,16 @@ from typing import Any
 import numpy as np
 
 from etalii_dllm.architecture import TransformerConfig
-from etalii_dllm.lora import LoraConfig, adapter_gradients, adapter_shapes, init_adapters, merged_weights, write_peft
+from etalii_dllm.lora import (
+    LazyMergedWeights,
+    LoraConfig,
+    QuantizedBase,
+    adapter_gradients,
+    adapter_shapes,
+    init_adapters,
+    merged_weights,
+    write_peft,
+)
 from etalii_dllm.modelfile import (
     ModelFile,
     TensorSource,
@@ -48,7 +57,7 @@ from etalii_dllm.modelfile import (
     tensor_order,
     write_model_file,
 )
-from etalii_dllm.numerics import FloatArray, cross_entropy, sigmoid
+from etalii_dllm.numerics import QUANTIZATIONS, FloatArray, cross_entropy, sigmoid
 from etalii_dllm.training.backprop import DecoderGradients
 from etalii_dllm.training.data import TrainingData
 from etalii_dllm.training.optimizer import AdamW, AdamWConfig
@@ -83,6 +92,9 @@ class RunConfig:
     router_aux_loss: float = 0.0
     """Mixture-of-experts models: the coefficient of the router load-balancing loss added to the language-model
     loss (transformers' ``router_aux_loss_coef``; 0 adds none)."""
+    base_quantize: str | None = None
+    """LoRA runs: hold the frozen base as ``q8_0`` or ``q4_0`` (:class:`~etalii_dllm.lora.QuantizedBase`); the run
+    is exactly LoRA on the dequantised base."""
 
     def __post_init__(self) -> None:
         if self.steps < 1 or self.batch_size < 1 or self.sequence_length < 1:
@@ -95,6 +107,11 @@ class RunConfig:
             raise ValueError("the router load-balancing coefficient must be a number of at least 0")
         if self.router_aux_loss and self.objective != "lm":
             raise ValueError("the router load-balancing loss is added to language-model runs, not to DPO")
+        if self.base_quantize is not None:
+            if self.base_quantize not in QUANTIZATIONS:
+                raise ValueError(f"unknown base quantisation {self.base_quantize!r}; supported: q8_0, q4_0")
+            if self.lora is None:
+                raise ValueError("a quantised base is frozen, so it needs a LoRA run")
 
     def to_dict(self) -> dict[str, Any]:
         values = asdict(self)
@@ -107,6 +124,8 @@ class RunConfig:
             del values["objective"], values["beta"]
         if not self.router_aux_loss:
             del values["router_aux_loss"]
+        if self.base_quantize is None:
+            del values["base_quantize"]
         return values
 
     @classmethod
@@ -165,7 +184,8 @@ class FineTuner:
                 name: np.array(params[name], dtype=np.float32, order="C", copy=True) for name in tensor_order(shapes)
             }
         else:
-            self.base = params  # frozen: read, never written
+            # frozen: read, never written; a quantised base keeps its matrices quantised
+            self.base = params if run.base_quantize is None else QuantizedBase(params, run.base_quantize)
             shapes = adapter_shapes(config, self.lora)
             self.params = init_adapters(config, self.lora, run.seed)
         self.optimizer = AdamW(run.optimizer, shapes)
@@ -272,6 +292,8 @@ class FineTuner:
         """The model weights the run currently describes (with LoRA: the base with the adapters merged in)."""
         if self.lora is None or self.base is None:
             return self.params
+        if self.run.base_quantize is not None:  # merged one weight at a time, when it is read
+            return LazyMergedWeights(self.config, self.base, self.params, self.lora)
         return merged_weights(self.config, self.base, self.params, self.lora)
 
     def _adapter_gradients(self, gradients: Mapping[str, FloatArray]) -> dict[str, FloatArray]:

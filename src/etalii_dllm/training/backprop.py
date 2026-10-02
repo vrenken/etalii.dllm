@@ -531,5 +531,23 @@ class DecoderGradients:
         config = self.config
         if config.residual_multiplier == 1.0 and config.rope_attention_factor == 1.0:
             return weights
-        folded = fold_scales(config, {name: Tensor(values) for name, values in weights.items()})
-        return {name: tensor.numpy() for name, tensor in folded.items()}
+        if isinstance(weights, dict):
+            folded = fold_scales(config, {name: Tensor(values) for name, values in weights.items()})
+            return {name: tensor.numpy() for name, tensor in folded.items()}
+        return _FoldedWeights(config, weights)  # a lazy mapping (a quantised base) stays lazy
+
+
+class _FoldedWeights(Mapping[str, npt.ArrayLike]):
+    """``fold_scales`` of a lazy weights mapping, one weight at a time when it is read (the same bits)."""
+
+    def __init__(self, config: TransformerConfig, weights: Mapping[str, npt.ArrayLike]) -> None:
+        self._config, self._weights = config, weights
+
+    def __getitem__(self, name: str) -> npt.ArrayLike:
+        return fold_scales(self._config, {name: Tensor(self._weights[name])})[name].numpy()
+
+    def __iter__(self):  # type: ignore[no-untyped-def]
+        return iter(self._weights)
+
+    def __len__(self) -> int:
+        return len(self._weights)

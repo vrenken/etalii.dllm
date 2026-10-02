@@ -347,3 +347,14 @@ LONG_CONTEXT_FINGERPRINTS = {
     "phi3-long": "a7d0e7e064c329096b58bb6eb270b3cefb7beaa3c8205cdac4f5aec8eb855f14",
     "qwen3-yarn": "6ab6b7248b8a6a9a17e5f7547f1acd188831e3c1caa065253e0b93cf91347c33",
 }
+
+# Phase 45. Fingerprint of the model.dllm exported after tests/test_quantized_finetuning.py::RUN (4 AdamW steps of
+# rank-2 LoRA adapters on a Q4_0 base, hidden size 32): the dequantised base with the trained adapters merged in.
+QLORA_FINETUNE_FINGERPRINT = {
+    "gemma2": "012e244f2769d7ad55aa3cb4f58361a363227501062dba592a61c58cacaa8d97",
+    "granite": "86f2450aa8f292d0b6e64cb5e4d22fccc281673a56aaee526153ce323f3bfea7",
+    "llama": "63a3ffb6eeeefad48b5b338cb7f80ecb7d85e8ab4e0c540db41870fe15ba3dad",
+    "qwen2_moe": "5df00bc6aeb9c401b5b5ebfc1ba1e30027485c11cb6232facf2ce19c25f89e4e",
+    "qwen3": "e1f6052b5280a50649557dba9aa7f180ef5dfda324771bb7860cc7377d7469f0",
+    "qwen3_moe": "1da5d76291b692c57f4e9269c5bbaac1b86dfacd5657cf02a7decb2dcebf9107",
+}

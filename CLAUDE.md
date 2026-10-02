@@ -50,7 +50,7 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
   (the `model.dllm` container, `docs/model-format.md`), `importing` (safetensors/GGUF readers and `dllm import`),
   `training` (gradients of every model family, mixtures of experts and the router load-balancing loss included, AdamW, data order, checkpoints and `dllm finetune`, DPO on preference pairs in
   `training/preference.py`, `docs/training.md`), `lora` (LoRA
-  adapters, always merged into the weights; the PEFT format), `grammar`
+  adapters, always merged into the weights; Q8_0/Q4_0 bases for `--base-quantize`; the PEFT format), `grammar`
   (JSON-schema constrained decoding over a token trie), `tools` (tool calling in the Hermes `<tool_call>` format), `interpret/` (activation tracing via `LayerHook`, logit lens,
   embedding explorer, attention maps, expert routing, steering vectors, ROME edits, sparse autoencoders; `dllm lens|attention|
   experts|neighbours|steer|edit|sae`, `docs/interpretability.md`), `receipts` (generation receipts, receipt chains and `dllm replay`, `docs/receipts.md`), `transcripts` (agent transcripts

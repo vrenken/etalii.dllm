@@ -29,7 +29,7 @@ import numpy as np
 
 from etalii_dllm.architecture import TransformerConfig
 from etalii_dllm.modelfile import tensor_order
-from etalii_dllm.numerics import FloatArray, fill_gaussian, linear
+from etalii_dllm.numerics import QUANTIZATIONS, FloatArray, QuantizedWeight, fill_gaussian, linear
 
 ADAPTER_CONFIG = "adapter_config.json"
 ADAPTER_WEIGHTS = "adapter_model.safetensors"
@@ -158,6 +158,95 @@ def merged_weights(
     for name in target_weights(config, lora):
         merged[name] = merge(weights[name], adapters[name + ".lora_a"], adapters[name + ".lora_b"], lora.scale)
     return merged
+
+
+class LazyMergedWeights(Mapping[str, np.ndarray]):
+    """:func:`merged_weights` computed one weight at a time, when it is read (the same bits): a run on a quantised
+    base never holds more than the weights in use in float32."""
+
+    def __init__(
+        self,
+        config: TransformerConfig,
+        weights: Mapping[str, np.ndarray],
+        adapters: Mapping[str, np.ndarray],
+        lora: LoraConfig,
+    ) -> None:
+        self._weights, self._adapters, self._lora = weights, adapters, lora
+        self._targets = set(target_weights(config, lora))
+
+    def __getitem__(self, name: str) -> np.ndarray:
+        weight = self._weights[name]
+        if name not in self._targets:
+            return weight
+        return merge(weight, self._adapters[name + ".lora_a"], self._adapters[name + ".lora_b"], self._lora.scale)
+
+    def __iter__(self):  # type: ignore[no-untyped-def]
+        return iter(self._weights)
+
+    def __len__(self) -> int:
+        return len(self._weights)
+
+
+# Quantised bases (QLoRA-style). The attention and MLP matrices (every expert's and the shared expert's too) whose
+# input size is a multiple of the 32-value block are held as Q8_0 or Q4_0; embeddings, norms, biases, routers and
+# gates stay float32. The base is defined as the dequantised weights, each block's integers times its float32 scale.
+_QUANTIZED_MATRICES = tuple(f".{m}.weight" for m in ("q", "k", "v", "o", "gate", "up", "down"))
+
+
+def quantizable(name: str, shape: Sequence[int]) -> bool:
+    """Whether a quantised base holds ``name`` quantised."""
+    return name.endswith(_QUANTIZED_MATRICES) and len(shape) == 2 and shape[1] % 32 == 0
+
+
+class QuantizedBase(Mapping[str, np.ndarray]):
+    """The frozen weights of a LoRA run on a ``q8_0`` or ``q4_0`` base: :func:`quantizable` matrices are kept
+    quantised and dequantised (``QuantizedWeight.dequantize``, elementwise) each time they are read, the rest as
+    given. Reading gives exactly :func:`dequantized_weights`."""
+
+    def __init__(self, weights: Mapping[str, np.ndarray], kind: str) -> None:
+        if kind not in QUANTIZATIONS:
+            raise ValueError(f"unknown base quantisation {kind!r}; supported: {', '.join(QUANTIZATIONS)}")
+        self.kind = kind
+        self._names = list(weights)
+        self._quantized: dict[str, QuantizedWeight] = {}
+        self._plain: dict[str, np.ndarray] = {}
+        for name in self._names:
+            values = weights[name]
+            if quantizable(name, np.shape(values)):
+                self._quantized[name] = QuantizedWeight(values, kind)
+            else:
+                self._plain[name] = np.asarray(values, dtype=np.float32)
+
+    def __getitem__(self, name: str) -> np.ndarray:
+        quantized = self._quantized.get(name)
+        return self._plain[name] if quantized is None else quantized.dequantize()
+
+    def __iter__(self):  # type: ignore[no-untyped-def]
+        return iter(self._names)
+
+    def __len__(self) -> int:
+        return len(self._names)
+
+    @property
+    def nbytes(self) -> int:
+        """Bytes of the quantised matrices (values and scales): what the base costs in memory besides the float32
+        tensors it keeps as they are."""
+        return sum(q.values.nbytes + q.scales.nbytes for q in self._quantized.values())
+
+    @property
+    def float_nbytes(self) -> int:
+        """Bytes the quantised matrices would take in float32."""
+        return sum(4 * q.out_features * q.in_features for q in self._quantized.values())
+
+
+def dequantized_weights(weights: Mapping[str, np.ndarray], kind: str) -> dict[str, np.ndarray]:
+    """``weights`` as a ``kind`` base defines them (:class:`QuantizedBase`), all at once."""
+    if kind not in QUANTIZATIONS:
+        raise ValueError(f"unknown base quantisation {kind!r}; supported: {', '.join(QUANTIZATIONS)}")
+    return {
+        name: QuantizedWeight(values, kind).dequantize() if quantizable(name, np.shape(values)) else values
+        for name, values in weights.items()
+    }
 
 
 def adapter_gradients(
