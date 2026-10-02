@@ -342,6 +342,18 @@ window is full), when every live hypothesis finishes with `length`. Finished hyp
 double) descending, then by token sequence ascending, and the first `n_best` are the answers. The sampler takes no
 part.
 
+### Token healing
+
+With token healing ([token healing](api.md#token-healing)), if the prompt's tokens are non-empty and the last token
+`t` decodes to a non-empty byte string `b` (special tokens decode to nothing), the context is the prompt without `t`
+and `b` must be written first. While a remainder `r` of `b` is unwritten (starting with `r = b`), a step's allowed
+tokens are those whose non-empty bytes `d` satisfy `d` is a prefix of `r` or `r` is a prefix of `d`; every other
+token, stop tokens included, gets `-inf` before section 4's logit adjustments and sampling, exactly as a grammar mask
+does. Writing `d` leaves `r` minus `d` when `d` is shorter, and otherwise ends healing, handing the bytes of `d`
+after `r` to the answer's own constraint (a JSON schema, regex or grammar), if any. Stop sequences match only the
+answer's text, which is its decoded bytes without the first `len(b)` bytes; its tokens, including the
+healing ones, count as completion tokens.
+
 ### Guided decoding
 
 A guided answer ([guided decoding](api.md#guided-decoding)) replaces each step's float32 logits `l` by a combination

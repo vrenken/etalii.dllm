@@ -259,3 +259,9 @@ tuples, property names and unique items (tests/test_tuples_names_unique.py)."""
 
 GRAMMAR_FINGERPRINTS = {"colours": "6c3e9ca969a5eb689cbf60668385e0136883735a8059c831ddf4328efe2515af"}
 """Fingerprint of an answer constrained by a GBNF grammar (tests/test_gbnf.py)."""
+
+HEALING_FINGERPRINTS = {
+    "raw": "8f8d3b8f67ef8e458039b4dc44a13286bbd22aa7efd9a6847a8199e7ade431da",
+    "prefill": "d9ca601aff6f7381e01ba0b557db606cc264029184b1506b903fd018fb39f54c",
+}
+"""Answers with token healing (tests/test_token_healing.py)."""

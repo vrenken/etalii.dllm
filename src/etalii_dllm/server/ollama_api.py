@@ -122,6 +122,8 @@ class _GenerateBase(BaseModel):
     """For thinking models: ``false`` switches thinking off, ``true`` or an effort on (docs/api.md#reasoning)."""
     max_reasoning_tokens: int | None = None
     """Extension: the most tokens a thinking model's ``<think>`` block may take."""
+    token_healing: bool | None = None
+    """Extension: take the prompt's last token back and make the answer start with it (docs/api.md#token-healing)."""
 
 
 class ChatBody(_GenerateBase):
@@ -255,6 +257,7 @@ def _chat_request(body: ChatBody, engine: DllmEngine) -> ChatRequest:
         context_overflow="roll" if body.shift else "stop",
         thinking=None if body.think is None else body.think is not False,
         max_reasoning_tokens=body.max_reasoning_tokens,
+        token_healing=bool(body.token_healing),
     )
 
 
@@ -283,6 +286,7 @@ def _generate_request(body: GenerateBody, engine: DllmEngine) -> ChatRequest:
         context_overflow="roll" if body.shift else "stop",
         thinking=None if body.think is None else body.think is not False,
         max_reasoning_tokens=body.max_reasoning_tokens,
+        token_healing=bool(body.token_healing),
     )
 
 

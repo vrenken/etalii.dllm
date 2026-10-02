@@ -82,6 +82,8 @@ class MessagesRequest(BaseModel):
     """Extension: add a ``receipt`` to the response (see docs/receipts.md)."""
     previous_receipt: str | None = None
     """Extension: the receipt id of the conversation's previous turn, recorded as the new receipt's ``previous``."""
+    token_healing: bool | None = None
+    """Extension: take the prefill's last token back and make the answer start with it (docs/api.md#token-healing)."""
     thinking: ThinkingConfig | None = None
     """For thinking models: ``enabled`` (with ``budget_tokens``), ``adaptive`` or ``disabled``
     (docs/api.md#reasoning)."""

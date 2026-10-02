@@ -301,6 +301,7 @@ reference implementation repeats bit for bit.
 | Output matching a regex in full | `response_format: {"type": "regex", "regex": ...}` or `guided_regex` | | `--regex` |
 | Output a [GBNF grammar](#grammars) derives | `response_format: {"type": "grammar", "grammar": ...}` or `grammar` | | `--grammar` |
 | [Guided decoding](#guided-decoding): a negative prompt, or contrast against an amateur model | `guidance: {negative_prompt, scale}`, `contrast: {beta, alpha}` (extensions; also on Anthropic messages and completions) | | `--negative-prompt`, `--guidance-scale`, `--contrast BETA`, `--contrast-alpha` |
+| [Token healing](#token-healing) of a prompt or prefill that ends inside a word | `token_healing: true` (extension; also on Responses, Anthropic messages, completions and Ollama) | | `--token-healing` |
 | A keyed [watermark](watermarks.md) | `watermark: {key, gamma, delta}` (extension; also on Anthropic messages) | `watermark_key`, `watermark_gamma`, `watermark_delta` | `--watermark-key`, `--watermark-gamma`, `--watermark-delta` |
 
 - The defaults change nothing: a repetition penalty of 1 (Ollama's own default is 1.1; here it stays off unless asked
@@ -336,6 +337,33 @@ work as on chat completions. `suffix` and a `best_of` other than `n` are refused
 `logprobs: N` returns OpenAI's `logprobs` object (`tokens`, `token_logprobs`, `top_logprobs` with N alternatives,
 `text_offset` in characters). With `echo: true` the prompt comes first in `text` and in `logprobs`, its tokens
 [scored exactly](#scoring) (the first prompt token has `null`, as in OpenAI's API).
+
+## Token healing
+
+A prompt that ends inside a word ("The quick brown fo") pins the tokenizer to a split the model rarely saw in
+training, so answers continuing it read badly. With `token_healing: true` (CLI `--token-healing`) the prompt's last
+token is taken back and the answer is constrained to start with that token's bytes: the model may write `fox` as one
+token, or `f` then `ox`, whichever it prefers. The taken-back bytes are not repeated in the answer's text, so the text
+still continues the prompt where it ended. It works the same way on raw prompts (completions, `dllm generate`, Ollama
+`raw`) and on chat prefills, an assistant message at the end of the conversation (`dllm chat --prefill TEXT`).
+
+- Healing is exact: the healing steps sample from the model's distribution restricted to the tokens whose bytes fit
+  what remains of the taken-back token (either a prefix of it, or it followed by more), with the same sampler and
+  seed. It combines with JSON schemas, regexes and grammars, which see the answer after the healed bytes.
+- A prompt that is empty or ends in a special token (such as a chat template's turn marker) is left alone, so
+  healing a chat without a prefill changes nothing.
+- The taken-back token counts as a completion token: `prompt_tokens` is one less, and `completion_tokens` includes
+  the healing tokens. Stop tokens cannot end the answer while it is still healing, and stop sequences match only the text after the healed bytes.
+- Receipts record `token_healing`, `dllm replay` repeats it, and the [specification](specification.md#token-healing)
+  and the reference implementation (`dllm verify --reference`) define the same bits. Beam search refuses it.
+
+```bash
+dllm generate --prompt "The quick brown fo" --token-healing --temperature 0.9 --seed 11
+dllm chat "Name a colour." --prefill "My favourite colour is gre" --token-healing
+curl -s localhost:5080/v1/completions -H 'content-type: application/json' -d '{
+  "prompt": "The quick brown fo", "max_tokens": 12, "token_healing": true
+}'
+```
 
 ## Scoring
 

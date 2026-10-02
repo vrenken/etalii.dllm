@@ -75,6 +75,8 @@ class CompletionRequest(BaseModel):
     """Extension: contrastive decoding against the server's amateur model."""
     beam: BeamOptions | None = None
     """Extension: the best answers of an exact beam search (docs/api.md#beam-search)."""
+    token_healing: bool | None = None
+    """Extension: take the prompt's last token back and make the answer start with it (docs/api.md#token-healing)."""
     receipt: bool | None = None
     """Extension: each choice carries its generation receipt (docs/receipts.md)."""
     user: str | None = None
@@ -175,6 +177,7 @@ def _requests(request: CompletionRequest, engine: DllmEngine) -> list[ChatReques
             top_logprobs=request.logprobs,
             request_id=request_id,
             prompt=prompt,
+            token_healing=bool(request.token_healing),
         )
         for prompt in prompts
     ]

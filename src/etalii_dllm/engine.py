@@ -28,7 +28,7 @@ from etalii_dllm.chat import TOOL_CALL_OPEN, ChatMessage, ToolCall, render
 from etalii_dllm.chat_template import ChatTemplate
 from etalii_dllm.cuda import DEVICES
 from etalii_dllm.generation import OVERFLOWS, Generation, GenerationResult, Generator, TokenLogprobs
-from etalii_dllm.grammar import Grammar, TokenConstraint, TokenTrie
+from etalii_dllm.grammar import Grammar, HealingConstraint, TokenConstraint, TokenTrie
 from etalii_dllm.guidance import Guide
 from etalii_dllm.models import BigramModel, LanguageModel
 from etalii_dllm.numerics import QUANTIZATIONS, linear, set_threads, sum_squares
@@ -165,6 +165,9 @@ class ChatRequest:
     (``enable_thinking``); ``None`` keeps the model's default (docs/api.md#reasoning)."""
     max_reasoning_tokens: int | None = None
     """For thinking models: the most tokens the ``<think>`` block may take before the engine closes it."""
+    token_healing: bool = False
+    """Takes the prompt's last token back and makes the answer start with its bytes (:meth:`DllmEngine.heal`), so
+    a prompt or prefill that ends inside a word is continued as if the word were whole (docs/api.md#token-healing)."""
 
     def __post_init__(self) -> None:
         if self.max_reasoning_tokens is not None and self.max_reasoning_tokens < 0:
@@ -485,10 +488,11 @@ class DllmEngine:
         regex: str | None = None,
         grammar: str | None = None,
         overflow: str = "stop",
+        token_healing: bool = False,
     ) -> Generation:
         """Continues ``prompt``; ``regex`` restricts the continuation to text matching it in full, ``grammar`` to
-        text the GBNF grammar derives, and ``overflow`` says what happens at a full context window
-        (docs/api.md#long-conversations)."""
+        text the GBNF grammar derives, ``overflow`` says what happens at a full context window
+        (docs/api.md#long-conversations) and ``token_healing`` heals the prompt's last token (:meth:`heal`)."""
         if regex is not None and grammar is not None:
             raise ValueError("a regex and a grammar cannot be combined")
         constraint = None
@@ -497,9 +501,22 @@ class DllmEngine:
         elif grammar is not None:
             constraint = TokenConstraint(Grammar.gbnf(grammar), self._token_trie())
         guide = self.guide(options, raw=True)
+        context, constraint, healed = self.heal(prompt, constraint) if token_healing else (prompt, constraint, 0)
         return self._generator.stream(
-            prompt, max_tokens, options, constraint=constraint, overflow=overflow, guide=guide
+            context, max_tokens, options, constraint=constraint, overflow=overflow, guide=guide, healed=healed
         )
+
+    def heal(
+        self, prompt: str, constraint: TokenConstraint | None
+    ) -> tuple[str | list[int], TokenConstraint | HealingConstraint | None, int]:
+        """Token healing: the prompt's tokens without the last one, a constraint that makes the output start with
+        that token's bytes (then ``constraint`` applies), and how many bytes that is. A prompt that is empty or ends
+        with a special token (which has no bytes) is left as it is."""
+        tokens = self.tokenizer.encode(prompt)
+        data = self.tokenizer.decode_bytes(tokens[-1:])
+        if not data:
+            return prompt, constraint, 0
+        return tokens[:-1], HealingConstraint(data, self._token_trie(), constraint), len(data)
 
     def count_tokens(self, text: str) -> int:
         return len(self.tokenizer.encode(text))
@@ -647,17 +664,19 @@ class DllmEngine:
         if request.prompt is None and self.thinks and (constraint is None or not constraint.active):
             # Structured output and forced tool calls constrain the output from its first token: no thinking then.
             tracker = thinking_rules.Tracker(thinking_rules.starts_in_thinking(prompt), request.max_reasoning_tokens)
+        context, healing, healed = self.heal(prompt, constraint) if request.token_healing else (prompt, constraint, 0)
         generation = self._generator.stream(
-            prompt,
+            context,
             request.max_tokens,
             request.options,
             stop=request.stop,
-            constraint=constraint,
+            constraint=healing,
             top_logprobs=request.top_logprobs,
             new_text=request.prompt is None,
             overflow=request.context_overflow,
             reasoning=tracker,
             guide=self.guide(request.options, request.prompt is not None, messages, tools, request.thinking),
+            healed=healed,
         )
         return _ChatGeneration(
             generation.prompt_tokens, generation.cached_tokens, self._events(generation, request, tools)

@@ -698,6 +698,18 @@ dllm chat "Describe a shape" --json-schema '{"type": "object", "properties": {
 gets a radius, a square a side, and labels starting with `is_` are booleans. Details:
 [structured output](api.md#structured-output).
 
+## 32. Prompts that end inside a word
+
+```bash
+dllm generate --prompt "The quick brown fo" --token-healing --temperature 0.9 --seed 11
+dllm chat "Name a colour." --prefill "My favourite colour is gre" --token-healing
+```
+
+`--token-healing` takes back the prompt's last token and makes the answer start with its bytes, so the model can
+finish the word the way it would have tokenized it (`fox`, `green`) instead of continuing an odd split. The answer
+text continues exactly where your prompt ended, and the same request gives the same bits everywhere. `--prefill`
+starts the assistant's reply for it. Details: [token healing](api.md#token-healing).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,

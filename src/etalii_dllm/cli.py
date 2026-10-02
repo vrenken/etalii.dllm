@@ -263,6 +263,7 @@ def main(argv: list[str] | None = None) -> int:
         metavar="NAME[=ARG]",
         help="a built-in deterministic tool the model may call (repeatable): calculator, files=DIR, documents",
     )
+    chat.add_argument("--prefill", metavar="TEXT", help="the answer continues this text (an assistant prefill)")
     chat.add_argument(
         "--think",
         action=argparse.BooleanOptionalAction,
@@ -320,6 +321,11 @@ def main(argv: list[str] | None = None) -> int:
             choices=OVERFLOWS,
             default="stop",
             help="at a full context window: stop (finish 'length') or roll (keep the start and the recent half)",
+        )
+        command.add_argument(
+            "--token-healing",
+            action="store_true",
+            help="take the prompt's (or prefill's) last token back and make the answer start with it",
         )
 
     evaluate = commands.add_parser("eval", help="score the model: perplexity, multiple choice or preference")
@@ -628,6 +634,7 @@ def main(argv: list[str] | None = None) -> int:
                 regex=args.regex,
                 grammar=grammar,
                 overflow=args.context_overflow,
+                token_healing=args.token_healing,
             )
         except ValueError as error:
             print(f"error: {error}", file=sys.stderr)
@@ -653,7 +660,14 @@ def _beam_search(engine: DllmEngine, args: argparse.Namespace, options: Sampling
             raise ValueError("--receipt needs --beams")
         if args.n != 1 or args.regex is not None or args.grammar is not None:
             raise ValueError("--beams cannot be combined with --n, --regex or --grammar (use --n-best)")
-        request = ChatRequest([], args.max_tokens, options, prompt=args.prompt, context_overflow=args.context_overflow)
+        request = ChatRequest(
+            [],
+            args.max_tokens,
+            options,
+            prompt=args.prompt,
+            context_overflow=args.context_overflow,
+            token_healing=args.token_healing,
+        )
         outcome = beam.search(engine, request, args.beams, args.n_best, args.length_penalty)
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
@@ -1246,8 +1260,9 @@ def _chat(engine: DllmEngine, args: argparse.Namespace, options: SamplingOptions
             return 1
         response_format = ResponseFormat("grammar", pattern=grammar)
     messages = [ChatMessage("system", args.system)] if args.system else []
+    prefill = [ChatMessage("assistant", args.prefill)] if args.prefill else []
     request = ChatRequest(
-        [*messages, ChatMessage("user", args.message)],
+        [*messages, ChatMessage("user", args.message), *prefill],
         args.max_tokens,
         options,
         response_format=response_format,
@@ -1255,6 +1270,7 @@ def _chat(engine: DllmEngine, args: argparse.Namespace, options: SamplingOptions
         context_overflow=args.context_overflow,
         thinking=args.think,
         max_reasoning_tokens=args.max_reasoning_tokens,
+        token_healing=args.token_healing,
     )
     if args.mcp_config or args.mcp_server or args.tool:
         return _chat_with_mcp(engine, args, request)
