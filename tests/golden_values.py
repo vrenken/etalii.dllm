@@ -250,9 +250,11 @@ BEAM_FINGERPRINTS = {
 SCHEMA_FINGERPRINTS = {
     "person": "f830d3b634b6f3b57323df3a05a72809757dd1393c510ea7f2a14ade7e894aaa",
     "measurement": "b9d85221c7cbf5a8f166528ffa20f15626856ae7787571089aaaaf4e75c5a5c3",
+    "tagged_point": "1e73eec5e6a6345e5fee4515bf50e71c9bdccbc140521533dd54c841ceb098c9",
 }
 """Fingerprints of answers constrained by patterns, formats, lengths and bounds (tests/test_schema_constraints.py)
-and by decimal bounds, multipleOf, property counts and map objects (tests/test_numeric_constraints.py)."""
+and by decimal bounds, multipleOf, property counts and map objects (tests/test_numeric_constraints.py), and by
+tuples, property names and unique items (tests/test_tuples_names_unique.py)."""
 
 GRAMMAR_FINGERPRINTS = {"colours": "6c3e9ca969a5eb689cbf60668385e0136883735a8059c831ddf4328efe2515af"}
 """Fingerprint of an answer constrained by a GBNF grammar (tests/test_gbnf.py)."""

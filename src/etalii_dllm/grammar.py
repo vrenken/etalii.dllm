@@ -16,7 +16,9 @@ Determinism: the automaton is a pure function of the grammar and the bytes; stac
 
 Supported JSON schema keywords: ``type`` (a name or a list of names), ``properties``, ``required``,
 ``additionalProperties`` (``false``, or, when there are no ``properties``, a free-form object whose values follow
-the schema it gives), ``minProperties``/``maxProperties``, ``items``, ``minItems``, ``maxItems``, ``enum``,
+the schema it gives), ``propertyNames``, ``minProperties``/``maxProperties``, ``items``, ``prefixItems`` (and
+``items`` arrays with ``additionalItems``), ``minItems``, ``maxItems``, ``uniqueItems`` (over items from a finite set
+of literals), ``enum``,
 ``const``, ``anyOf``, ``oneOf`` (treated as ``anyOf``), ``allOf`` with a single schema, ``$ref`` to ``#/$defs/...``
 or ``#/definitions/...``, and ``nullable``. Value constraints are compiled to byte automata
 (:mod:`etalii_dllm.regexp`): on strings ``pattern`` (found anywhere unless anchored by a leading ``^`` or trailing
@@ -25,7 +27,7 @@ sequences, so they hold no quote, backslash or control character); on numbers ``
 ``exclusiveMinimum``, ``exclusiveMaximum`` and ``multipleOf``, compared in exact decimal arithmetic
 (:mod:`etalii_dllm.numeric_automata`). Annotations (``title``, ``description``, ``default``, ``examples``, other
 ``format`` values, ``$schema``, ``$id``, ``strict``) are ignored. Keywords the automaton does not check
-(``uniqueItems``, ``patternProperties``, ``not``, ...) are rejected with a :class:`GrammarError` rather than silently
+(``patternProperties``, ``not``, ``contains``, ...) are rejected with a :class:`GrammarError` rather than silently
 ignored; ``lenient`` grammars (tool parameters) ignore them and the value constraints.
 
 Object properties are generated in the order the schema lists them; optional properties may be left out. Between
@@ -55,9 +57,12 @@ _ANNOTATIONS = frozenset(
 )  # fmt: skip
 _STRUCTURE = frozenset(
     {"type", "properties", "required", "additionalProperties", "items", "minItems", "maxItems", "enum", "const",
-     "anyOf", "oneOf", "allOf", "$ref", "$defs", "definitions", "nullable"}
+     "anyOf", "oneOf", "allOf", "$ref", "$defs", "definitions", "nullable", "prefixItems", "additionalItems",
+     "uniqueItems", "propertyNames"}
 )  # fmt: skip
 _STRING_KEYWORDS = ("pattern", "minLength", "maxLength")
+_SHAPES = ("type", "enum", "const", "$ref", "anyOf", "oneOf", "allOf")
+"""Keywords that say which values a schema has, so a schema without them takes any value."""
 _BOUNDS = ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum")
 _CONSTRAINTS = frozenset({*_STRING_KEYWORDS, *_BOUNDS, "multipleOf", "minProperties", "maxProperties"})
 """Value constraints compiled to byte automata (:func:`string_automaton`, :func:`integer_automaton`,
@@ -118,10 +123,11 @@ class _Union(_Node):
 
 
 class _Object(_Node):
-    """``properties`` as ``(json-encoded name, schema, required)``; ``free`` objects take any names, with values
-    valid under ``values``. ``minimum``/``maximum`` bound the number of members."""
+    """``properties`` as ``(json-encoded name, schema, required)``; ``free`` objects take names valid under
+    ``names`` (any string when ``None``) with values valid under ``values``. ``minimum``/``maximum`` bound the number
+    of members."""
 
-    __slots__ = ("free", "maximum", "minimum", "properties", "values")
+    __slots__ = ("free", "maximum", "minimum", "names", "properties", "values")
 
     def __init__(
         self,
@@ -129,23 +135,39 @@ class _Object(_Node):
         free: bool,
         *,
         values: _Node | None = None,
+        names: _Node | None = None,
         minimum: int = 0,
         maximum: int | None = None,
     ) -> None:
         self.properties = tuple(properties)
         self.free = free
         self.values = values
+        self.names = names
         self.minimum = minimum
         self.maximum = maximum
 
 
 class _Array(_Node):
-    __slots__ = ("items", "maximum", "minimum")
+    """Elements valid under ``prefix`` (one schema per leading position) and then ``items`` (``None``: no more);
+    with ``unique``, the elements are distinct choices among those JSON texts (``(text, group)``, equal values
+    sharing a group)."""
 
-    def __init__(self, items: _Node, minimum: int, maximum: int | None) -> None:
+    __slots__ = ("items", "maximum", "minimum", "prefix", "unique")
+
+    def __init__(
+        self,
+        items: _Node | None,
+        minimum: int,
+        maximum: int | None,
+        *,
+        prefix: Sequence[_Node] = (),
+        unique: Sequence[tuple[bytes, int]] | None = None,
+    ) -> None:
         self.items = items
         self.minimum = minimum
         self.maximum = maximum
+        self.prefix = tuple(prefix)
+        self.unique = None if unique is None else tuple(unique)
 
 
 class _Text(_Node):
@@ -329,6 +351,42 @@ def _bounds(schema: Mapping[str, Any]) -> tuple[int | None, int | None]:
     return low, high
 
 
+def _identity(value: Any) -> Any:
+    """A key equal for equal JSON values: numbers by exact value (``1`` equals ``1.0``), never equal to booleans."""
+    if isinstance(value, bool) or value is None or isinstance(value, str):
+        return (type(value).__name__, value)
+    if isinstance(value, int | float):
+        from decimal import Decimal
+
+        return ("number", Decimal(repr(value) if isinstance(value, float) else value).normalize())
+    if isinstance(value, list):
+        return ("array", tuple(_identity(v) for v in value))
+    return ("object", tuple(sorted((k, _identity(v)) for k, v in value.items())))
+
+
+def _choices(node: _Node) -> list[tuple[bytes, int]] | None:
+    """The JSON texts of a node that is a finite set of literals (unions included), each with a group number shared
+    by equal values; ``None`` for other nodes."""
+    texts: list[bytes] = []
+
+    def collect(current: _Node) -> bool:
+        if isinstance(current, _Literals):
+            texts.extend(current.options)
+            return True
+        if isinstance(current, _Union):
+            return all(collect(option) for option in current.options)
+        return False
+
+    if not collect(node):
+        return None
+    groups: dict[Any, int] = {}
+    choices = []
+    for text in dict.fromkeys(texts):
+        key = _identity(json.loads(text))
+        choices.append((text, groups.setdefault(key, len(groups))))
+    return choices
+
+
 class _SchemaCompiler:
     def __init__(self, root: Mapping[str, Any], lenient: bool) -> None:
         self._root = root
@@ -405,12 +463,7 @@ class _SchemaCompiler:
         if kind == "null":
             return _Literals([b"null"])
         if kind == "array":
-            items = self.compile(schema.get("items", True))
-            minimum = int(schema.get("minItems", 0))
-            maximum = schema.get("maxItems")
-            if maximum is not None and int(maximum) < minimum:
-                raise GrammarError("'maxItems' is smaller than 'minItems'")
-            return _Array(items, minimum, None if maximum is None else int(maximum))
+            return self._array(schema)
         if kind == "object":
             properties = schema.get("properties") or {}
             required = set(schema.get("required") or ())
@@ -419,8 +472,12 @@ class _SchemaCompiler:
                 raise GrammarError(f"required properties without a schema: {', '.join(unknown)}")
             minimum, maximum = self._counts(schema)
             additional = schema.get("additionalProperties", True)
+            names = self._names(schema)
+            declared = bool(properties)
+            if names is not None and properties:
+                properties, required = self._named(properties, required, names)
             if not properties:
-                if additional is False:
+                if additional is False or declared:
                     if minimum:
                         raise GrammarError("no object without properties has 'minProperties' members")
                     return _Object((), free=False)
@@ -428,9 +485,9 @@ class _SchemaCompiler:
                     # Free names may repeat, and a repeated name counts once: only one member is certain.
                     raise GrammarError("'minProperties' above 1 needs declared 'properties'")
                 values = _ANY if self._lenient or additional is True else self.compile(additional)
-                if values is _ANY and (minimum, maximum) == (0, None):
+                if values is _ANY and names is None and (minimum, maximum) == (0, None):
                     return _FREE_OBJECT
-                return _Object((), free=True, values=values, minimum=minimum, maximum=maximum)
+                return _Object((), free=True, values=values, names=names, minimum=minimum, maximum=maximum)
             # With declared properties the model writes exactly those (``additionalProperties`` is not used).
             members = [(_encode(str(name)), self.compile(sub), name in required) for name, sub in properties.items()]
             if minimum > len(members) or (maximum is not None and len(required) > maximum):
@@ -439,6 +496,66 @@ class _SchemaCompiler:
                 )
             return _Object(members, free=False, minimum=minimum, maximum=maximum)
         raise GrammarError(f"unknown JSON schema type {kind!r}")
+
+    def _array(self, schema: Mapping[str, Any]) -> _Array:
+        prefix_schemas = schema.get("prefixItems")
+        rest = schema.get("items", True)
+        if prefix_schemas is None and isinstance(rest, list):  # draft 2019 and older: an items array is a tuple
+            prefix_schemas, rest = rest, schema.get("additionalItems", True)
+        if prefix_schemas is not None and not isinstance(prefix_schemas, list):
+            raise GrammarError("'prefixItems' must be a list of schemas")
+        prefix = [self.compile(sub) for sub in prefix_schemas or ()]
+        items = None if rest is False else self.compile(rest)
+        minimum = int(schema.get("minItems", 0))
+        maximum = None if schema.get("maxItems") is None else int(schema["maxItems"])
+        if maximum is not None and maximum < minimum:
+            raise GrammarError("'maxItems' is smaller than 'minItems'")
+        if items is None:
+            maximum = len(prefix) if maximum is None else min(maximum, len(prefix))
+        unique = None
+        if schema.get("uniqueItems") is True and not self._lenient:
+            choices = _choices(items) if items is not None and not prefix else None
+            if choices is None:
+                raise GrammarError(
+                    "'uniqueItems' needs items from a finite set (enum, const, boolean, null) and no 'prefixItems'"
+                )
+            unique = choices
+            groups = len({group for _, group in choices})
+            maximum = groups if maximum is None else min(maximum, groups)
+        if maximum is not None and maximum < minimum:
+            raise GrammarError("no array has 'minItems' elements under the schema")
+        return _Array(items, minimum, maximum, prefix=prefix, unique=unique)
+
+    def _names(self, schema: Mapping[str, Any]) -> _Node | None:
+        """The node of ``propertyNames`` (a string schema), or ``None`` when names are free."""
+        names = schema.get("propertyNames", True)
+        if self._lenient or names is True or names == {}:
+            return None
+        if isinstance(names, Mapping) and not any(k in names for k in _SHAPES):
+            names = {**names, "type": "string"}  # names are strings: string keywords describe them
+        node = self.compile(names)
+
+        def strings(current: _Node) -> bool:
+            if isinstance(current, _String | _Text):
+                return True
+            if isinstance(current, _Literals):
+                return all(option.startswith(b'"') for option in current.options)
+            return isinstance(current, _Union) and all(strings(option) for option in current.options)
+
+        if not strings(node):
+            raise GrammarError("'propertyNames' must describe strings")
+        return node
+
+    def _named(
+        self, properties: Mapping[str, Any], required: set[str], names: _Node
+    ) -> tuple[dict[str, Any], set[str]]:
+        """The declared properties whose names are valid under ``names``; a required one that is not is refused."""
+        matcher = Grammar([_value(names)]).matcher()
+        kept = {name: sub for name, sub in properties.items() if matcher.matches(_encode(str(name)))}
+        broken = sorted(required - set(kept))
+        if broken:
+            raise GrammarError(f"required properties break 'propertyNames': {', '.join(broken)}")
+        return kept, required
 
     def _counts(self, schema: Mapping[str, Any]) -> tuple[int, int | None]:
         if self._lenient:
@@ -525,7 +642,7 @@ def _expand(node: _Node, rest: Stack) -> list[Stack]:
     if isinstance(node, _Object):
         return [_push(rest, [_literal(b"{"), _WS_ITEM, (_OBJ, node, 0, 0)])]
     if isinstance(node, _Array):
-        return [_push(rest, [_literal(b"["), _WS_ITEM, (_ARR, node, 0)])]
+        return [_push(rest, [_literal(b"["), _WS_ITEM, (_ARR, node, 0, ())])]
     if isinstance(node, _Rule):
         return [_push(rest, alternative) for alternative in node.alternatives]
     if isinstance(node, _Any):
@@ -545,7 +662,8 @@ def _object_steps(item: tuple[Any, ...], rest: Stack) -> list[Stack]:
             # Counts past what the bounds tell apart are alike, so states stay few.
             following = min(count + 1, node.maximum if node.maximum is not None else max(node.minimum, 1))
             value = _value(node.values)
-            member = [*lead, _value(_STRING), _WS_ITEM, _COLON, _WS_ITEM, value, _WS_ITEM, (_OBJ, node, 0, following)]
+            name = _value(node.names or _STRING)
+            member = [*lead, name, _WS_ITEM, _COLON, _WS_ITEM, value, _WS_ITEM, (_OBJ, node, 0, following)]
             stacks.append(_push(rest, member))
         return stacks
     stacks: list[Stack] = []
@@ -566,13 +684,26 @@ def _object_steps(item: tuple[Any, ...], rest: Stack) -> list[Stack]:
 
 
 def _array_steps(item: tuple[Any, ...], rest: Stack) -> list[Stack]:
-    _, node, count = item
+    """The ways on from an array after ``count`` elements (``used``: the groups of the unique choices taken)."""
+    _, node, count, used = item
     stacks: list[Stack] = []
     if count >= node.minimum:
         stacks.append(_push(rest, [_literal(b"]")]))
-    if node.maximum is None or count < node.maximum:
-        lead = [_COMMA, _WS_ITEM] if count else []
-        stacks.append(_push(rest, [*lead, _value(node.items), _WS_ITEM, (_ARR, node, count + 1)]))
+    if node.maximum is not None and count >= node.maximum:
+        return stacks
+    lead = [_COMMA, _WS_ITEM] if count else []
+    if node.unique is not None:
+        for text, group in node.unique:
+            if group not in used:
+                taken = tuple(sorted((*used, group)))
+                stacks.append(_push(rest, [*lead, _literal(text), _WS_ITEM, (_ARR, node, count + 1, taken)]))
+        return stacks
+    element = node.prefix[count] if count < len(node.prefix) else node.items
+    if element is not None:
+        # Counts past what the bounds and the prefix tell apart are alike, so states stay few.
+        cap = node.maximum if node.maximum is not None else max(node.minimum, len(node.prefix), 1)
+        following = min(count + 1, cap)
+        stacks.append(_push(rest, [*lead, _value(element), _WS_ITEM, (_ARR, node, following, used)]))
     return stacks
 
 

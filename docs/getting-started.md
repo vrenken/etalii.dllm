@@ -672,6 +672,18 @@ Bounds on decimal numbers, `multipleOf` (such as cents), the number of propertie
 are now enforced exactly too, checked in decimal arithmetic rather than floating point. Details:
 [structured output](api.md#structured-output).
 
+## 30. Tuples, property names and unique choices
+
+```bash
+dllm chat "Tag a point" --json-schema '{"type": "object", "properties": {
+  "point": {"type": "array", "prefixItems": [{"type": "integer"}, {"type": "integer"}], "items": false, "minItems": 2},
+  "tags": {"type": "array", "items": {"enum": ["red", "green", "blue"]}, "uniqueItems": true}},
+  "required": ["point", "tags"]}'
+```
+
+Tuples (`prefixItems`, what pydantic writes for a `tuple[int, int]`), rules for property names and arrays of
+distinct choices are enforced exactly as well. Details: [structured output](api.md#structured-output).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
@@ -695,7 +707,8 @@ are now enforced exactly too, checked in decimal arithmetic rather than floating
   engine asks for). SmolLM2-135M does not know tools, so expect clumsy calls from it; constrained decoding still
   guarantees that every call names a real tool with arguments that fit its schema.
 - Structured output supports the common JSON-schema keywords, including `pattern`, `format`, string lengths, number
-  bounds, `multipleOf` and property counts; `uniqueItems`, `patternProperties`, `not` and similar are refused with an error
+  bounds, `multipleOf`, property counts, tuples, property names and unique choices; `patternProperties`, `not`,
+  `contains`, `uniqueItems` over open-ended items and similar are refused with an error
   (see [HTTP API](api.md#structured-output)). GBNF grammars may not be left-recursive and cannot use llama.cpp's
   token references (`<...>`) ([grammars](api.md#grammars)). No images or audio.
 - MCP servers' own resources and prompts are not offered to the model (only their tools), and servers that ask
