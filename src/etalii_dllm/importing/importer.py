@@ -25,7 +25,7 @@ from etalii_dllm.importing import hub
 from etalii_dllm.importing.gguf import GgufFile
 from etalii_dllm.importing.licences import PERMISSIVE, STANDARD_TEXTS
 from etalii_dllm.importing.safetensors import open_checkpoint
-from etalii_dllm.lora import ADAPTER_CONFIG, AdapterError, adapter_files, apply_adapter
+from etalii_dllm.lora import ADAPTER_CONFIG, AdapterError, adapter_files, apply_adapter, dequantized_weights
 from etalii_dllm.modelfile import (
     ModelFile,
     TensorSource,
@@ -939,12 +939,14 @@ def import_model(
     opener: hub.Opener | None = None,
     base: str | Path | None = None,
     context_length: int | None = None,
+    base_quantize: str | None = None,
 ) -> ImportResult:
     """Imports ``source`` (a checkpoint directory, a ``.gguf`` file, or ``hf:org/name[@revision]``) into
     ``output``. ``repository``/``revision`` record provenance for local sources; ``licence`` overrides the licence
     the source states; ``licence_file`` supplies its text. With ``base`` (a ``model.dllm``), ``source`` is a PEFT
     LoRA adapter and ``output`` is the base model with the adapter merged into its weights. ``context_length``
-    sets the model's context window (:func:`with_context_length`)."""
+    sets the model's context window (:func:`with_context_length`). ``base_quantize`` (``q8_0``/``q4_0``) merges the
+    adapter into the base as a quantised LoRA run defines it (:func:`~etalii_dllm.lora.dequantized_weights`)."""
     source_text = str(source)
     if source_text.startswith("hf:"):
         repo, rev = hub.parse_reference(source_text)
@@ -957,7 +959,9 @@ def import_model(
             raise ModelImportError("--context-length is for model sources, not LoRA adapters")
         if base is None:
             raise ModelImportError(f"{source} is a LoRA adapter; pass --base <model.dllm> to merge it into")
-        return _import_adapter(path, output, base, repository, revision, licence, accept_licence)
+        return _import_adapter(path, output, base, repository, revision, licence, accept_licence, base_quantize)
+    if base_quantize is not None:
+        raise ModelImportError("--base-quantize is for merging a LoRA adapter (with --base)")
     if base is not None:
         raise ModelImportError(f"{source} is not a LoRA adapter (no {ADAPTER_CONFIG}); --base is for adapters")
     if path.is_dir():
@@ -999,11 +1003,14 @@ def _import_adapter(
     revision: str | None,
     licence: str | None,
     accept_licence: bool,
+    base_quantize: str | None = None,
 ) -> ImportResult:
-    """Writes ``base_path`` with the PEFT adapter in ``directory`` merged into its weights (:mod:`etalii_dllm.lora`)."""
+    """Writes ``base_path`` with the PEFT adapter in ``directory`` merged into its weights (:mod:`etalii_dllm.lora`);
+    with ``base_quantize``, into its dequantised weights (the base of a quantised LoRA run)."""
     base = ModelFile(base_path)
     try:
-        weights, lora = apply_adapter(base.config, base.tensors, directory)
+        frozen = base.tensors if base_quantize is None else dequantized_weights(base.tensors, base_quantize)
+        weights, lora = apply_adapter(base.config, frozen, directory)
     except AdapterError as error:
         raise ModelImportError(str(error)) from error
     card = _model_card(directory)
@@ -1039,6 +1046,8 @@ def _import_adapter(
         "licence": canonical or spdx,
         "source": source,
     }
+    if base_quantize is not None:
+        adapter["base_quantize"] = base_quantize
     metadata = {key: base.header.get(key) for key in ("source", "tokenizer", "chat_template", "fine_tuning")}
     metadata["licence"] = record
     metadata["adapter"] = adapter

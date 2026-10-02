@@ -158,7 +158,10 @@ def import_step(source: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def adapter_step(adapter: Mapping[str, Any]) -> dict[str, Any]:
-    return {"step": "adapter", "input": adapter["base_fingerprint"], "adapter": _digest(adapter)}
+    step = {"step": "adapter", "input": adapter["base_fingerprint"], "adapter": _digest(adapter)}
+    if adapter.get("base_quantize"):  # merged into the dequantised base
+        step["base_quantize"] = adapter["base_quantize"]
+    return step
 
 
 def fine_tune_step(fine_tuning: Mapping[str, Any]) -> dict[str, Any]:
@@ -171,6 +174,8 @@ def fine_tune_step(fine_tuning: Mapping[str, Any]) -> dict[str, Any]:
     }
     if fine_tuning["run"].get("objective", "lm") != "lm":  # preference tuning; language-model steps keep their bytes
         step["objective"] = fine_tuning["run"]["objective"]
+    if fine_tuning["run"].get("base_quantize"):  # LoRA on a quantised base: the dequantised weights changed too
+        step["base_quantize"] = fine_tuning["run"]["base_quantize"]
     if fine_tuning.get("distillation"):  # the data are a teacher's answers
         step["teacher"] = fine_tuning["distillation"]["teacher"]
     return step
