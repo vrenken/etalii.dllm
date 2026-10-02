@@ -16,18 +16,19 @@ Determinism: the automaton is a pure function of the grammar and the bytes; stac
 
 Supported JSON schema keywords: ``type`` (a name or a list of names), ``properties``, ``required``,
 ``additionalProperties`` (``false``, or, when there are no ``properties``, a free-form object whose values follow
-the schema it gives), ``propertyNames``, ``minProperties``/``maxProperties``, ``items``, ``prefixItems`` (and
-``items`` arrays with ``additionalItems``), ``minItems``, ``maxItems``, ``uniqueItems`` (over items from a finite set
-of literals), ``enum``,
-``const``, ``anyOf``, ``oneOf`` (treated as ``anyOf``), ``allOf`` with a single schema, ``$ref`` to ``#/$defs/...``
-or ``#/definitions/...``, and ``nullable``. Value constraints are compiled to byte automata
+the schema it gives), ``patternProperties``, ``propertyNames``, ``minProperties``/``maxProperties``, ``items``,
+``prefixItems`` (and ``items`` arrays with ``additionalItems``), ``minItems``, ``maxItems``, ``uniqueItems`` (over
+items from a finite set of literals), ``contains`` with ``minContains`` (and ``maxContains`` over items from a finite
+set), ``enum``, ``const``, ``anyOf``, ``oneOf`` (treated as ``anyOf``), ``allOf``, ``not`` and ``if``/``then``/
+``else`` (rewritten exactly by :mod:`etalii_dllm.schema_algebra`), ``$ref`` to ``#/$defs/...`` or
+``#/definitions/...``, and ``nullable``. Value constraints are compiled to byte automata
 (:mod:`etalii_dllm.regexp`): on strings ``pattern`` (found anywhere unless anchored by a leading ``^`` or trailing
 ``$``), the :data:`FORMATS` and ``minLength``/``maxLength`` in code points (such strings are written without escape
 sequences, so they hold no quote, backslash or control character); on numbers ``minimum``, ``maximum``,
 ``exclusiveMinimum``, ``exclusiveMaximum`` and ``multipleOf``, compared in exact decimal arithmetic
 (:mod:`etalii_dllm.numeric_automata`). Annotations (``title``, ``description``, ``default``, ``examples``, other
 ``format`` values, ``$schema``, ``$id``, ``strict``) are ignored. Keywords the automaton does not check
-(``patternProperties``, ``not``, ``contains``, ...) are rejected with a :class:`GrammarError` rather than silently
+(``dependentSchemas``, ``unevaluatedProperties``, ...) are rejected with a :class:`GrammarError` rather than silently
 ignored; ``lenient`` grammars (tool parameters) ignore them and the value constraints.
 
 Object properties are generated in the order the schema lists them; optional properties may be left out. Between
@@ -41,6 +42,7 @@ import functools
 import json
 import math
 from collections.abc import Iterable, Mapping, Sequence
+from decimal import Decimal
 from typing import Any
 
 MAX_WHITESPACE = 16
@@ -58,9 +60,11 @@ _ANNOTATIONS = frozenset(
 _STRUCTURE = frozenset(
     {"type", "properties", "required", "additionalProperties", "items", "minItems", "maxItems", "enum", "const",
      "anyOf", "oneOf", "allOf", "$ref", "$defs", "definitions", "nullable", "prefixItems", "additionalItems",
-     "uniqueItems", "propertyNames"}
+     "uniqueItems", "propertyNames", "not", "if", "then", "else", "patternProperties", "contains", "minContains",
+     "maxContains"}
 )  # fmt: skip
 _STRING_KEYWORDS = ("pattern", "minLength", "maxLength")
+_TYPES = ("object", "array", "string", "number", "boolean", "null")
 _SHAPES = ("type", "enum", "const", "$ref", "anyOf", "oneOf", "allOf")
 """Keywords that say which values a schema has, so a schema without them takes any value."""
 _BOUNDS = ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum")
@@ -86,6 +90,10 @@ formats stay annotations)."""
 
 class GrammarError(ValueError):
     """The schema uses a feature constrained decoding does not support."""
+
+
+class _Unsatisfiable(GrammarError):
+    """No value satisfies the schema: an optional property or an ``anyOf`` branch of it is left out."""
 
 
 # -- schema nodes -------------------------------------------------------------------------------------------------
@@ -123,36 +131,37 @@ class _Union(_Node):
 
 
 class _Object(_Node):
-    """``properties`` as ``(json-encoded name, schema, required)``; ``free`` objects take names valid under
-    ``names`` (any string when ``None``) with values valid under ``values``. ``minimum``/``maximum`` bound the number
-    of members."""
+    """``properties`` as ``(json-encoded name, schema, required)``; ``free`` objects take members of the ``kinds``
+    ``(names, values)``: a name valid under ``names`` with a value valid under ``values``. ``minimum``/``maximum``
+    bound the number of members."""
 
-    __slots__ = ("free", "maximum", "minimum", "names", "properties", "values")
+    __slots__ = ("free", "kinds", "maximum", "minimum", "properties")
 
     def __init__(
         self,
         properties: Sequence[tuple[bytes, _Node, bool]],
         free: bool,
         *,
-        values: _Node | None = None,
-        names: _Node | None = None,
+        kinds: Sequence[tuple[_Node, _Node]] = (),
         minimum: int = 0,
         maximum: int | None = None,
     ) -> None:
         self.properties = tuple(properties)
         self.free = free
-        self.values = values
-        self.names = names
+        self.kinds = tuple(kinds)
         self.minimum = minimum
         self.maximum = maximum
 
 
 class _Array(_Node):
-    """Elements valid under ``prefix`` (one schema per leading position) and then ``items`` (``None``: no more);
-    with ``unique``, the elements are distinct choices among those JSON texts (``(text, group)``, equal values
-    sharing a group)."""
+    """Elements valid under ``prefix`` (one schema per leading position) and then ``items`` (``None``: no more), or,
+    with ``choices``, among those JSON texts (``(text, group, hit)``: equal values share a group; ``hit``: the value
+    matches ``contains``), distinct ones when ``unique``. Between ``least`` and ``most`` elements match
+    ``contains``: for ``choices`` the hits are counted; otherwise ``witnesses`` (per prefix position) and
+    ``witness`` (after it) are the element nodes that match ``contains``, and only ``least`` is enforced."""
 
-    __slots__ = ("items", "maximum", "minimum", "prefix", "unique")
+    __slots__ = ("choices", "items", "least", "maximum", "minimum", "most", "prefix", "unique", "witness",
+                 "witnesses")  # fmt: skip
 
     def __init__(
         self,
@@ -161,13 +170,23 @@ class _Array(_Node):
         maximum: int | None,
         *,
         prefix: Sequence[_Node] = (),
-        unique: Sequence[tuple[bytes, int]] | None = None,
+        choices: Sequence[tuple[bytes, int, bool]] | None = None,
+        unique: bool = False,
+        least: int = 0,
+        most: int | None = None,
+        witnesses: Sequence[_Node | None] = (),
+        witness: _Node | None = None,
     ) -> None:
         self.items = items
         self.minimum = minimum
         self.maximum = maximum
         self.prefix = tuple(prefix)
-        self.unique = None if unique is None else tuple(unique)
+        self.choices = None if choices is None else tuple(choices)
+        self.unique = unique
+        self.least = least
+        self.most = most
+        self.witnesses = tuple(witnesses)
+        self.witness = witness
 
 
 class _Text(_Node):
@@ -207,7 +226,7 @@ class _Rule(_Node):
 
 _ANY = _Any()
 _STRING = _String()
-_FREE_OBJECT = _Object((), free=True, values=_ANY)
+_FREE_OBJECT = _Object((), free=True, kinds=[(_STRING, _ANY)])
 _ANY_ARRAY = _Array(_ANY, 0, None)
 _ANY_SCALARS = (_STRING, _Number(integer=False), _Literals([b"true", b"false", b"null"]))
 
@@ -258,19 +277,26 @@ def _searched(pattern: str) -> str:
 
 
 @functools.lru_cache(maxsize=256)
-def string_automaton(pattern: str | None, text_format: str | None, min_length: int, max_length: int | None) -> Any:
+def string_automaton(
+    pattern: str | tuple[str, ...] | None, text_format: str | None, min_length: int, max_length: int | None
+) -> Any:
     """The byte automaton of string content written without escapes that matches ``pattern`` (JSON Schema
-    semantics), the format and the length bounds (in code points): the intersection of their automata, trimmed so
-    that every state can still reach a match."""
+    semantics; a tuple: every one of them), the format and the length bounds (in code points): the intersection of
+    their automata, trimmed so that every state can still reach a match."""
     from etalii_dllm.regexp import Counted, compile_regex, intersect
 
     dfa = compile_regex(_CONTENT)
-    if pattern is not None:
-        dfa = intersect(dfa, compile_regex(_searched(pattern)))
-    if text_format is not None:
-        dfa = intersect(dfa, compile_regex(FORMATS[text_format]))
-    if min_length or max_length is not None:
-        return Counted(dfa, min_length, max_length)
+    try:
+        for each in () if pattern is None else pattern if isinstance(pattern, tuple) else (pattern,):
+            dfa = intersect(dfa, compile_regex(_searched(each)))
+        if text_format is not None:
+            dfa = intersect(dfa, compile_regex(FORMATS[text_format]))
+        if min_length or max_length is not None:
+            return Counted(dfa, min_length, max_length)
+    except GrammarError as error:
+        if "no text satisfies" in str(error):
+            raise _Unsatisfiable(f"no string satisfies the schema ({error})") from None
+        raise
     return dfa
 
 
@@ -313,7 +339,7 @@ def integer_automaton(low: int | None, high: int | None) -> Any:
     from etalii_dllm.regexp import compile_regex
 
     if low is not None and high is not None and low > high:
-        raise GrammarError(f"no integer lies between {low} and {high}")
+        raise _Unsatisfiable(f"no integer lies between {low} and {high}")
     branches: list[str] = []
     if high is None or high >= 0:
         branches += _magnitudes(max(low, 0) if low is not None else 0, high)
@@ -392,49 +418,117 @@ class _SchemaCompiler:
         self._root = root
         self._lenient = lenient
         self._refs: dict[str, _Node] = {}
+        self._combined: dict[str, _Node] = {}
+        self._algebra: Any = None
 
     def compile(self, schema: Any) -> _Node:
         if schema is True or schema == {}:
             return _ANY
+        if schema is False:
+            raise _Unsatisfiable("no value satisfies the schema false")
         if not isinstance(schema, Mapping):
             raise GrammarError(f"a schema must be an object, got {schema!r}")
         unsupported = sorted(set(schema) - _ANNOTATIONS - _STRUCTURE - _CONSTRAINTS)
         if unsupported and not self._lenient:
             names = ", ".join(unsupported)
             raise GrammarError(f"JSON schema keyword(s) not supported by constrained decoding: {names}")
+        if "$ref" not in schema and not self._lenient and self._combinators(schema):
+            return self._combine(schema)
         node = self._compile(schema)
+        if isinstance(schema.get("not"), tuple) and not self._lenient:
+            node = self._without(node, schema["not"])
         if schema.get("nullable") is True:
             node = _Union([node, _Literals([b"null"])])
         return node
 
+    @staticmethod
+    def _combinators(schema: Mapping[str, Any]) -> bool:
+        return "allOf" in schema or "if" in schema or ("not" in schema and not isinstance(schema["not"], tuple))
+
+    def _combine(self, schema: Mapping[str, Any]) -> _Node:
+        """``allOf``/``not``/``if`` rewritten by :mod:`etalii_dllm.schema_algebra`; equal rewrites share one node, so
+        recursive schemas end."""
+        from etalii_dllm.schema_algebra import Algebra, canonical
+
+        key = canonical(schema)
+        node = self._combined.get(key)
+        if node is not None:
+            return node
+        if self._algebra is None:
+            self._algebra = Algebra(self._target)
+        simple = self._algebra.simplify(schema)
+        if simple is False:
+            raise _Unsatisfiable("no value satisfies all of the schema's conditions")
+        placeholder = _Union(())
+        self._combined[key] = placeholder
+        try:
+            placeholder.options = (self.compile(simple),)
+        except GrammarError:
+            del self._combined[key]
+            raise
+        return placeholder
+
     def _compile(self, schema: Mapping[str, Any]) -> _Node:
         if "$ref" in schema:
             return self._reference(str(schema["$ref"]))
-        if "const" in schema:
-            return _Literals([_encode(schema["const"])])
-        if "enum" in schema:
-            values = list(schema["enum"])
+        if "const" in schema or "enum" in schema:
+            values = [schema["const"]] if "const" in schema else list(schema["enum"])
             if not values:
                 raise GrammarError("'enum' must not be empty")
-            return _Literals(_encode(v) for v in values)
+            return self._values(values, schema)
         for keyword in ("anyOf", "oneOf"):
             if keyword in schema:
-                return _Union([self.compile(s) for s in schema[keyword]])
-        if "allOf" in schema:
-            if len(schema["allOf"]) != 1:
-                raise GrammarError("'allOf' is only supported with a single schema")
-            return self.compile(schema["allOf"][0])
+                return self._union(schema[keyword])
+        if "allOf" in schema:  # lenient grammars only
+            return self.compile(schema["allOf"][0]) if schema["allOf"] else _ANY
         kind = schema.get("type")
         if isinstance(kind, list):
-            return _Union([self._typed(str(k), schema) for k in kind])
+            options = []
+            for name in kind:
+                try:
+                    options.append(self._typed(str(name), schema))
+                except _Unsatisfiable:
+                    continue
+            if not options and kind:
+                raise _Unsatisfiable("no type of the schema has a value")
+            return _Union(options)
         if kind is None:
-            if "properties" in schema:
+            if "properties" in schema or "patternProperties" in schema:
                 kind = "object"
-            elif "items" in schema:
+            elif "items" in schema or "prefixItems" in schema:
                 kind = "array"
+            elif any(k in _CONSTRAINTS or k in ("contains", "propertyNames", "uniqueItems") for k in schema):
+                # Keywords constrain only values of their type: every other type stays free.
+                return _Union([self._typed(name, schema) for name in _TYPES])
             else:
                 return _ANY
         return self._typed(str(kind), schema)
+
+    def _union(self, schemas: Sequence[Any]) -> _Node:
+        """The values of any of ``schemas``; branches no value satisfies are left out."""
+        options = []
+        for schema in schemas:
+            try:
+                options.append(self.compile(schema))
+            except _Unsatisfiable:
+                continue
+        if not options and schemas:
+            raise _Unsatisfiable("no branch of 'anyOf' has a value")
+        return _Union(options)
+
+    def _values(self, values: Sequence[Any], schema: Mapping[str, Any]) -> _Node:
+        """``enum``/``const`` values, without those the schema's other keywords rule out."""
+        texts = [_encode(v) for v in values]
+        rest = {k: v for k, v in schema.items() if k not in ("const", "enum", "nullable") and k not in _ANNOTATIONS}
+        if rest and not self._lenient:
+            try:
+                matcher = Grammar([_value(self.compile(rest))]).matcher()
+                texts = [text for text in texts if matcher.matches(text)]
+            except _Unsatisfiable:
+                texts = []
+            if not texts:
+                raise _Unsatisfiable("no value of 'enum'/'const' satisfies the rest of the schema")
+        return _Literals(texts)
 
     def _typed(self, kind: str, schema: Mapping[str, Any]) -> _Node:
         if kind == "string":
@@ -442,11 +536,11 @@ class _SchemaCompiler:
             if self._lenient or (text_format is None and not any(k in schema for k in _STRING_KEYWORDS)):
                 return _STRING
             pattern = schema.get("pattern")
-            if pattern is not None and not isinstance(pattern, str):
+            if pattern is not None and not isinstance(pattern, str | tuple):
                 raise GrammarError("'pattern' must be a string")
             min_length, max_length = int(schema.get("minLength", 0)), schema.get("maxLength")
             if max_length is not None and int(max_length) < min_length:
-                raise GrammarError("'maxLength' is smaller than 'minLength'")
+                raise _Unsatisfiable("'maxLength' is smaller than 'minLength'")
             maximum = None if max_length is None else int(max_length)
             return _Text(string_automaton(pattern, text_format, min_length, maximum))
         if kind in ("number", "integer"):
@@ -465,39 +559,119 @@ class _SchemaCompiler:
         if kind == "array":
             return self._array(schema)
         if kind == "object":
-            properties = schema.get("properties") or {}
-            required = set(schema.get("required") or ())
-            unknown = sorted(required - set(properties))
-            if unknown and properties:
-                raise GrammarError(f"required properties without a schema: {', '.join(unknown)}")
-            minimum, maximum = self._counts(schema)
-            additional = schema.get("additionalProperties", True)
-            names = self._names(schema)
-            declared = bool(properties)
-            if names is not None and properties:
-                properties, required = self._named(properties, required, names)
-            if not properties:
-                if additional is False or declared:
-                    if minimum:
-                        raise GrammarError("no object without properties has 'minProperties' members")
-                    return _Object((), free=False)
-                if minimum > 1:
-                    # Free names may repeat, and a repeated name counts once: only one member is certain.
-                    raise GrammarError("'minProperties' above 1 needs declared 'properties'")
-                values = _ANY if self._lenient or additional is True else self.compile(additional)
-                if values is _ANY and names is None and (minimum, maximum) == (0, None):
-                    return _FREE_OBJECT
-                return _Object((), free=True, values=values, names=names, minimum=minimum, maximum=maximum)
-            # With declared properties the model writes exactly those (``additionalProperties`` is not used).
-            members = [(_encode(str(name)), self.compile(sub), name in required) for name, sub in properties.items()]
+            return self._object(schema)
+        raise GrammarError(f"unknown JSON schema type {kind!r}")
+
+    def _object(self, schema: Mapping[str, Any]) -> _Object:
+        from etalii_dllm.schema_algebra import all_of, searches
+
+        properties = schema.get("properties") or {}
+        required = set(schema.get("required") or ())
+        unknown = sorted(required - set(properties))
+        if unknown and properties:
+            raise GrammarError(f"required properties without a schema: {', '.join(unknown)}")
+        minimum, maximum = self._counts(schema)
+        additional = schema.get("additionalProperties", True)
+        patterns = {} if self._lenient else dict(schema.get("patternProperties") or {})
+        names = self._names(schema)
+        declared = bool(properties)
+        if names is not None and properties:
+            properties, required = self._named(properties, required, names)
+        # With declared properties the model writes exactly those (``additionalProperties`` is not used); each one
+        # also obeys the pattern properties its name matches.
+        members = []
+        for name, sub in properties.items():
+            matched = [p_schema for pattern, p_schema in patterns.items() if searches(pattern, str(name))]
+            try:
+                node = self.compile(all_of(sub, *matched) if matched else sub)
+            except _Unsatisfiable:
+                if name in required:
+                    raise GrammarError(f"required property {name!r} has no value under the schema") from None
+                continue
+            members.append((_encode(str(name)), node, name in required))
+        if members:
             if minimum > len(members) or (maximum is not None and len(required) > maximum):
                 raise GrammarError(
                     "no object of the declared properties has between 'minProperties' and 'maxProperties' members"
                 )
             return _Object(members, free=False, minimum=minimum, maximum=maximum)
-        raise GrammarError(f"unknown JSON schema type {kind!r}")
+        if (additional is False and not patterns) or declared:
+            if minimum:
+                raise GrammarError("no object without properties has 'minProperties' members")
+            return _Object((), free=False)
+        if minimum > 1:
+            # Free names may repeat, and a repeated name counts once: only one member is certain.
+            raise GrammarError("'minProperties' above 1 needs declared 'properties'")
+        if not patterns:
+            values = self._free_values(additional)
+            if values is _ANY and names is None and (minimum, maximum) == (0, None):
+                return _FREE_OBJECT
+            kinds = [] if values is None else [(names or _STRING, values)]
+        else:
+            kinds = self._pattern_kinds(names, patterns, additional)
+        if minimum and not kinds:
+            raise GrammarError("no object without properties has 'minProperties' members")
+        return _Object((), free=True, kinds=kinds, minimum=minimum, maximum=maximum)
+
+    def _free_values(self, schema: Any) -> _Node | None:
+        """The node of the values of free members, ``None`` when there are none."""
+        if schema is True or self._lenient:
+            return _ANY
+        try:
+            return self.compile(schema)
+        except _Unsatisfiable:
+            return None
+
+    def _pattern_kinds(
+        self, names: _Node | None, patterns: Mapping[str, Any], additional: Any
+    ) -> list[tuple[_Node, _Node]]:
+        """Free members under ``patternProperties``: the names, split by which patterns they match (byte automata
+        intersected and subtracted), each with the merged schemas of those patterns (``additional`` for none)."""
+        from etalii_dllm.regexp import Counted, compile_regex, difference, intersect
+        from etalii_dllm.schema_algebra import MAX_BRANCHES, all_of
+
+        automata = [compile_regex(_searched(str(p))) for p in patterns]
+        schemas = list(patterns.values())
+        regions: list[tuple[tuple[int, ...], _Node]] = []
+        literal_regions: dict[tuple[int, ...], list[bytes]] = {}
+        for option in _flatten(names or _STRING):
+            if isinstance(option, _Literals):
+                for text in option.options:
+                    name = json.loads(text).encode("utf-8")
+                    matched = tuple(i for i, automaton in enumerate(automata) if automaton.matches(name))
+                    literal_regions.setdefault(matched, []).append(text)
+                continue
+            dfa = option.dfa if isinstance(option, _Text) else string_automaton(None, None, 0, None)
+            counted = (dfa.minimum, dfa.maximum) if isinstance(dfa, Counted) else None
+            split = [((), dfa.dfa if counted else dfa)]
+            for index, automaton in enumerate(automata):
+                following = []
+                for matched, region in split:
+                    for marks, combine in (((*matched, index), intersect), (matched, difference)):
+                        try:
+                            following.append((marks, combine(region, automaton)))
+                        except GrammarError as error:
+                            if "no text satisfies" not in str(error):
+                                raise
+                split = following
+                if len(split) > MAX_BRANCHES:
+                    raise GrammarError(f"'patternProperties' split the names into more than {MAX_BRANCHES} parts")
+            for matched, region in split:
+                try:
+                    regions.append((matched, _Text(Counted(region, *counted) if counted else region)))
+                except GrammarError:
+                    continue
+        regions += [(matched, _Literals(texts)) for matched, texts in literal_regions.items()]
+        kinds = []
+        for matched, name_node in regions:
+            values = self._free_values(all_of(*(schemas[i] for i in matched)) if matched else additional)
+            if values is not None:
+                kinds.append((name_node, values))
+        return kinds
 
     def _array(self, schema: Mapping[str, Any]) -> _Array:
+        from etalii_dllm.schema_algebra import all_of
+
         prefix_schemas = schema.get("prefixItems")
         rest = schema.get("items", True)
         if prefix_schemas is None and isinstance(rest, list):  # draft 2019 and older: an items array is a tuple
@@ -512,19 +686,73 @@ class _SchemaCompiler:
             raise GrammarError("'maxItems' is smaller than 'minItems'")
         if items is None:
             maximum = len(prefix) if maximum is None else min(maximum, len(prefix))
-        unique = None
-        if schema.get("uniqueItems") is True and not self._lenient:
-            choices = _choices(items) if items is not None and not prefix else None
-            if choices is None:
-                raise GrammarError(
-                    "'uniqueItems' needs items from a finite set (enum, const, boolean, null) and no 'prefixItems'"
-                )
-            unique = choices
-            groups = len({group for _, group in choices})
+        least, most = self._contains_counts(schema)
+        unique = schema.get("uniqueItems") is True and not self._lenient
+        choices = None
+        if unique or most is not None or least:
+            found = _choices(items) if items is not None and not prefix else None
+            if found is not None and (unique or least or most is not None):
+                hits = self._hits(schema.get("contains"), found) if least or most is not None else {}
+                choices = [(text, group, hits.get(group, False)) for text, group in found]
+        if unique and choices is None:
+            raise GrammarError(
+                "'uniqueItems' needs items from a finite set (enum, const, boolean, null) and no 'prefixItems'"
+            )
+        if most is not None and choices is None:
+            raise GrammarError("'maxContains' needs items from a finite set (enum, const, boolean, null)")
+        if unique and choices is not None:
+            groups = len({group for _, group, _ in choices})
             maximum = groups if maximum is None else min(maximum, groups)
         if maximum is not None and maximum < minimum:
             raise GrammarError("no array has 'minItems' elements under the schema")
-        return _Array(items, minimum, maximum, prefix=prefix, unique=unique)
+        witnesses: list[_Node | None] = []
+        witness = None
+        if least and choices is None:
+            contains = schema["contains"]
+            witnesses = [self._witness(all_of(sub, contains)) for sub in prefix_schemas or ()]
+            witness = None if items is None else self._witness(all_of(rest, contains))
+        node = _Array(items, minimum, maximum, prefix=prefix, choices=choices, unique=unique, least=least, most=most,
+                      witnesses=witnesses, witness=witness)  # fmt: skip
+        if not _array_can_finish(node, 0, (), 0):
+            raise GrammarError("no array has 'minContains' elements matching 'contains' under the schema")
+        return node
+
+    def _contains_counts(self, schema: Mapping[str, Any]) -> tuple[int, int | None]:
+        """How many elements must (at least) and may (at most, ``None``: any) match ``contains``."""
+        if "contains" not in schema or self._lenient:
+            return 0, None
+        least, most = schema.get("minContains", 1), schema.get("maxContains")
+        for name, value in (("minContains", least), ("maxContains", most)):
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+                raise GrammarError(f"'{name}' must be a non-negative integer")
+        if most is not None and most < least:
+            raise GrammarError("'maxContains' is smaller than 'minContains'")
+        return least, most
+
+    def _hits(self, contains: Any, choices: Sequence[tuple[bytes, int]]) -> dict[int, bool]:
+        """Per group of ``choices``: whether its value matches ``contains``."""
+        try:
+            matcher = Grammar([_value(self.compile(contains))]).matcher()
+        except _Unsatisfiable:
+            return {}
+        hits: dict[int, bool] = {}
+        for text, group in choices:
+            hits.setdefault(group, matcher.matches(text))
+        return hits
+
+    def _witness(self, schema: Any) -> _Node | None:
+        try:
+            return self.compile(schema)
+        except _Unsatisfiable:
+            return None
+
+    def _without(self, node: _Node, exclusions: tuple[tuple[str, Any], ...]) -> _Node:
+        """``node`` without the strings and numbers that internal exclusions (:mod:`etalii_dllm.schema_algebra`)
+        rule out: values, patterns, formats and divisors."""
+        result = _excluded(node, exclusions)
+        if result is None:
+            raise _Unsatisfiable("no value satisfies the schema's 'not'")
+        return result
 
     def _names(self, schema: Mapping[str, Any]) -> _Node | None:
         """The node of ``propertyNames`` (a string schema), or ``None`` when names are free."""
@@ -533,7 +761,12 @@ class _SchemaCompiler:
             return None
         if isinstance(names, Mapping) and not any(k in names for k in _SHAPES):
             names = {**names, "type": "string"}  # names are strings: string keywords describe them
-        node = self.compile(names)
+        elif isinstance(names, Mapping) and self._combinators(names):
+            names = {"allOf": [names, {"type": "string"}]}
+        try:
+            node = self.compile(names)
+        except _Unsatisfiable:
+            return _Union(())
 
         def strings(current: _Node) -> bool:
             if isinstance(current, _String | _Text):
@@ -568,10 +801,8 @@ class _SchemaCompiler:
             raise GrammarError("'maxProperties' is smaller than 'minProperties'")
         return minimum, maximum
 
-    def _reference(self, reference: str) -> _Node:
-        node = self._refs.get(reference)
-        if node is not None:
-            return node
+    def _target(self, reference: str) -> Any:
+        """The schema a local ``$ref`` points to."""
         prefixes = ("#/$defs/", "#/definitions/")
         if reference == "#":
             target: Any = self._root
@@ -582,11 +813,136 @@ class _SchemaCompiler:
             raise GrammarError(f"only local $ref values are supported, got {reference!r}")
         if target is None:
             raise GrammarError(f"unresolved $ref {reference!r}")
+        return target
+
+    def _reference(self, reference: str) -> _Node:
+        node = self._refs.get(reference)
+        if node is not None:
+            return node
+        target = self._target(reference)
         # Recursive schemas: a placeholder union is filled in after compiling, so references to it resolve lazily.
         placeholder = _Union(())
         self._refs[reference] = placeholder
-        placeholder.options = (self.compile(target),)
+        try:
+            placeholder.options = (self.compile(target),)
+        except GrammarError:
+            del self._refs[reference]
+            raise
         return placeholder
+
+
+def _flatten(node: _Node) -> list[_Node]:
+    """The options of nested unions."""
+    if isinstance(node, _Union):
+        return [leaf for option in node.options for leaf in _flatten(option)]
+    return [node]
+
+
+def _number_text(value: Decimal) -> str:
+    """A regex of the decimal texts (as constrained decoding writes them) whose value is ``value``."""
+    whole, _, fraction = format(abs(value), "f").partition(".")
+    fraction = fraction.rstrip("0")
+    sign = "-" if value < 0 else ""
+    return f"{sign}{whole}\\.{fraction}0*" if fraction else f"{sign}{whole}(?:\\.0+)?"
+
+
+def _excluded_literal(text: bytes, exclusions: tuple[tuple[str, Any], ...]) -> bool:
+    from decimal import localcontext
+
+    from etalii_dllm.numeric_automata import exact
+    from etalii_dllm.regexp import compile_regex
+
+    value = json.loads(text)
+    for kind, payload in exclusions:
+        if kind == "values":
+            if _identity(value) in {_identity(v) for v in payload}:
+                return True
+        elif kind in ("pattern", "format") and isinstance(value, str):
+            regex = _searched(payload) if kind == "pattern" else FORMATS[payload]
+            if compile_regex(regex).matches(value.encode("utf-8")):
+                return True
+        elif kind == "multipleOf" and isinstance(value, int | float) and not isinstance(value, bool):
+            with localcontext() as context:
+                context.prec = 200
+                if exact(value, "value") % exact(payload, "multipleOf") == 0:
+                    return True
+    return False
+
+
+def _excluded(node: _Node, exclusions: tuple[tuple[str, Any], ...]) -> _Node | None:
+    """``node`` without the excluded strings and numbers; ``None`` when nothing is left."""
+    from etalii_dllm.regexp import Counted, compile_regex, difference, literal_automaton
+
+    if isinstance(node, _Union):
+        options = [o for o in (_excluded(option, exclusions) for option in node.options) if o is not None]
+        return _Union(options) if options else None
+    if isinstance(node, _Any):
+        return _excluded(_Union([_FREE_OBJECT, _ANY_ARRAY, *_ANY_SCALARS]), exclusions)
+    if isinstance(node, _Literals):
+        kept = [text for text in node.options if not _excluded_literal(text, exclusions)]
+        return _Literals(kept) if kept else None
+    if isinstance(node, _Object | _Array):
+        kind = dict if isinstance(node, _Object) else list
+        if any(k == "values" and any(isinstance(v, kind) for v in payload) for k, payload in exclusions):
+            raise GrammarError("'not' can only exclude strings, numbers, booleans and null")
+        return node
+    try:
+        if isinstance(node, _String | _Text):
+            dfa = node.dfa if isinstance(node, _Text) else string_automaton(None, None, 0, None)
+            counted = (dfa.minimum, dfa.maximum) if isinstance(dfa, Counted) else None
+            inner = dfa.dfa if counted else dfa
+            for kind, payload in exclusions:
+                if kind == "values":
+                    texts = [v.encode("utf-8") for v in payload if isinstance(v, str)]
+                    excluded = literal_automaton(texts) if texts else None
+                elif kind == "pattern":
+                    excluded = compile_regex(_searched(payload))
+                elif kind == "format":
+                    excluded = compile_regex(FORMATS[payload])
+                else:
+                    excluded = None
+                if excluded is not None:
+                    inner = difference(inner, excluded)
+            return _Text(Counted(inner, *counted) if counted else inner)
+        if isinstance(node, _Number | _Digits):
+            from etalii_dllm.numeric_automata import _divisible, exact, number_automaton
+
+            dfa = node.dfa if isinstance(node, _Digits) else number_automaton(None, None, None, node.integer)
+            for kind, payload in exclusions:
+                if kind == "values":
+                    numbers = [v for v in payload if isinstance(v, int | float) and not isinstance(v, bool)]
+                    if numbers:
+                        regex = "|".join(_number_text(exact(v, "value").normalize()) for v in numbers)
+                        dfa = difference(dfa, compile_regex(regex))
+                elif kind == "multipleOf":
+                    dfa = difference(dfa, _divisible(exact(payload, "multipleOf")))
+            return _Digits(dfa)
+    except GrammarError as error:
+        if "no text satisfies" in str(error):
+            return None
+        raise
+    raise TypeError(f"unknown node {node!r}")  # pragma: no cover
+
+
+def _array_can_finish(node: _Array, count: int, used: tuple[int, ...], found: int) -> bool:
+    """Whether an array with ``count`` elements, the unique groups ``used`` and ``found`` elements matching
+    ``contains`` can still be completed within the bounds."""
+    infinite = math.inf
+    maximum = infinite if node.maximum is None else node.maximum
+    needed = max(0, node.least - found)
+    if node.choices is not None:
+        hit_groups = {group for _, group, hit in node.choices if hit and group not in used}
+        other_groups = {group for _, group, hit in node.choices if not hit and group not in used}
+        hits = len(hit_groups) if node.unique else (infinite if hit_groups else 0)
+        others = len(other_groups) if node.unique else (infinite if other_groups else 0)
+        most_hits = min(hits, infinite if node.most is None else node.most - found)
+        return needed <= most_hits and count + needed <= maximum and count + most_hits + others >= node.minimum
+    if not needed:
+        return True
+    available = sum(1 for p in range(count, min(len(node.prefix), int(min(maximum, 10**9)))) if node.witnesses[p])
+    if node.witness is not None:
+        available += maximum - max(count, len(node.prefix)) if maximum != infinite else infinite
+    return available >= needed
 
 
 # -- automaton ----------------------------------------------------------------------------------------------------
@@ -642,7 +998,7 @@ def _expand(node: _Node, rest: Stack) -> list[Stack]:
     if isinstance(node, _Object):
         return [_push(rest, [_literal(b"{"), _WS_ITEM, (_OBJ, node, 0, 0)])]
     if isinstance(node, _Array):
-        return [_push(rest, [_literal(b"["), _WS_ITEM, (_ARR, node, 0, ())])]
+        return [_push(rest, [_literal(b"["), _WS_ITEM, (_ARR, node, 0, (), 0)])]
     if isinstance(node, _Rule):
         return [_push(rest, alternative) for alternative in node.alternatives]
     if isinstance(node, _Any):
@@ -661,10 +1017,9 @@ def _object_steps(item: tuple[Any, ...], rest: Stack) -> list[Stack]:
         if node.maximum is None or count < node.maximum:
             # Counts past what the bounds tell apart are alike, so states stay few.
             following = min(count + 1, node.maximum if node.maximum is not None else max(node.minimum, 1))
-            value = _value(node.values)
-            name = _value(node.names or _STRING)
-            member = [*lead, name, _WS_ITEM, _COLON, _WS_ITEM, value, _WS_ITEM, (_OBJ, node, 0, following)]
-            stacks.append(_push(rest, member))
+            for names, values in node.kinds:
+                member = [*lead, _value(names), _WS_ITEM, _COLON, _WS_ITEM, _value(values), _WS_ITEM]
+                stacks.append(_push(rest, [*member, (_OBJ, node, 0, following)]))
         return stacks
     stacks: list[Stack] = []
     properties = node.properties
@@ -684,26 +1039,35 @@ def _object_steps(item: tuple[Any, ...], rest: Stack) -> list[Stack]:
 
 
 def _array_steps(item: tuple[Any, ...], rest: Stack) -> list[Stack]:
-    """The ways on from an array after ``count`` elements (``used``: the groups of the unique choices taken)."""
-    _, node, count, used = item
+    """The ways on from an array after ``count`` elements (``used``: the groups of the unique choices taken;
+    ``found``: the elements that match ``contains``, counted up to what the bounds tell apart)."""
+    _, node, count, used, found = item
     stacks: list[Stack] = []
-    if count >= node.minimum:
+    if count >= node.minimum and found >= node.least:
         stacks.append(_push(rest, [_literal(b"]")]))
     if node.maximum is not None and count >= node.maximum:
         return stacks
     lead = [_COMMA, _WS_ITEM] if count else []
-    if node.unique is not None:
-        for text, group in node.unique:
-            if group not in used:
-                taken = tuple(sorted((*used, group)))
-                stacks.append(_push(rest, [*lead, _literal(text), _WS_ITEM, (_ARR, node, count + 1, taken)]))
+    # Counts past what the bounds and the prefix tell apart are alike, so states stay few.
+    cap = node.maximum if node.maximum is not None else max(node.minimum, len(node.prefix), 1)
+    following = count + 1 if node.unique else min(count + 1, cap)
+    if node.choices is not None:
+        found_cap = node.most if node.most is not None else node.least
+        for text, group, hit in node.choices:
+            if node.unique and group in used:
+                continue
+            taken = tuple(sorted((*used, group))) if node.unique else used
+            now = min(found + hit, found_cap)
+            if (node.most is None or found + hit <= node.most) and _array_can_finish(node, following, taken, now):
+                stacks.append(_push(rest, [*lead, _literal(text), _WS_ITEM, (_ARR, node, following, taken, now)]))
         return stacks
     element = node.prefix[count] if count < len(node.prefix) else node.items
-    if element is not None:
-        # Counts past what the bounds and the prefix tell apart are alike, so states stay few.
-        cap = node.maximum if node.maximum is not None else max(node.minimum, len(node.prefix), 1)
-        following = min(count + 1, cap)
-        stacks.append(_push(rest, [*lead, _value(element), _WS_ITEM, (_ARR, node, following, used)]))
+    if element is not None and _array_can_finish(node, following, used, found):
+        stacks.append(_push(rest, [*lead, _value(element), _WS_ITEM, (_ARR, node, following, used, found)]))
+    if found < node.least:
+        witness = node.witnesses[count] if count < len(node.prefix) else node.witness
+        if witness is not None and _array_can_finish(node, following, used, found + 1):
+            stacks.append(_push(rest, [*lead, _value(witness), _WS_ITEM, (_ARR, node, following, used, found + 1)]))
     return stacks
 
 

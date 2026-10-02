@@ -251,6 +251,7 @@ SCHEMA_FINGERPRINTS = {
     "person": "f830d3b634b6f3b57323df3a05a72809757dd1393c510ea7f2a14ade7e894aaa",
     "measurement": "b9d85221c7cbf5a8f166528ffa20f15626856ae7787571089aaaaf4e75c5a5c3",
     "tagged_point": "1e73eec5e6a6345e5fee4515bf50e71c9bdccbc140521533dd54c841ceb098c9",
+    "labelled_shape": "3b661d4fe53be514f16ab68294092d7bda6e2ca04b04c8858cb0aad09fb79521",
 }
 """Fingerprints of answers constrained by patterns, formats, lengths and bounds (tests/test_schema_constraints.py)
 and by decimal bounds, multipleOf, property counts and map objects (tests/test_numeric_constraints.py), and by

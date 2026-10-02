@@ -684,6 +684,20 @@ dllm chat "Tag a point" --json-schema '{"type": "object", "properties": {
 Tuples (`prefixItems`, what pydantic writes for a `tuple[int, int]`), rules for property names and arrays of
 distinct choices are enforced exactly as well. Details: [structured output](api.md#structured-output).
 
+## 31. Conditions, combined schemas and patterned keys
+
+```bash
+dllm chat "Describe a shape" --json-schema '{"type": "object", "properties": {
+  "kind": {"enum": ["circle", "square"]}, "radius": {"type": "integer"}, "side": {"type": "integer"},
+  "labels": {"type": "object", "patternProperties": {"^is_": {"type": "boolean"}}, "additionalProperties": {"type": "integer"}}},
+  "required": ["kind", "labels"],
+  "if": {"properties": {"kind": {"const": "circle"}}}, "then": {"required": ["radius"]}, "else": {"required": ["side"]}}'
+```
+
+`if`/`then`/`else`, `allOf`, `not`, `patternProperties` and `contains` are now enforced exactly: a circle always
+gets a radius, a square a side, and labels starting with `is_` are booleans. Details:
+[structured output](api.md#structured-output).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
@@ -707,8 +721,9 @@ distinct choices are enforced exactly as well. Details: [structured output](api.
   engine asks for). SmolLM2-135M does not know tools, so expect clumsy calls from it; constrained decoding still
   guarantees that every call names a real tool with arguments that fit its schema.
 - Structured output supports the common JSON-schema keywords, including `pattern`, `format`, string lengths, number
-  bounds, `multipleOf`, property counts, tuples, property names and unique choices; `patternProperties`, `not`,
-  `contains`, `uniqueItems` over open-ended items and similar are refused with an error
+  bounds, `multipleOf`, property counts, tuples, property names, unique choices, `allOf`, `not`, `if`/`then`/`else`,
+  `patternProperties` and `contains`; `uniqueItems` and `maxContains` over open-ended items, conditions that cannot
+  be negated (such as `not` of an array schema) and keywords like `dependentSchemas` are refused with an error
   (see [HTTP API](api.md#structured-output)). GBNF grammars may not be left-recursive and cannot use llama.cpp's
   token references (`<...>`) ([grammars](api.md#grammars)). No images or audio.
 - MCP servers' own resources and prompts are not offered to the model (only their tools), and servers that ask
