@@ -161,9 +161,42 @@ async with McpHost(configs, engine) as host:  # with an engine, the host answers
     notes = await host.resource("notes://today")
 ```
 
+### Elicitation and roots
+
+Phase 46 completes the client side for servers that ask the client for input:
+
+- **Elicitation.** A server may ask for structured input (`elicitation/create` in form mode: a message and a flat
+  object schema of strings, numbers, booleans and enums). The host answers with the engine, exactly
+  (`mcp_host.elicitation_request`): a system prompt holding the requested schema as canonical JSON, the server's
+  message as the user message, greedy decoding constrained by that schema
+  ([structured output](api.md#structured-output); the display-only `enumNames` is dropped and properties the
+  schema does not name are refused unless it allows them) and at most 512 tokens. The request id comes from the
+  SHA-256 of the request's canonical JSON, so the same request gets the same schema-valid answer, bit for bit,
+  on every run and machine. The answer is `accept` with the JSON object, or `cancel` when the object does not
+  fit in 512 tokens. URL-mode elicitations (open a web page) are declined, and a schema the engine cannot
+  constrain gets an MCP error. `dllm chat --mcp-elicit decline` (`McpHost(..., elicitation="decline")`) declines
+  every elicitation instead. `McpHost.elicitations` records each one, and `dllm chat` prints each answer with its
+  fingerprint under the tool result.
+- **Roots.** `dllm chat --mcp-root DIR` (repeatable; `McpHost(..., roots=[...])`) offers directories to servers
+  that ask for the client's roots (`roots/list`): each as its absolute `file://` URI with its name, without
+  duplicates and sorted by URI, so every server sees the same list whatever order the options came in. Without
+  roots the host does not offer the capability. `--mcp-list` prints them. The MCP spec marks roots as deprecated
+  too, but servers still ask for them.
+- **Transcripts.** `McpHost.answers` lists every sampling and elicitation in the order they arrived. A
+  `--transcript` records them with the engine requests they became, and `dllm replay` runs those requests again
+  offline and reports any answer that differs ([reproducible agents](agents.md)). Each answer depends only on its
+  own request; when a server sends several requests in one round, the SDK starts them in the server's order.
+
+```bash
+dllm chat "Set up my profile" --mcp-server "forms=python forms_server.py" --mcp-root ./project \
+  --transcript run.json
+dllm replay run.json      # checks the rounds and the engine's answers to the server's requests
+```
+
 ### Limits
 
 - Image, audio and binary content (in prompts, resources and sampling requests) is refused with an error.
-- Servers that ask the client for elicitation or roots are not supported.
+- URL-mode elicitations are declined; nobody is asked interactively (the engine answers, or every elicitation is
+  declined).
 - Small models call tools clumsily; Qwen2.5-Instruct is trained on the `<tool_call>` format the engine uses,
   SmolLM2-135M is not.

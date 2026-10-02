@@ -6,6 +6,10 @@ round's receipt, the assistant text and tool calls in full and the tool results.
 again with :class:`RecordedTools` answering every call from the transcript instead of live servers, and compares each
 round's receipt with the recorded one: the first round that differs is where the run diverges (``dllm replay``).
 
+The engine also answers servers' sampling and elicitation requests during a run (:attr:`etalii_dllm.mcp_host.McpHost.
+answers`). The transcript records each one with the engine request it became, and replay runs those requests again,
+so the engine's side of a server conversation is checked as well. A run without any keeps the format below exactly.
+
 A transcript is plain JSON with nothing from a clock or a random source, so the same run gives the same bytes::
 
     {
@@ -16,7 +20,11 @@ A transcript is plain JSON with nothing from a clock or a random source, so the 
       "tools": [{"name", "description", "parameters", "server"}],
       "max_rounds": 8,
       "rounds": [{"receipt": {...}, "content": "...", "tool_calls": [...],
-                  "results": [{"id", "name", "server", "content", "is_error"}]}]
+                  "results": [{"id", "name", "server", "content", "is_error"}]}],
+      "server_requests": [               # only when a server asked; in the order they asked
+        {"kind": "sampling", "server", "request": {...}, "content": "...", "stop_reason", "fingerprint"},
+        {"kind": "elicitation", "server", "message", "action", "content": {...} | null,
+         "request": {...} | null, "fingerprint": "..." | null}]
     }
 """
 
@@ -33,7 +41,7 @@ from etalii_dllm.tools import Tool
 
 if TYPE_CHECKING:
     from etalii_dllm.engine import ChatRequest, DllmEngine
-    from etalii_dllm.mcp_host import HostEvent
+    from etalii_dllm.mcp_host import Elicitation, HostEvent, Sampling
 
 FORMAT = "dllm-agent/1"
 """The transcript format; a reader refuses others."""
@@ -49,6 +57,32 @@ def transcript_id(transcript: Mapping[str, Any]) -> str:
     return "trn_" + receipts._sha256(receipts.canonical_json(body))[:32]
 
 
+def server_request_record(answer: Sampling | Elicitation) -> dict[str, Any]:
+    """The transcript entry of a sampling or an elicitation the engine answered."""
+    from etalii_dllm.mcp_host import Sampling
+
+    if isinstance(answer, Sampling):
+        request = receipts.request_record(answer.request)
+        return {"kind": "sampling", "server": answer.server, "request": request, "content": answer.content,
+                "stop_reason": answer.stop_reason, "fingerprint": answer.fingerprint}  # fmt: skip
+    request = None if answer.request is None else receipts.request_record(answer.request)
+    return {"kind": "elicitation", "server": answer.server, "message": answer.message, "action": answer.action,
+            "content": None if answer.content is None else dict(answer.content), "request": request,
+            "fingerprint": answer.fingerprint}  # fmt: skip
+
+
+def answer_again(engine: DllmEngine, record: Mapping[str, Any]) -> Sampling | Elicitation:
+    """Runs the engine request of a transcript's server request again: the answer the engine gives now."""
+    from etalii_dllm import mcp_host
+
+    if record["request"] is None:  # an elicitation declined without running the engine
+        return mcp_host.Elicitation(record["server"], record["message"], record["action"], None, None, None)
+    request = receipts.request_from_record(record["request"])
+    if record["kind"] == "sampling":
+        return mcp_host.answer_sampling(engine, record["server"], request)
+    return mcp_host.answer_elicitation(engine, record["server"], record["message"], request)
+
+
 @dataclass
 class Recorder:
     """Builds a transcript from the events of :func:`etalii_dllm.mcp_host.chat`: pass every event to :meth:`add`."""
@@ -59,6 +93,9 @@ class Recorder:
     max_rounds: int
     servers: Mapping[str, str] = field(default_factory=dict)
     """Tool name -> the MCP server it belongs to (recorded for the reader; replay does not need it)."""
+    answers: Sequence[Sampling | Elicitation] = ()
+    """The servers' sampling and elicitation requests the engine answered (:attr:`etalii_dllm.mcp_host.McpHost.
+    answers`, read when the transcript is made)."""
     rounds: list[dict[str, Any]] = field(default_factory=list)
     _text: list[str] = field(default_factory=list)
     _calls: list[ToolCall] = field(default_factory=list)
@@ -103,6 +140,8 @@ class Recorder:
             "max_rounds": self.max_rounds,
             "rounds": self.rounds,
         }
+        if self.answers:
+            body["server_requests"] = [server_request_record(answer) for answer in self.answers]
         transcript = {**body, "id": transcript_id(body)}
         return self.engine.signer.sign(transcript) if self.engine.signer is not None else transcript
 
@@ -176,8 +215,13 @@ def replay(engine: DllmEngine, transcript: Mapping[str, Any]) -> Replay:
 
     request = receipts.request_from_record(transcript["request"])
     tools = RecordedTools(transcript)
+    answers = [answer_again(engine, record) for record in transcript.get("server_requests", ())]
+    for index, (record, answer) in enumerate(zip(transcript.get("server_requests", ()), answers, strict=True)):
+        if server_request_record(answer) != record:
+            reasons.append(f"server request {index} ({record['kind']} for {record['server']}): the engine's answer "
+                           "differs from the transcript")  # fmt: skip
     recorder = Recorder(engine, request, tools.tools, transcript["max_rounds"],
-                        {t["name"]: t["server"] for t in transcript["tools"]})  # fmt: skip
+                        {t["name"]: t["server"] for t in transcript["tools"]}, answers)  # fmt: skip
 
     async def run() -> None:
         async for event in mcp_host.chat(engine, request, tools, transcript["max_rounds"]):  # type: ignore[arg-type]

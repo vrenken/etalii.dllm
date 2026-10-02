@@ -108,7 +108,11 @@ def test_chat_and_replay_commands(tmp_path, capsys, monkeypatch):
     monkeypatch.delenv("DLLM_MODEL", raising=False)
     default_engine.cache_clear()
     real_host = mcp_host.McpHost
-    monkeypatch.setattr(mcp_host, "McpHost", lambda servers, *rest: real_host({"fixture": fixture_server()}, *rest))
+    monkeypatch.setattr(
+        mcp_host,
+        "McpHost",
+        lambda servers, *rest, **options: real_host({"fixture": fixture_server()}, *rest, **options),
+    )
     path = tmp_path / "run.json"
     arguments = ["chat", "What is the weather in Rome?", "--max-tokens", "160", "--mcp-server", "fixture=unused"]
     assert main([*arguments, "--max-tool-rounds", "3", "--transcript", str(path)]) == 0

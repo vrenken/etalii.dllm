@@ -338,6 +338,9 @@ LENGTH_FINGERPRINTS = {
 
 MCP_SAMPLING_FINGERPRINT = "012cbe8e52308a5ade4aba4361371111e45c6620a6cc6b45154cba7b98fbca4a"
 """Phase 39: the default model's answer to an MCP server's sampling request (test_mcp_context.py)."""
+MCP_ELICITATION_FINGERPRINT = "b6d628b6bc9b9149f0abb651e629e5e5747a398322c3a48c8371f6b69cbb1d1e"
+"""Phase 46: the default model's answer to an MCP server's form elicitation (test_mcp_elicitation.py)."""
+
 
 # Phase 41. fingerprint() of tests/test_long_context.py's tiny extended models' logits for test_transformer.PROMPT:
 # YaRN (Qwen3 and OLMo 2 carry its attention factor in their QK-norm weights) and Phi-3's LongRoPE long factors.

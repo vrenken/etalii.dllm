@@ -31,6 +31,7 @@ pytest tests/test_bpe.py -q    # one area
 | Integration | `test_server.py`, `test_responses_api.py`, `test_anthropic_api.py`, `test_ollama_api.py`, `test_api_errors.py` | the HTTP server driven by the official `openai`, `anthropic` and `ollama` clients, streamed and non-streamed output identical, each API's error shape |
 | Integration | `test_cli.py` | the `dllm` commands end to end, including their error exits |
 | Integration | `test_mcp_server.py`, `test_mcp_host.py` | both MCP directions through the official `mcp` SDK |
+| Integration | `test_mcp_elicitation.py` | form elicitations answered by the engine under their schema (declined, cancelled and refused ones too), roots sorted by URI, samplings and elicitations recorded in transcripts and checked by `dllm replay`, `dllm chat --mcp-elicit/--mcp-root`, golden elicitation answer |
 | Integration | `test_engine_import.py` | import a model file, load it in `DllmEngine` and generate |
 | End to end | `.github/workflows/docker.yml` | the Docker image serves `/v1/chat/completions` twice with identical answers and the chat page |
 | Reference | `test_reference_models.py` (`reference.yml`) | real SmolLM2/Qwen2.5/Qwen3 imports match Hugging Face `transformers` |
