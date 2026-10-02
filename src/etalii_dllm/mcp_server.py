@@ -230,5 +230,8 @@ def main(argv: list[str] | None = None) -> None:
         sign_key=args.sign_key,
         response_cache=args.response_cache,
         audit_every=args.audit_every,
+        contrast_model=args.contrast_model,
+        ensemble_models=args.ensemble_model or (),
+        ensemble_weight=args.ensemble_weight,
     )
     server.run("stdio")

@@ -693,6 +693,33 @@ def sampler(options: Any) -> Sampler:
 # -- the decoder --------------------------------------------------------------------------------------------------
 
 
+def guided(logits: npt.ArrayLike, negative: npt.ArrayLike, scale: float) -> np.ndarray:
+    """Classifier-free guidance: ``n + scale * (l - n)``, each operation rounded to float32."""
+    own, n = _f64(logits), _f64(negative)
+    return _round(n + _round(float(F32(scale)) * _round(own - n)))
+
+
+def contrasted(logits: npt.ArrayLike, amateur: npt.ArrayLike, alpha: float, beta: float) -> np.ndarray:
+    """Contrastive decoding: ``(1 + beta) * l - beta * a`` for the tokens at least ``alpha`` times as likely as the
+    most likely one, ``-inf`` for the others."""
+    p = softmax(logits)
+    keep = _f64(p) >= float(alpha) * float(p[argmax(p)])
+    combined = _round(_round(float(F32(1.0 + beta)) * _f64(logits)) - _round(float(F32(beta)) * _f64(amateur)))
+    combined[~keep] = -np.inf
+    return combined
+
+
+def ensembled(members: Sequence[tuple[npt.ArrayLike, float]]) -> np.ndarray:
+    """An ensemble: ``sum_i (w_i / W) * log_softmax_i`` in double, in member order, rounded to float32 once."""
+    total_weight = 0.0
+    for _, weight in members:
+        total_weight += float(weight)
+    total = np.zeros_like(_f64(members[0][0]))
+    for logits, weight in members:
+        total = total + (float(weight) / total_weight) * _f64(log_softmax(logits))
+    return _round(total)
+
+
 class ThinkingBudget:
     """The thinking budget of the specification (``docs/specification.md#reasoning``): ``limit`` tokens of a
     ``<think>`` block, which the output opens itself or (``started``) the prompt opened. ``decode`` gives the bytes of
@@ -871,6 +898,7 @@ class ReferenceTransformer:
         overflow: str = "stop",
         window: int | None = None,
         thinking: ThinkingBudget | None = None,
+        guide: Callable[[np.ndarray, list[int]], np.ndarray] | None = None,
     ) -> tuple[list[int], list[np.ndarray]]:
         """Generates from ``context`` (a fresh context) until a stop token or ``max_tokens``; returns the tokens
         (without the stop token) and the logits each was chosen from.
@@ -878,7 +906,9 @@ class ReferenceTransformer:
         The context window (``window``, else ``config.context_length``) is the specification's: a full window ends
         the generation (``overflow="stop"``) or rolls it (``"roll"``): the first :data:`ROLL_SINK` tokens and the
         latest half window are kept and computed afresh, while the sampler keeps the whole history. ``thinking``
-        closes a ``<think>`` block that has spent its budget with fixed tokens (:class:`ThinkingBudget`)."""
+        closes a ``<think>`` block that has spent its budget with fixed tokens (:class:`ThinkingBudget`). ``guide``
+        maps the logits after the tokens so far to the logits decoding uses (:func:`guided`, :func:`contrasted`,
+        :func:`ensembled`)."""
         window = window or self.config.context_length
         sequence = list(context)
         if window and len(sequence) >= window:
@@ -919,7 +949,7 @@ class ReferenceTransformer:
                     continue
             logits = self.forward(unfed)
             unfed = []
-            token = sampler.sample(logits)
+            token = sampler.sample(guide(logits, tokens) if guide is not None else logits)
             steps.append(logits)
             if token in stop_tokens:
                 break

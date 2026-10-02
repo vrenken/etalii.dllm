@@ -221,6 +221,7 @@ reference implementation repeats bit for bit.
 | Logit bias added to chosen tokens | `logit_bias` | | `--logit-bias TOKEN=BIAS` |
 | Several choices | `n` | | `--n` (`generate`) |
 | Output matching a regex in full | `response_format: {"type": "regex", "regex": ...}` or `guided_regex` | | `--regex` |
+| [Guided decoding](#guided-decoding): a negative prompt, or contrast against an amateur model | `guidance: {negative_prompt, scale}`, `contrast: {beta, alpha}` (extensions; also on Anthropic messages and completions) | | `--negative-prompt`, `--guidance-scale`, `--contrast BETA`, `--contrast-alpha` |
 | A keyed [watermark](watermarks.md) | `watermark: {key, gamma, delta}` (extension; also on Anthropic messages) | `watermark_key`, `watermark_gamma`, `watermark_delta` | `--watermark-key`, `--watermark-gamma`, `--watermark-delta` |
 
 - The defaults change nothing: a repetition penalty of 1 (Ollama's own default is 1.1; here it stays off unless asked
@@ -293,6 +294,40 @@ votes, choice indexes) and the winner's index, and `usage.completion_tokens` cou
 `"receipt": true` the receipt is a vote receipt (`"vote": "dllm-vote/1"`: the request, every answer's receipt id, the
 ballots and the winner), which `dllm replay` and `POST /v1/receipts/verify` check by voting again. `vote` cannot be
 combined with `stream` or `n`; `n` in a vote is 1 to 16.
+
+## Guided decoding
+
+Decoding from a combination of several next-token distributions, each one an exactly defined float32 computation
+([specification](specification.md#guided-decoding)) that the reference implementation repeats bit for bit. A request
+uses at most one guide; logit bias, penalties, the watermark, temperature and the sampler then apply to the combined
+logits as usual, and reported `logprobs` stay those of the model's own logits.
+
+- **Classifier-free guidance** steers away from a negative prompt: `guidance: {"negative_prompt": "...", "scale": 1.5}`
+  (`--negative-prompt`, `--guidance-scale`). On chat requests the negative prompt replaces the content of the last
+  user message (the system prompt and earlier turns stay); on completions it replaces the prompt. Scale 1 is
+  (up to float32 rounding) the unguided answer; larger scales push further away from the negative prompt.
+- **Contrastive decoding** favours what the served model knows better than a smaller amateur model with the same
+  tokenizer: start the server (or CLI) with `--contrast-model small.dllm` (`$DLLM_CONTRAST_MODEL`), then ask for
+  `contrast: {"beta": 0.5, "alpha": 0.1}` (`--contrast 0.5`, `--contrast-alpha`). Tokens less likely than `alpha`
+  times the top token are dropped.
+- **Ensembles** average the log-probabilities of models that share a tokenizer, for every request:
+  `--ensemble-model other.dllm=0.5` (repeatable; `$DLLM_ENSEMBLE_MODELS` holds `PATH[=WEIGHT]` items separated by
+  the path separator) and `--ensemble-weight` for the served model (default 1). An ensemble changes the
+  `system_fingerprint`, so receipts and cached answers of the plain model never mix with it, and it cannot be
+  combined with a per-request guide.
+
+```bash
+dllm generate --prompt "Once upon a time" --temperature 0.7 --seed 3 --negative-prompt "It was a dark night" --guidance-scale 3
+dllm --model qwen2.5-1.5b.dllm --contrast-model qwen2.5-0.5b.dllm chat "Explain entropy" --contrast 0.5
+curl -s localhost:5080/v1/chat/completions -H 'content-type: application/json' -d '{
+  "messages": [{"role": "user", "content": "Write a cheerful sentence"}], "temperature": 0.7, "seed": 3,
+  "guidance": {"negative_prompt": "Write a sad sentence", "scale": 2}}'
+```
+
+Each guide runs one more forward pass per token and model, with its own KV cache. Guided requests do not use
+speculative decoding (the answer is the same either way) and cannot roll the context window
+([long conversations](#long-conversations)): they stop when the longest context is full. Receipts record the guide,
+so `dllm replay` repeats it.
 
 ## Reasoning
 

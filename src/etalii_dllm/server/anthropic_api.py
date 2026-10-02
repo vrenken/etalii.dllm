@@ -42,7 +42,7 @@ from etalii_dllm.server.anthropic_contracts import (
     ToolUseBlock,
     Usage,
 )
-from etalii_dllm.server.contracts import id_payload
+from etalii_dllm.server.contracts import guided, id_payload
 from etalii_dllm.tools import Tool, ToolChoice
 
 Engine = Annotated[DllmEngine, Depends(default_engine)]
@@ -129,6 +129,7 @@ def _chat_request(request: MessagesRequest, engine: DllmEngine) -> ChatRequest:
         top_p=request.top_p if request.top_p is not None else 1.0,
         seed=request.seed or 0,
         **(request.watermark.sampling() if request.watermark else {}),
+        **guided(request.guidance, request.contrast),
     )
     tools, choice = _tools(request.tools, request.tool_choice)
     output = request.output_config.format if request.output_config else None

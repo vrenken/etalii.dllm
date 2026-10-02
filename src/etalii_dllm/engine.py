@@ -11,8 +11,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from functools import cache
 from pathlib import Path
@@ -20,7 +21,7 @@ from typing import Any
 
 import numpy as np
 
-from etalii_dllm import __version__, receipts
+from etalii_dllm import __version__, guidance, receipts
 from etalii_dllm import reasoning as thinking_rules
 from etalii_dllm import tools as tooling
 from etalii_dllm.chat import TOOL_CALL_OPEN, ChatMessage, ToolCall, render
@@ -28,6 +29,7 @@ from etalii_dllm.chat_template import ChatTemplate
 from etalii_dllm.cuda import DEVICES
 from etalii_dllm.generation import OVERFLOWS, Generation, GenerationResult, Generator, TokenLogprobs
 from etalii_dllm.grammar import Grammar, TokenConstraint, TokenTrie
+from etalii_dllm.guidance import Guide
 from etalii_dllm.models import BigramModel, LanguageModel
 from etalii_dllm.numerics import QUANTIZATIONS, linear, set_threads, sum_squares
 from etalii_dllm.prompt_cache import DEFAULT_PROMPT_CACHE_SIZE
@@ -69,6 +71,12 @@ INDEX_MODE_ENVIRONMENT_VARIABLE = "DLLM_INDEX_MODE"
 """How grounding searches the index: ``dense`` (default), ``lexical`` or ``hybrid``; changes the output."""
 RERANK_MODEL_ENVIRONMENT_VARIABLE = "DLLM_RERANK_MODEL"
 """A chat model that reranks the passages grounding finds (``--rerank-model``); changes the output."""
+CONTRAST_MODEL_ENVIRONMENT_VARIABLE = "DLLM_CONTRAST_MODEL"
+"""The amateur model for contrastive decoding (``--contrast-model``)."""
+ENSEMBLE_MODELS_ENVIRONMENT_VARIABLE = "DLLM_ENSEMBLE_MODELS"
+"""Ensemble members, ``PATH[=WEIGHT]`` separated by ``os.pathsep`` (``--ensemble-model``)."""
+ENSEMBLE_WEIGHT_ENVIRONMENT_VARIABLE = "DLLM_ENSEMBLE_WEIGHT"
+"""The served model's weight in an ensemble (``--ensemble-weight``)."""
 SPECULATE_ENVIRONMENT_VARIABLE = "DLLM_SPECULATE"
 """Tokens speculative decoding drafts per step (0 or unset: off). Never changes the output."""
 DRAFT_MODEL_ENVIRONMENT_VARIABLE = "DLLM_DRAFT_MODEL"
@@ -268,6 +276,9 @@ class DllmEngine:
         speculate: int = 0,
         draft_model: LanguageModel | None = None,
         prompt_cache_dir: str | Path | None = None,
+        contrast_model: LanguageModel | None = None,
+        ensemble: Sequence[tuple[LanguageModel, float]] = (),
+        ensemble_weight: float = 1.0,
     ) -> None:
         """``prompt_cache`` keeps that many KV caches to reuse for prompts sharing a prefix with an earlier one
         (:mod:`etalii_dllm.prompt_cache`), on disk across restarts with ``prompt_cache_dir``; it saves work and never
@@ -276,8 +287,27 @@ class DllmEngine:
         (:mod:`etalii_dllm.speculative`); that saves work and never changes the output either. ``embedding`` holds an
         embedding model's pooling settings (:attr:`etalii_dllm.modelfile.ModelFile.embedding`). ``retriever`` grounds
         chats in a document index (:class:`etalii_dllm.retrieval.Retriever`); its fingerprint joins the
-        ``system_fingerprint``."""
+        ``system_fingerprint``. ``contrast_model`` is the amateur requests with ``contrast_beta`` decode against,
+        and ``ensemble`` the other models (with weights; the served model has ``ensemble_weight``) every request is
+        decoded with (:mod:`etalii_dllm.guidance`); their weights join the ``system_fingerprint``."""
         self.model = model
+        self.contrast_model = contrast_model
+        self.ensemble = list(ensemble)
+        self.ensemble_weight = float(ensemble_weight)
+        for other in [*([contrast_model] if contrast_model is not None else []), *(m for m, _ in self.ensemble)]:
+            if getattr(other, "vocabulary_size", None) != getattr(model, "vocabulary_size", None):
+                raise ValueError("a contrast or ensemble model needs the model's vocabulary")
+        if any(not (math.isfinite(w) and w > 0) for w in [self.ensemble_weight, *(w for _, w in self.ensemble)]):
+            raise ValueError("ensemble weights must be positive")
+        extras = []
+        if contrast_model is not None:
+            extras.append(f"contrast:{contrast_model.weights_fingerprint}")
+        if self.ensemble:
+            members = ",".join(f"{m.weights_fingerprint}*{w!r}" for m, w in self.ensemble)
+            extras.append(f"ensemble:{self.ensemble_weight!r}:{members}")
+        if extras:
+            joined = hashlib.sha256("|".join([system_fingerprint, *extras]).encode()).hexdigest()
+            system_fingerprint = "fp_" + joined[:12]
         self.embedding = dict(embedding) if embedding else None
         self.retriever = retriever
         if retriever is not None:
@@ -311,6 +341,9 @@ class DllmEngine:
         prompt_cache_dir: str | Path | None = None,
         index_mode: str | None = None,
         rerank_model: str | Path | None = None,
+        contrast_model: str | Path | None = None,
+        ensemble: Sequence[tuple[str | Path, float]] = (),
+        ensemble_weight: float = 1.0,
     ) -> DllmEngine:
         """An engine for an imported ``model.dllm``: its decoder, BPE tokenizer and chat template. ``quantize``
         (``"q8_0"``) runs the linear layers on quantised weights; that changes the output, and so the
@@ -323,7 +356,9 @@ class DllmEngine:
         the model the index records), ranked by ``index_mode`` (``dense``, ``lexical`` or ``hybrid``) and reranked by
         ``rerank_model`` when given; that changes the output and the ``system_fingerprint`` too. ``speculate``
         drafts that many tokens per step (default: 8 with a ``draft_model``, else off) with ``draft_model``, a smaller
-        ``model.dllm`` with the same tokenizer, or from the text so far; it never changes the output."""
+        ``model.dllm`` with the same tokenizer, or from the text so far; it never changes the output.
+        ``contrast_model`` and ``ensemble`` (paths with weights) are models with the same tokenizer for contrastive
+        decoding and ensembles (:mod:`etalii_dllm.guidance`); they change the ``system_fingerprint``."""
         from etalii_dllm.bpe import from_model_header, special_token_text
         from etalii_dllm.modelfile import ModelFile
         from etalii_dllm.transformer import Transformer
@@ -384,6 +419,20 @@ class DllmEngine:
             )
             if speculate is None:
                 speculate = DEFAULT_DRAFT_TOKENS
+
+        def companion(other: str | Path, role: str) -> Transformer:
+            loaded = ModelFile(other, verify=verify)
+            if _vocabulary(loaded.tokenizer) != _vocabulary(file.tokenizer):
+                raise ValueError(f"{other}: the {role} model's tokenizer differs from the model's")
+            return Transformer(
+                loaded.config,
+                loaded.tensors,
+                weights_fingerprint=loaded.fingerprint,
+                quantize=quantize,
+                device=device,
+                release=loaded.release,
+            )
+
         return DllmEngine(
             model,
             tokenizer,
@@ -400,6 +449,9 @@ class DllmEngine:
             speculate=speculate or 0,
             draft_model=drafter,
             prompt_cache_dir=prompt_cache_dir,
+            contrast_model=companion(contrast_model, "contrast") if contrast_model else None,
+            ensemble=[(companion(other, "ensemble"), float(weight)) for other, weight in ensemble],
+            ensemble_weight=ensemble_weight,
         )
 
     @staticmethod
@@ -416,7 +468,7 @@ class DllmEngine:
         return self._generator.stop_tokens
 
     def complete(self, prompt: str, max_tokens: int, options: SamplingOptions) -> GenerationResult:
-        return self._generator.generate(prompt, max_tokens, options)
+        return self._generator.generate(prompt, max_tokens, options, guide=self.guide(options, raw=True))
 
     def complete_stream(
         self,
@@ -432,7 +484,10 @@ class DllmEngine:
         constraint = None
         if regex is not None:
             constraint = TokenConstraint(Grammar.regex(regex), self._token_trie())
-        return self._generator.stream(prompt, max_tokens, options, constraint=constraint, overflow=overflow)
+        guide = self.guide(options, raw=True)
+        return self._generator.stream(
+            prompt, max_tokens, options, constraint=constraint, overflow=overflow, guide=guide
+        )
 
     def count_tokens(self, text: str) -> int:
         return len(self.tokenizer.encode(text))
@@ -584,10 +639,45 @@ class DllmEngine:
             new_text=request.prompt is None,
             overflow=request.context_overflow,
             reasoning=tracker,
+            guide=self.guide(request.options, request.prompt is not None, messages, tools, request.thinking),
         )
         return _ChatGeneration(
             generation.prompt_tokens, generation.cached_tokens, self._events(generation, request, tools)
         )
+
+    def guide(
+        self,
+        options: SamplingOptions,
+        raw: bool,
+        messages: Sequence[ChatMessage] = (),
+        tools: Sequence[Tool] = (),
+        thinking: bool | None = None,
+    ) -> Callable[[list[int]], Guide] | None:
+        """What guides decoding for ``options`` (:mod:`etalii_dllm.guidance`), as a function of the prompt's tokens:
+        the negative prompt (for a chat, the conversation with the last user message replaced by it), contrastive
+        decoding, the engine's ensemble, or nothing. Raises ``ValueError`` for combinations that are not allowed."""
+        if self.ensemble and (options.negative_prompt is not None or options.contrast_beta is not None):
+            raise ValueError("this engine decodes with an ensemble; negative prompts and contrast do not combine")
+        if options.negative_prompt is not None:
+            text = options.negative_prompt
+            if not raw:
+                last = max((i for i, m in enumerate(messages) if m.role == "user"), default=None)
+                if last is None:
+                    raise ValueError("a negative prompt needs a user message to replace")
+                negative = [*messages[:last], replace(messages[last], content=text), *messages[last + 1 :]]
+                text = self.render_chat(negative, tools, thinking=thinking)
+            tokens = self.tokenizer.encode(text) or [self.tokenizer.end_of_sequence]
+            model, scale = self.model, options.guidance_scale
+            return lambda _context: guidance.NegativePrompt(model, tokens, scale)
+        if options.contrast_beta is not None:
+            if self.contrast_model is None:
+                raise ValueError("contrastive decoding needs a contrast model (--contrast-model)")
+            amateur, alpha, beta = self.contrast_model, options.contrast_alpha, options.contrast_beta
+            return lambda context: guidance.Contrast(amateur, context, alpha, beta)
+        if self.ensemble:
+            members, weight = self.ensemble, self.ensemble_weight
+            return lambda context: guidance.Ensemble(members, weight, context)
+        return None
 
     def _answer(self, events: Iterator[ChatEvent], request: ChatRequest, audit: bool = True) -> Iterator[ChatEvent]:
         """The events for ``request``: its own receipt chain link and signature on the shared receipt, which the
@@ -826,6 +916,9 @@ def use_model_file(
     rerank_model: str | Path | None = None,
     response_cache: str | Path | None = None,
     audit_every: int | None = None,
+    contrast_model: str | Path | None = None,
+    ensemble_models: Sequence[str] = (),
+    ensemble_weight: float | None = None,
 ) -> None:
     """Makes the front ends serve ``path`` (sets ``DLLM_MODEL``, and ``DLLM_QUANTIZE``/``DLLM_DEVICE``/
     ``DLLM_PROMPT_CACHE``/``DLLM_ADAPTER`` when ``quantize``/``device``/``prompt_cache``/``adapter`` are given) and
@@ -867,6 +960,12 @@ def use_model_file(
         os.environ[RESPONSE_CACHE_ENVIRONMENT_VARIABLE] = str(response_cache)
     if audit_every is not None:
         os.environ[AUDIT_EVERY_ENVIRONMENT_VARIABLE] = str(audit_every)
+    if contrast_model:
+        os.environ[CONTRAST_MODEL_ENVIRONMENT_VARIABLE] = str(contrast_model)
+    if ensemble_models:
+        os.environ[ENSEMBLE_MODELS_ENVIRONMENT_VARIABLE] = os.pathsep.join(ensemble_models)
+    if ensemble_weight is not None:
+        os.environ[ENSEMBLE_WEIGHT_ENVIRONMENT_VARIABLE] = repr(float(ensemble_weight))
     if threads is not None:
         set_threads(threads)
     default_engine.cache_clear()
@@ -921,6 +1020,23 @@ def add_runtime_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--rerank-model",
         help="chat model.dllm that reranks the passages found in the index (default: $DLLM_RERANK_MODEL, else none)",
+    )
+    parser.add_argument(
+        "--contrast-model",
+        help="smaller model.dllm with the same tokenizer for contrastive decoding (requests with contrast; default: "
+        "$DLLM_CONTRAST_MODEL, else none)",
+    )
+    parser.add_argument(
+        "--ensemble-model",
+        action="append",
+        metavar="PATH[=WEIGHT]",
+        help="decode every request with this model too, its log-probabilities averaged in (repeatable; default: "
+        "$DLLM_ENSEMBLE_MODELS); changes output",
+    )
+    parser.add_argument(
+        "--ensemble-weight",
+        type=float,
+        help="the served model's weight in the ensemble (default: $DLLM_ENSEMBLE_WEIGHT, else 1)",
     )
     parser.add_argument(
         "--prompt-cache",
@@ -1066,6 +1182,31 @@ def default_engine() -> DllmEngine:
     return engine
 
 
+def configured_ensemble() -> list[tuple[str, float]]:
+    """``$DLLM_ENSEMBLE_MODELS``: ``PATH[=WEIGHT]`` items (weight 1 when left out)."""
+    members = []
+    for item in os.environ.get(ENSEMBLE_MODELS_ENVIRONMENT_VARIABLE, "").split(os.pathsep):
+        if not item.strip():
+            continue
+        path, separator, weight = item.rpartition("=")
+        try:
+            members.append((path, float(weight)) if separator else (item, 1.0))
+        except ValueError:
+            members.append((item, 1.0))  # an "=" that is part of the path
+    return members
+
+
+def configured_ensemble_weight() -> float:
+    """``$DLLM_ENSEMBLE_WEIGHT``, or 1."""
+    value = os.environ.get(ENSEMBLE_WEIGHT_ENVIRONMENT_VARIABLE, "").strip()
+    if not value:
+        return 1.0
+    try:
+        return float(value)
+    except ValueError:
+        raise ValueError(f"{ENSEMBLE_WEIGHT_ENVIRONMENT_VARIABLE}={value!r}; expected a number") from None
+
+
 def configured_audit_every() -> int:
     """``DLLM_AUDIT_EVERY``: re-run every Nth response (0: no audit)."""
     value = os.environ.get(AUDIT_EVERY_ENVIRONMENT_VARIABLE, "").strip()
@@ -1093,4 +1234,7 @@ def _configured_engine(path: str) -> DllmEngine:
         speculate=configured_speculate(),
         draft_model=os.environ.get(DRAFT_MODEL_ENVIRONMENT_VARIABLE) or None,
         prompt_cache_dir=os.environ.get(PROMPT_CACHE_DIR_ENVIRONMENT_VARIABLE) or None,
+        contrast_model=os.environ.get(CONTRAST_MODEL_ENVIRONMENT_VARIABLE) or None,
+        ensemble=configured_ensemble(),
+        ensemble_weight=configured_ensemble_weight(),
     )

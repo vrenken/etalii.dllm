@@ -195,7 +195,7 @@ EVAL_FINGERPRINTS = {
 # SHA-256 of the conformance vectors' manifest.json (`dllm conformance write`, Phase 20). It covers every input and
 # output file's SHA-256, so it pins the bits of every kernel case, the sampler and the two small decoders. Phase 21
 # added the two sample-penalties cases (penalties, min-p and logit bias).
-CONFORMANCE_MANIFEST_SHA256 = "5e67de5ae7605aa8a56c56438846486502966d5cc452735a8af7896b8cd93254"
+CONFORMANCE_MANIFEST_SHA256 = "36b478022962b57a959502bce02235322836f5fc9bea3db927c56cf884800957"
 
 # Phase 21: the placeholder model continuing "Deterministic decoding controls are" with every decoding control set
 # (tests/test_decoding_controls.py::CONTROLLED): penalties, min-p and logit bias.
@@ -233,3 +233,10 @@ SCORING_FINGERPRINTS = {
     "score": "4a7a62dd75c5a91cb52b0ef6dc50776b555e54dbe908dd40863e5ae28b3921e1",
     "vote": "d892352c347fc5553d8845f7026be0e6dad98a17afe25ba466b67b75b8476487",
 }
+
+GUIDANCE_FINGERPRINTS = {
+    "guided": "942e17a71f3f6453980ad236ca1430439fe47d020f9501810f93d8e2133a87a9",
+    "contrasted": "d108ec88bfb42113b307508c28f43e5369d6cbaad07bfc10a6e28a09653d79c9",
+    "ensembled": "393f94ccc4212df37fcd746b55c35465e6e3e06d1892bb6a5185cc91ddeb591b",
+}
+"""Fingerprints of guided answers on the test model (tests/test_guidance.py)."""

@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from etalii_dllm.server.contracts import WatermarkOptions
+from etalii_dllm.server.contracts import ContrastOptions, GuidanceOptions, WatermarkOptions
 
 
 class RequestBlock(BaseModel):
@@ -87,6 +87,10 @@ class MessagesRequest(BaseModel):
     (docs/api.md#reasoning)."""
     watermark: WatermarkOptions | None = None
     """Extension: watermark the answer with a key (docs/watermarks.md)."""
+    guidance: GuidanceOptions | None = None
+    """Extension: classifier-free guidance away from a negative prompt (docs/api.md#guided-decoding)."""
+    contrast: ContrastOptions | None = None
+    """Extension: contrastive decoding against the server's amateur model."""
 
 
 class CountTokensRequest(BaseModel):

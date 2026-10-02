@@ -225,6 +225,7 @@ def test_server_main_serves_the_app(monkeypatch):
     expected |= {"index_mode": None, "rerank_model": None}
     expected |= {"embedding_model": None, "speculate": 8, "draft_model": None, "prompt_cache_dir": None}
     expected |= {"sign_key": None, "response_cache": None, "audit_every": None}
+    expected |= {"contrast_model": None, "ensemble_models": (), "ensemble_weight": None}
     assert calls["model"] == (("m.dllm", None, 2, None, 0, None), expected)
     assert calls["run"] == (app, {"host": "127.0.0.1", "port": 6000})
 
