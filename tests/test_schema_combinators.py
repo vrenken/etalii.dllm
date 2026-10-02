@@ -334,6 +334,7 @@ def test_algebra_helpers():
     assert algebra.merge({"multipleOf": 0.1}, {"multipleOf": 0.15})["multipleOf"] == Decimal("0.3")
     with pytest.raises(GrammarError, match="greater than 0"):
         algebra.merge({"multipleOf": 0.1}, {"multipleOf": -1})
+    assert algebra.merge({"x-custom": 1}, {"x-custom": 1, "type": "string"}) == {"x-custom": 1, "type": "string"}
     with pytest.raises(GrammarError, match="two different values of 'x-custom'"):
         algebra.merge({"x-custom": 1}, {"x-custom": 2})
     with pytest.raises(GrammarError, match="more than 64 alternatives"):
@@ -383,3 +384,67 @@ def test_answers_are_valid_under_the_whole_schema(tiny):
         assert validator.is_valid(value), value
         answers.append(result)
     assert answers[0].fingerprint == SCHEMA_FINGERPRINTS["labelled_shape"]
+
+
+def test_combinator_edge_cases():
+    with pytest.raises(GrammarError):
+        Grammar.json_schema({"type": "string", "pattern": "(?=a)"})  # unsupported regex syntax, not "unsatisfiable"
+    lenient = Grammar.json_schema({"allOf": [{"type": "integer"}, {"type": "string"}]}, lenient=True).matcher()
+    assert lenient.matches(b"1") and Grammar.json_schema({"allOf": []}, lenient=True).matcher().matches(b"[]")
+    _agrees({"type": ["string", "integer"], "minLength": 3, "maxLength": 1}, ["abc", 1])
+    _agrees({"anyOf": [{"type": "string", "minLength": 2, "maxLength": 1}, {"type": "null"}]}, ["ab", None])
+    _agrees({"enum": ["xa", "b"], "not": {"pattern": "^x"}}, ["xa", "b"])
+    _agrees({"type": "array", "items": {"enum": [1, 2]}, "contains": False, "minContains": 0, "maxContains": 0},
+            [[1, 2], []])  # fmt: skip
+    _agrees({"type": "array", "prefixItems": [{"type": "string"}], "contains": {"type": "integer"}},
+            [["a", 1], ["a"], ["a", "b"]])  # fmt: skip
+    _agrees({"type": "number", "allOf": [{"minimum": 1}, {"minimum": 2}, {"multipleOf": 0.1}, {"multipleOf": 0.25},
+                                          {"multipleOf": 0.3}]}, [1.5, 3, 4.5, 1.25])  # fmt: skip
+    _agrees({"type": "string", "allOf": [{"not": {"const": "a"}}, {"not": {"const": "b"}}]}, ["a", "b", "c"])
+    _agrees({"type": "string", "allOf": [{"format": "date", "minLength": 1}, {"format": "date"}]}, ["2026-01-02", "x"])
+    same = {"patternProperties": {"^x": {"type": "integer"}}}
+    _agrees({"type": "object", "allOf": [same, {**same, "maxProperties": 1}]}, [{"x": 1}, {"x": "a"}, {"x": 1, "y": 2}])
+    _agrees({"type": "array", "items": {"enum": [1, 2]}, "allOf": [{"contains": {"const": 1}, "minContains": 2},
+             {"contains": {"const": 1}, "maxContains": 2}]}, [[1, 1], [1], [1, 1, 1], [1, 2, 1]])  # fmt: skip
+    _agrees({"allOf": [{"type": "object", "patternProperties": {"^x": {"minimum": 0}}},
+                       {"properties": {"x1": {"type": "integer"}}}]}, [{"x1": 1}, {"x1": -1}])  # fmt: skip
+    _agrees({"not": {"type": "string", "not": {"const": "a"}}}, ["a", "b", 1])
+    _agrees({"not": {"not": {"pattern": "^a"}}}, ["ab", "b", 1])
+    _agrees({"type": "object", "propertyNames": {"maxLength": 2}, "patternProperties": {"^abc": {"type": "integer"}},
+             "additionalProperties": {"type": "string"}}, [{"ab": "x"}, {"ab": 1}, {"abcd": 1}])  # fmt: skip
+    names = {"anyOf": [{"enum": ["xa"]}, {"type": "string", "pattern": "^b"}]}
+    _agrees({"type": "object", "propertyNames": names, "patternProperties": {"^x": {"type": "integer"}}},
+            [{"xa": 1}, {"xa": "a"}, {"bz": "a"}, {"c": 1}])  # fmt: skip
+    _agrees({"enum": [3, 4, 4.5, "a"], "not": {"multipleOf": 2}}, [3, 4, 4.5, "a"])
+    _agrees({"type": "object", "propertyNames": {"minLength": 2, "maxLength": 1}}, [{}, {"a": 1}])
+    refusals = [
+        ({"type": ["string"], "minLength": 3, "maxLength": 1}, "no type of the schema"),
+        ({"anyOf": [False]}, "no branch of 'anyOf'"),
+        ({"anyOf": [{"type": "string", "minLength": 2, "maxLength": 1}]}, "no branch of 'anyOf'"),
+        ({"enum": ["a"], "type": "integer"}, "no value of 'enum'"),
+        ({"enum": ["a"], "type": "string", "minLength": 3, "maxLength": 1}, "no value of 'enum'"),
+        ({"type": "boolean", "not": {"enum": [True, False]}}, "satisfies the schema's 'not'"),
+        ({"type": "string", "maxLength": 0, "not": {"const": ""}}, "satisfies the schema's 'not'"),
+        ({"type": "object", "patternProperties": {c: {} for c in "abcdefg"}}, "more than 64 parts"),
+    ]  # fmt: skip
+    for schema, message in refusals:
+        with pytest.raises(GrammarError, match=message):
+            Grammar.json_schema(schema)
+
+
+def test_algebra_simplifies_forms():
+    algebra = Algebra(lambda reference: {})
+    with pytest.raises(GrammarError, match="must be an object"):
+        algebra.simplify(5)
+    assert algebra.simplify({"const": "a", "enum": ["b"]}) is False
+    assert algebra.simplify({"const": "a", "enum": ["a", "b"]}) == {"enum": ["a"]}
+    assert algebra.simplify({"items": [{"type": "string"}], "additionalItems": False}) == {
+        "items": False, "prefixItems": [{"type": "string"}]}  # fmt: skip
+    assert algebra.simplify({"prefixItems": [], "items": [{}], "additionalItems": False}) == {"prefixItems": [],
+                                                                                           "items": [{}]}  # fmt: skip
+    assert algebra.simplify({"anyOf": [False, {"type": "string"}]}) == {"type": "string"}
+    assert algebra.simplify({"anyOf": [{}, {"type": "string"}]}) == {}
+    assert algebra.simplify({"anyOf": [False]}) is False
+    from etalii_dllm.grammar import _STRING, _excluded
+
+    assert _excluded(_STRING, (("multipleOf", 2),)) is not None  # divisors leave strings alone

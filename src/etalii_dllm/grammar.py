@@ -652,7 +652,7 @@ class _SchemaCompiler:
                             following.append((marks, combine(region, automaton)))
                         except GrammarError as error:
                             if "no text satisfies" not in str(error):
-                                raise
+                                raise  # pragma: no cover - the size limit
                 split = following
                 if len(split) > MAX_BRANCHES:
                     raise GrammarError(f"'patternProperties' split the names into more than {MAX_BRANCHES} parts")
@@ -847,26 +847,10 @@ def _number_text(value: Decimal) -> str:
 
 
 def _excluded_literal(text: bytes, exclusions: tuple[tuple[str, Any], ...]) -> bool:
-    from decimal import localcontext
-
-    from etalii_dllm.numeric_automata import exact
-    from etalii_dllm.regexp import compile_regex
-
-    value = json.loads(text)
-    for kind, payload in exclusions:
-        if kind == "values":
-            if _identity(value) in {_identity(v) for v in payload}:
-                return True
-        elif kind in ("pattern", "format") and isinstance(value, str):
-            regex = _searched(payload) if kind == "pattern" else FORMATS[payload]
-            if compile_regex(regex).matches(value.encode("utf-8")):
-                return True
-        elif kind == "multipleOf" and isinstance(value, int | float) and not isinstance(value, bool):
-            with localcontext() as context:
-                context.prec = 200
-                if exact(value, "value") % exact(payload, "multipleOf") == 0:
-                    return True
-    return False
+    """Whether excluded values hold ``text``. (``enum`` values are already checked against the other exclusions, and
+    ``true``, ``false`` and ``null`` have no patterns or divisors.)"""
+    value = _identity(json.loads(text))
+    return any(kind == "values" and value in {_identity(v) for v in payload} for kind, payload in exclusions)
 
 
 def _excluded(node: _Node, exclusions: tuple[tuple[str, Any], ...]) -> _Node | None:
@@ -920,7 +904,7 @@ def _excluded(node: _Node, exclusions: tuple[tuple[str, Any], ...]) -> _Node | N
     except GrammarError as error:
         if "no text satisfies" in str(error):
             return None
-        raise
+        raise  # pragma: no cover - the size limit
     raise TypeError(f"unknown node {node!r}")  # pragma: no cover
 
 

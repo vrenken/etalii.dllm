@@ -231,12 +231,10 @@ class Algebra:
         if key == "pattern":
             patterns = (*_tuple(first), *_tuple(second))
             return tuple(dict.fromkeys(patterns))
-        if key == "format":
-            return first if first in FORMATS or second not in FORMATS else second
+        if key == "format":  # constraining formats only (simplify drops the others); a second one became a pattern
+            return first
         if key == "not":
             return (*first, *second)
-        if key in _ANNOTATIONS:
-            return first
         if first == second:
             return first
         raise GrammarError(f"'allOf' cannot merge two different values of '{key}'")
@@ -333,9 +331,7 @@ class Algebra:
 
     def _negate_plain(self, schema: Mapping[str, Any]) -> Schema:
         branches: list[Schema] = []
-        for key, value in schema.items():
-            if key in _ANNOTATIONS and not (key == "format" and value in FORMATS):
-                continue
+        for key, value in schema.items():  # annotations are gone: simplify drops them
             if key in ("properties", "required"):
                 continue
             branches += self._negate_keyword(key, value, schema)
