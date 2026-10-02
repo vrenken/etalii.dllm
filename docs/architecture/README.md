@@ -145,7 +145,7 @@ AdamW from `grad.hpp`.
 | `batch_jobs.py` | `dllm batch`: OpenAI batch files run concurrently with output in input order and content-derived ids, exact resume, digests and `--verify`. |
 | `regexp.py` | Regular expressions compiled to byte-level DFAs (UTF-8 ranges included) for regex-constrained output; trimmed intersections, differences and code point counting for schema constraints. |
 | `infill.py` | Fill-in-the-middle: the model's FIM tokens, the prompt built from them and the tokens that end a middle. |
-| `generation.py` | The autoregressive loop: forward pass, sample, append, repeat; stop sequences, logprobs, result fingerprint; token healing strips the healed bytes from the text. |
+| `generation.py` | The autoregressive loop: forward pass, sample, append, repeat; stop sequences, logprobs, result fingerprint; token healing strips the healed bytes from the text; `min_tokens`, `ignore_eos`, `stop_token_ids` and `include_stop` decide where an answer ends. |
 | `speculative.py` | Drafters for speculative decoding (prompt lookup, a draft model); the loop in `generation.py` keeps only drafted tokens it would have chosen. |
 | `prompt_cache.py` | KV caches of earlier requests, lent to the next prompt that shares their prefix; saves work, never changes tokens. |
 | `batching.py` | Continuous batching: concurrent generations share one `forward_batch` per step, each keeping its solo bits. |

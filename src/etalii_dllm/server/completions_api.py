@@ -28,6 +28,7 @@ from etalii_dllm.server.contracts import (
     WatermarkOptions,
     guided,
     id_payload,
+    length_controls,
 )
 
 router = APIRouter()
@@ -77,6 +78,14 @@ class CompletionRequest(BaseModel):
     """Extension: the best answers of an exact beam search (docs/api.md#beam-search)."""
     token_healing: bool | None = None
     """Extension: take the prompt's last token back and make the answer start with it (docs/api.md#token-healing)."""
+    min_tokens: int | None = None
+    """Extension (as in vLLM): no stop token ends an answer shorter than this (docs/api.md#length-and-stop-controls)."""
+    ignore_eos: bool | None = None
+    """Extension: the model's own stop tokens do not end the answer."""
+    stop_token_ids: list[int] | None = None
+    """Extension: token ids that end the answer as well as the model's stop tokens."""
+    include_stop_str_in_output: bool | None = None
+    """Extension: keep the stop string that ended the answer in its text."""
     receipt: bool | None = None
     """Extension: each choice carries its generation receipt (docs/receipts.md)."""
     user: str | None = None
@@ -178,6 +187,7 @@ def _requests(request: CompletionRequest, engine: DllmEngine) -> list[ChatReques
             request_id=request_id,
             prompt=prompt,
             token_healing=bool(request.token_healing),
+            **length_controls(request),
             suffix=request.suffix or None,  # an empty suffix is no suffix, as in OpenAI's API
         )
         for prompt in prompts

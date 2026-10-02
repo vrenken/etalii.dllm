@@ -84,6 +84,10 @@ def request_record(request: ChatRequest) -> dict[str, Any]:
         **({"max_reasoning_tokens": request.max_reasoning_tokens} if request.max_reasoning_tokens is not None else {}),
         **({"token_healing": True} if request.token_healing else {}),
         **({"suffix": request.suffix} if request.suffix is not None else {}),
+        **({"min_tokens": request.min_tokens} if request.min_tokens else {}),
+        **({"ignore_eos": True} if request.ignore_eos else {}),
+        **({"stop_token_ids": list(request.stop_token_ids)} if request.stop_token_ids else {}),
+        **({"include_stop": True} if request.include_stop else {}),
     }
 
 
@@ -123,6 +127,10 @@ def request_from_record(record: Mapping[str, Any]) -> ChatRequest:
         max_reasoning_tokens=record.get("max_reasoning_tokens"),
         token_healing=record.get("token_healing", False),
         suffix=record.get("suffix"),
+        min_tokens=record.get("min_tokens", 0),
+        ignore_eos=record.get("ignore_eos", False),
+        stop_token_ids=tuple(record.get("stop_token_ids", ())),
+        include_stop=record.get("include_stop", False),
     )
 
 

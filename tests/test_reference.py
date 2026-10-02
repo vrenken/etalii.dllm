@@ -229,6 +229,7 @@ def test_reference_generation_matches_the_engine(tmp_path):
         "budgeted": "equal",
         "guided": "equal",
         "healed": "equal",
+        "lengthened": "equal",
         "beam": "equal",
         "scored": "equal",
     }

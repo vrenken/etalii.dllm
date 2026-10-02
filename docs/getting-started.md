@@ -720,6 +720,18 @@ With `--suffix`, models that know fill-in-the-middle (Qwen2.5 among the verified
 prompt and the suffix, as code editors' completion does. The completions API and Ollama take the same `suffix`, and
 every middle is exactly reproducible. Details: [fill-in-the-middle](api.md#fill-in-the-middle).
 
+## 34. Answers of the length you want
+
+```bash
+dllm generate --prompt "Once upon a time" --min-tokens 40 --max-tokens 60 --temperature 0.8 --seed 1
+dllm generate --prompt "Q: 2 + 2 =" --stop $'\n' --include-stop
+```
+
+`--min-tokens` keeps the model from ending before it has written that many tokens, `--ignore-eos` lets it run on to
+`--max-tokens`, `--stop-token-id` adds token ids that end the answer, and `--include-stop` keeps the `--stop` text
+that ended it. The APIs take the same controls (`min_tokens`, `ignore_eos`, `stop_token_ids`,
+`include_stop_str_in_output`). Details: [length and stop controls](api.md#length-and-stop-controls).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,

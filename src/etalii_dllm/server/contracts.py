@@ -182,6 +182,14 @@ class ChatCompletionRequest(BaseModel):
     """Extension: the most tokens a thinking model's ``<think>`` block may take (docs/api.md#reasoning)."""
     token_healing: bool | None = None
     """Extension: take the prompt's last token back and make the answer start with it (docs/api.md#token-healing)."""
+    min_tokens: int | None = None
+    """Extension (as in vLLM): no stop token ends an answer shorter than this (docs/api.md#length-and-stop-controls)."""
+    ignore_eos: bool | None = None
+    """Extension: the model's own stop tokens do not end the answer."""
+    stop_token_ids: list[int] | None = None
+    """Extension: token ids that end the answer as well as the model's stop tokens."""
+    include_stop_str_in_output: bool | None = None
+    """Extension: keep the stop string that ended the answer in its text."""
     watermark: WatermarkOptions | None = None
     """Extension: watermark the answer with a key (docs/watermarks.md)."""
     vote: VoteOptions | None = None
@@ -212,6 +220,10 @@ DECODING_CONTROLS = (
     "chat_template_kwargs",
     "max_reasoning_tokens",
     "token_healing",
+    "min_tokens",
+    "ignore_eos",
+    "stop_token_ids",
+    "include_stop_str_in_output",
     "reasoning",
     "think",
     "thinking",
@@ -429,3 +441,13 @@ class RerankResponse(BaseModel):
     model: str
     results: list[RerankResult]
     usage: RerankUsage
+
+
+def length_controls(request: Any) -> dict[str, Any]:
+    """The engine request's length and stop controls (docs/api.md#length-and-stop-controls) from an API request."""
+    return {
+        "min_tokens": request.min_tokens or 0,
+        "ignore_eos": bool(request.ignore_eos),
+        "stop_token_ids": tuple(request.stop_token_ids or ()),
+        "include_stop": bool(request.include_stop_str_in_output),
+    }

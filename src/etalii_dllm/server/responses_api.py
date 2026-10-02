@@ -42,7 +42,7 @@ from etalii_dllm.engine import (
 )
 from etalii_dllm.generation import ContextLengthError, TokenLogprobs
 from etalii_dllm.sampling import SamplingOptions
-from etalii_dllm.server.contracts import id_payload, thinking_switch
+from etalii_dllm.server.contracts import id_payload, length_controls, thinking_switch
 from etalii_dllm.tools import Tool, ToolChoice
 
 Engine = Annotated[DllmEngine, Depends(default_engine)]
@@ -144,6 +144,14 @@ class ResponsesRequest(BaseModel):
     """Extension: the most tokens a thinking model's ``<think>`` block may take (docs/api.md#reasoning)."""
     token_healing: bool | None = None
     """Extension: take the prompt's last token back and make the answer start with it (docs/api.md#token-healing)."""
+    min_tokens: int | None = None
+    """Extension (as in vLLM): no stop token ends an answer shorter than this (docs/api.md#length-and-stop-controls)."""
+    ignore_eos: bool | None = None
+    """Extension: the model's own stop tokens do not end the answer."""
+    stop_token_ids: list[int] | None = None
+    """Extension: token ids that end the answer as well as the model's stop tokens."""
+    include_stop_str_in_output: bool | None = None
+    """Extension: keep the stop string that ended the answer in its text."""
 
 
 def error(message: str, status: int = 400) -> JSONResponse:
@@ -295,6 +303,7 @@ def _prepare(request: ResponsesRequest, engine: DllmEngine) -> tuple[ChatRequest
         thinking=thinking_switch(request.reasoning.effort if request.reasoning else None, None),
         max_reasoning_tokens=request.max_reasoning_tokens,
         token_healing=bool(request.token_healing),
+        **length_controls(request),
     )
     return chat, conversation
 

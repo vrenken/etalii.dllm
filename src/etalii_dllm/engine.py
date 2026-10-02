@@ -172,6 +172,14 @@ class ChatRequest:
     suffix: str | None = None
     """With a raw ``prompt``: the text after the gap, so the answer is the middle the model fills in between
     (:mod:`etalii_dllm.infill`, docs/api.md#fill-in-the-middle)."""
+    min_tokens: int = 0
+    """No stop token can end the answer before it has this many tokens (docs/api.md#length-and-stop-controls)."""
+    ignore_eos: bool = False
+    """The model's own stop tokens do not end the answer (only ``stop_token_ids``, stop sequences and limits)."""
+    stop_token_ids: Sequence[int] = ()
+    """Token ids that end the answer as well as the model's stop tokens."""
+    include_stop: bool = False
+    """Keep the stop sequence that ended the answer in its text (``include_stop_str_in_output``)."""
 
     def __post_init__(self) -> None:
         if self.max_reasoning_tokens is not None and self.max_reasoning_tokens < 0:
@@ -494,11 +502,18 @@ class DllmEngine:
         overflow: str = "stop",
         token_healing: bool = False,
         suffix: str | None = None,
+        min_tokens: int = 0,
+        ignore_eos: bool = False,
+        stop_token_ids: Sequence[int] = (),
+        stop: Sequence[str] = (),
+        include_stop: bool = False,
     ) -> Generation:
         """Continues ``prompt``; ``regex`` restricts the continuation to text matching it in full, ``grammar`` to
         text the GBNF grammar derives, ``overflow`` says what happens at a full context window
         (docs/api.md#long-conversations), ``token_healing`` heals the prompt's last token (:meth:`heal`) and
-        ``suffix`` makes the output the middle between ``prompt`` and it (:meth:`infill`)."""
+        ``suffix`` makes the output the middle between ``prompt`` and it (:meth:`infill`); ``stop`` ends it at
+        any of the strings (kept in the text with ``include_stop``); ``min_tokens``, ``ignore_eos`` and
+        ``stop_token_ids`` are the length controls (docs/api.md#length-and-stop-controls)."""
         if regex is not None and grammar is not None:
             raise ValueError("a regex and a grammar cannot be combined")
         constraint = None
@@ -517,7 +532,11 @@ class DllmEngine:
             overflow=overflow,
             guide=guide,
             healed=healed,
-            stop_tokens=ends,
+            stop=stop,
+            stop_tokens=ends | frozenset(stop_token_ids),
+            min_tokens=min_tokens,
+            ignore_eos=ignore_eos,
+            include_stop=include_stop,
         )
 
     def infill(
@@ -709,7 +728,10 @@ class DllmEngine:
             reasoning=tracker,
             guide=self.guide(request.options, request.prompt is not None, messages, tools, request.thinking),
             healed=healed,
-            stop_tokens=ends,
+            stop_tokens=ends | frozenset(request.stop_token_ids),
+            min_tokens=request.min_tokens,
+            ignore_eos=request.ignore_eos,
+            include_stop=request.include_stop,
         )
         return _ChatGeneration(
             generation.prompt_tokens, generation.cached_tokens, self._events(generation, request, tools)

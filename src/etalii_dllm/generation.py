@@ -122,10 +122,18 @@ class Generation:
         guide: Guide | None = None,
         healed: int = 0,
         stop_tokens: frozenset[int] = frozenset(),
+        min_tokens: int = 0,
+        ignore_eos: bool = False,
+        include_stop: bool = False,
     ) -> None:
         self.prompt_tokens = len(context)
-        self._stop_tokens = generator.stop_tokens | stop_tokens
-        """The tokens that end this generation: the generator's, and its own (a fill-in-the-middle's ends)."""
+        self._stop_tokens = (frozenset() if ignore_eos else generator.stop_tokens) | stop_tokens
+        """The tokens that end this generation: the generator's (unless ``ignore_eos``), and its own (a
+        fill-in-the-middle's ends, ``stop_token_ids``)."""
+        self._min_tokens = min_tokens
+        """Until the output has this many tokens no stop token can be chosen (docs/api.md#length-and-stop-controls)."""
+        self._include_stop = include_stop
+        """Keep the stop sequence that ended the output in its text."""
         self._healed = healed
         """Bytes of a prompt token taken back for token healing: the output's first bytes, left out of its text."""
         self._guide = guide
@@ -246,7 +254,7 @@ class Generation:
             if found:
                 stop_at, which = min(found)
                 self.stop_sequence = stop[which]
-                self._text = text[:stop_at]
+                self._text = text[: stop_at + len(stop[which]) if self._include_stop else stop_at]
                 self._finish_reason = "stop"
                 return Step(token, self._text[len(emitted) :], logprobs, "stop"), True
             release = len(text) - _held_back(text, stop)
@@ -293,7 +301,8 @@ class Generation:
                     pending = [model.forward_cached(context, cache)]
             logits = pending.pop(0)
             decoded = logits if guide is None else guide.combine(np.asarray(logits, dtype=np.float32), self._tokens)
-            token = self._choose(sampler, decoded, self._stop_tokens, constraint)
+            blocked = len(self._tokens) < self._min_tokens
+            token = self._choose(sampler, decoded, self._stop_tokens, constraint, blocked)
             if token is None or token in self._stop_tokens:
                 finish_reason = "stop"
                 break
@@ -341,19 +350,30 @@ class Generation:
 
     @staticmethod
     def _choose(
-        sampler: Sampler, logits: np.ndarray, stop_tokens: frozenset[int], constraint: Constraint | None
+        sampler: Sampler,
+        logits: np.ndarray,
+        stop_tokens: frozenset[int],
+        constraint: Constraint | None,
+        blocked: bool = False,
     ) -> int | None:
+        """The next token; ``blocked`` (an output shorter than ``min_tokens``) takes the stop tokens out of the
+        choice, as a constraint restricts it."""
         if constraint is None or not constraint.active:
+            if blocked and stop_tokens:
+                return sampler.sample(logits, [t for t in range(len(logits)) if t not in stop_tokens])
             return sampler.sample(logits)
         if sampler.greedy:
             # The argmax of the allowed tokens: when the overall argmax is allowed it is that one (same tie rule),
             # which saves computing the whole mask on most steps.
             best = sampler.sample(logits)
-            if (best in stop_tokens and constraint.may_stop) or (best not in stop_tokens and constraint.allows(best)):
+            if best in stop_tokens:
+                if constraint.may_stop and not blocked:
+                    return best
+            elif constraint.allows(best):
                 return best
         # Stop tokens end the generation whatever their bytes, so they are allowed exactly when the match may end.
         allowed = [t for t in constraint.allowed() if t not in stop_tokens]
-        if constraint.may_stop:
+        if constraint.may_stop and not blocked:
             allowed = sorted({*allowed, *(t for t in stop_tokens if 0 <= t < len(logits))})
         if not allowed:
             return None
@@ -431,6 +451,9 @@ class Generator:
         guide: Callable[[list[int]], Guide] | None = None,
         healed: int = 0,
         stop_tokens: Iterable[int] = (),
+        min_tokens: int = 0,
+        ignore_eos: bool = False,
+        include_stop: bool = False,
     ) -> Generation:
         """Starts a generation. ``stop`` ends it at the first occurrence of any of the strings (which are not part
         of the text); ``constraint`` restricts the tokens (structured output, tool calls); ``top_logprobs``
@@ -441,7 +464,9 @@ class Generator:
         :meth:`Generation._roll`). A prompt that leaves no room raises :class:`ContextLengthError`. ``healed``: the
         output's first bytes are a prompt token taken back for token healing (a :class:`HealingConstraint` makes
         the output start with them), left out of its text. ``stop_tokens`` end the generation as well as the
-        generator's own (a fill-in-the-middle's ends, :mod:`etalii_dllm.infill`). ``reasoning``
+        generator's own (a fill-in-the-middle's ends, :mod:`etalii_dllm.infill`), and ``ignore_eos`` drops the
+        generator's own; until the output has ``min_tokens`` tokens no stop token can be chosen (their logits are
+        -inf); ``include_stop`` keeps the stop sequence that ended the output in its text. ``reasoning``
         follows a thinking model's ``<think>`` block and closes it when its budget is spent
         (:mod:`etalii_dllm.reasoning`). ``guide`` makes the guide (:mod:`etalii_dllm.guidance`) for the prompt's
         tokens; guided generations do not roll."""
@@ -454,6 +479,11 @@ class Generator:
         vocabulary = getattr(self.model, "vocabulary_size", None)
         if vocabulary is not None and any(token >= vocabulary for token, _ in options.logit_bias):
             raise ValueError(f"logit_bias token ids must be below the vocabulary size {vocabulary}")
+        stop_tokens = frozenset(stop_tokens)
+        if any(token < 0 or (vocabulary is not None and token >= vocabulary) for token in stop_tokens):
+            raise ValueError(f"stop token ids must be between 0 and the vocabulary size {vocabulary}")
+        if min_tokens < 0:
+            raise ValueError("min_tokens must be non-negative")
         context = self.tokenizer.encode(prompt) if isinstance(prompt, str) else list(prompt)
         window = self.context_length
         if window is not None and len(context) >= window:
@@ -478,7 +508,10 @@ class Generator:
             reasoning,
             made,
             healed,
-            frozenset(stop_tokens),
+            stop_tokens,
+            min_tokens,
+            ignore_eos,
+            include_stop,
         )
 
     def generate(

@@ -711,6 +711,20 @@ def healing(prefix: bytes, token_bytes: Sequence[bytes]) -> Callable[[list[int]]
     return allowed
 
 
+def minimum_length(
+    min_tokens: int, stop_tokens: Sequence[int], vocabulary: int
+) -> Callable[[list[int]], list[int] | None]:
+    """A minimum answer length (docs/specification.md#length-and-stop-controls): until ``min_tokens`` tokens are
+    written, the next token may be any but the stop tokens. After that, any token."""
+    stops = set(stop_tokens)
+    others = [t for t in range(vocabulary) if t not in stops]
+
+    def allowed(generated: list[int]) -> list[int] | None:
+        return others if len(generated) < min_tokens else None
+
+    return allowed
+
+
 FIM_PARTS = ("fim_prefix", "fim_suffix", "fim_middle")
 FIM_ENDS = ("fim_prefix", "fim_suffix", "fim_middle", "fim_pad", "file_sep", "repo_name", "endoftext")
 
