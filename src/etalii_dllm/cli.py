@@ -203,6 +203,7 @@ def _finetune(args: argparse.Namespace) -> int:
                 optimizer,
                 lora,
                 **({"objective": "dpo", "beta": args.beta} if args.dpo else {}),
+                router_aux_loss=args.router_aux_loss,
             )
             tuner = FineTuner.from_model_file(base, data, run)
         tuner.distillation = distillation
@@ -505,6 +506,13 @@ def main(argv: list[str] | None = None) -> int:
         "--dpo", action="store_true", help="preference tuning: --data holds prompt/chosen/rejected pairs (JSONL)"
     )
     finetune.add_argument("--beta", type=float, default=0.1, help="DPO: how close to stay to the base model")
+    finetune.add_argument(
+        "--router-aux-loss",
+        type=float,
+        default=0.0,
+        metavar="COEF",
+        help="mixture-of-experts models: add COEF times the router load-balancing loss",
+    )
 
     sign = commands.add_parser("sign", help="sign a receipt, chain, transcript or model file with an Ed25519 key")
     sign.add_argument("file", nargs="?", help="the JSON document or model.dllm file to sign")

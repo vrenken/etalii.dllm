@@ -59,6 +59,10 @@ GRADIENT_FINGERPRINT = {
     "granite": "98f7a135ca78ed583d5e62fcb3cde570e8207eeb0a3f99eeffd5357246829f34",
     "olmo2": "c97ec7b029ac6184b74379a2b0712ada3d1024fb7b8f29c8bf33c600f23aec06",
     "phi3": "f473fc130c10433bee8d3e33ebbbb68414156855de5bf2918cfb2e439f1e9d6e",
+    # Phase 43: mixture-of-experts layers (router and experts).
+    "mixtral": "fb4f2e7cc9064f06c4b8c7f843ae9933069607c49911f2f7c919c6becc2367a4",
+    "olmoe": "a2d0729a35b75e8bc0be5b65db5a3b76c8ce96eaff1e7fa516127705cf18e2cf",
+    "qwen3_moe": "fade910434dfac1470183fabd37c41a3b15425d02f60b26aa35da5211a2fdebe",
 }
 
 # Fingerprint of the model.dllm exported after tests/test_training.py::RUN (6 AdamW steps on the ASCII data).
@@ -72,6 +76,10 @@ FINETUNE_FINGERPRINT = {
     "granite": "0e55ef33fe21bea9875a39fce8ac925fbbea183e1b41aa963b354a5e47d2144d",
     "olmo2": "c8e571ac46f3c6a3b193a70f21d06596c33ab5ddf77f8ea8f50cc75247d96b7f",
     "phi3": "802773c1df4b7c6a015114d5618a834e0ff5fa58d46a9628edf48239d9c77946",
+    # Phase 43: mixture-of-experts models.
+    "mixtral": "bc398b0adf8605416de0f6427b66bd464a259046e7c6f0e3f1de641825ea2c59",
+    "olmoe": "21c511d458cccda8ff3f44c23fa8de178b9859142e252703538d40da04e4a697",
+    "qwen3_moe": "44f5fb95695265a5346aad2892dfa2986998f6432661fafb6ff407aefe26be0a",
 }
 
 # Phase 8. Fingerprint of the model.dllm exported after tests/test_lora.py::RUN (6 AdamW steps on rank-2 LoRA
@@ -84,6 +92,10 @@ LORA_FINETUNE_FINGERPRINT = {
     "granite": "6e2e7839c6be40010ad7e9ffb443cf899c9dfb59992cbc45004da36a2a7eff6e",
     "olmo2": "23c71be0b0ae63e8e47e0e3b5b5a83e31183cfca7e32c46a5e0d9018ef8b15ee",
     "phi3": "0d709a78f35ee3eb4c909daa0815e285ca9cbfb81c17f0a0f6efd170b0f115fb",
+    # Phase 43: adapters on every expert's projections.
+    "mixtral": "fdd2f2b4659e6a1125dde8ff4f5f4d66a92f49746a3f58bc90ce09f075534a62",
+    "olmoe": "c0078fdaa67e8c5234ae5f884a2881137c7b01586a80916b117455c6af77285a",
+    "qwen3_moe": "515af08a162a445027532723dddc368523214379e8f11125f6d231e86e0f9a23",
 }
 
 # Phase 4. fingerprint() of the tokens of tests/test_generation.py's schema-constrained chat (placeholder model,
@@ -235,6 +247,10 @@ DPO_FINETUNE_FINGERPRINT = {
     "granite": "f86a79bac1e970727c470f9ca2772d0910b127b6961afcea2f7ea90a7ab53c6a",
     "olmo2": "218282bd542d8a5e50b00a45c5c21b36683e48f832cb46485ffba2433fc0b1fd",
     "phi3": "91ad8e324a3511e09efeefc3c989e4dddc20f0631d4f90d9601e1defc0ad9992",
+    # Phase 43: mixture-of-experts models.
+    "mixtral": "ed1690da282630694eb2051f208a9d4fae3377d820299659a572f4c6340cc586",
+    "olmoe": "73fc86c64b3dd5dd1a016e7b5734b620e63946e185e09ac3d14e8a46d864609a",
+    "qwen3_moe": "fd14f3acff05f62f9a8d775e6dcd7fd4bed91687eb6621816172c52ba4b0bc39",
 }
 
 # Phase 26. Fingerprints (SHA-256 of [[chunk, score as a hex double], ...]) of tests/test_hybrid_search.py's lexical

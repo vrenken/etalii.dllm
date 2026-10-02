@@ -343,4 +343,50 @@ inline void adamw_step(float* param, const float* grad, float* m, float* v, std:
     }
 }
 
+// Gradient of the router logits [rows, experts] of moe_route() (nn.hpp) from the gradients of its weights dweights
+// [rows, k] (rank order, for the experts in indices), plus an optional extra gradient dprobabilities [rows, experts]
+// of the softmax probabilities themselves (the load-balancing loss; null when there is none). The top-k choice has no
+// gradient. Per row, in row order, the probabilities p are recomputed exactly as the forward kernel does, then in
+// double
+//   S     = sum_j p[i_j]               (j ascending, rank order; normalize only)
+//   C     = sum_j dw_j p[i_j]          (j ascending; normalize only)
+//   dp_e  = dprobabilities_e + (dw_j / S - C / S^2  if e = i_j, normalized;  dw_j  if e = i_j;  0 otherwise)
+//   D     = sum_e p_e dp_e             (e ascending)
+//   dl_e  = float(p_e (dp_e - D))
+inline void moe_route_backward(const float* logits, const std::int64_t* indices, const float* dweights,
+                               const float* dprobabilities, float* dlogits, std::size_t rows, std::size_t experts,
+                               std::size_t k, bool normalize) {
+    std::vector<double> scratch(experts);
+    std::vector<float> probabilities(experts);
+    std::vector<double> dp(experts);
+    for (std::size_t r = 0; r < rows; ++r) {
+        softmax(logits + r * experts, probabilities.data(), scratch.data(), experts);
+        for (std::size_t e = 0; e < experts; ++e) {
+            dp[e] = dprobabilities != nullptr ? static_cast<double>(dprobabilities[r * experts + e]) : 0.0;
+        }
+        double total = 0.0;
+        double weighted = 0.0;
+        for (std::size_t j = 0; j < k; ++j) {
+            const std::int64_t e = indices[r * k + j];
+            if (e < 0 || static_cast<std::size_t>(e) >= experts) {
+                throw std::invalid_argument("expert index out of range");
+            }
+            total += static_cast<double>(probabilities[e]);
+            weighted += static_cast<double>(dweights[r * k + j]) * static_cast<double>(probabilities[e]);
+        }
+        for (std::size_t j = 0; j < k; ++j) {
+            const std::size_t e = static_cast<std::size_t>(indices[r * k + j]);
+            const double dw = dweights[r * k + j];
+            dp[e] += normalize ? dw / total - weighted / (total * total) : dw;
+        }
+        double dot = 0.0;
+        for (std::size_t e = 0; e < experts; ++e) {
+            dot += static_cast<double>(probabilities[e]) * dp[e];
+        }
+        for (std::size_t e = 0; e < experts; ++e) {
+            dlogits[r * experts + e] = static_cast<float>(static_cast<double>(probabilities[e]) * (dp[e] - dot));
+        }
+    }
+}
+
 }  // namespace dllm

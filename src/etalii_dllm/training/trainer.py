@@ -5,7 +5,10 @@ layers, with the base weights frozen (:mod:`etalii_dllm.lora`).
 A step takes ``batch_size`` windows from :class:`~etalii_dllm.training.data.TrainingData`, computes each window's
 loss and gradients on its own (so a window's gradients do not depend on the rest of the batch), sums the gradients
 elementwise in batch order and applies one :class:`~etalii_dllm.training.optimizer.AdamW` update. The loss is the
-mean next-token cross-entropy over all targets of the batch.
+mean next-token cross-entropy over all targets of the batch. For a mixture-of-experts model ``RunConfig.router_aux_loss``
+adds that coefficient times the mean over the batch's windows of each window's router load-balancing loss
+(:meth:`~etalii_dllm.training.backprop.DecoderGradients.router_loss`); with one window per batch this is transformers'
+``loss + router_aux_loss_coef * aux_loss``.
 
 With ``RunConfig.objective == "dpo"`` a step takes ``batch_size`` preference pairs instead
 (:mod:`etalii_dllm.training.preference`) and minimises the direct preference optimization loss
@@ -77,6 +80,9 @@ class RunConfig:
     """``lm`` (next-token cross-entropy on windows) or ``dpo`` (direct preference optimization on pairs)."""
     beta: float = 0.1
     """DPO: how far the model may move from the reference (larger keeps it closer)."""
+    router_aux_loss: float = 0.0
+    """Mixture-of-experts models: the coefficient of the router load-balancing loss added to the language-model
+    loss (transformers' ``router_aux_loss_coef``; 0 adds none)."""
 
     def __post_init__(self) -> None:
         if self.steps < 1 or self.batch_size < 1 or self.sequence_length < 1:
@@ -85,6 +91,10 @@ class RunConfig:
             raise ValueError(f"unknown training objective {self.objective!r} (expected 'lm' or 'dpo')")
         if not (math.isfinite(self.beta) and self.beta > 0.0):
             raise ValueError("beta must be a positive number")
+        if not (math.isfinite(self.router_aux_loss) and self.router_aux_loss >= 0.0):
+            raise ValueError("the router load-balancing coefficient must be a number of at least 0")
+        if self.router_aux_loss and self.objective != "lm":
+            raise ValueError("the router load-balancing loss is added to language-model runs, not to DPO")
 
     def to_dict(self) -> dict[str, Any]:
         values = asdict(self)
@@ -95,6 +105,8 @@ class RunConfig:
             values["lora"] = self.lora.to_dict()
         if self.objective == "lm":  # likewise: language-model runs keep their settings and receipts
             del values["objective"], values["beta"]
+        if not self.router_aux_loss:
+            del values["router_aux_loss"]
         return values
 
     @classmethod
@@ -135,6 +147,8 @@ class FineTuner:
             raise ValueError("the data was windowed for a different sequence length")
         if run.sequence_length > config.context_length:
             raise ValueError(f"sequence_length exceeds the model's context length ({config.context_length})")
+        if run.router_aux_loss and not config.experts:
+            raise ValueError("only mixture-of-experts models have a router load-balancing loss")
         shapes = config.tensor_shapes()
         if set(params) != set(shapes):
             raise ValueError("parameters do not match the architecture")
@@ -206,18 +220,25 @@ class FineTuner:
         windows = data.batch(self.step, self.run.batch_size, self.run.seed)
         targets_total = sum(len(window) - 1 for window in windows)
         scale = 1.0 / targets_total
+        coefficient = self.run.router_aux_loss
         loss_total = 0.0
+        router_total = 0.0
         gradients: dict[str, FloatArray] = {}
         weights = self.weights()
         for window in windows:
-            loss, window_gradients = self._gradients.loss_and_gradients(weights, window[:-1], window[1:], scale=scale)
+            loss, router_loss, window_gradients = self._gradients.losses_and_gradients(
+                weights, window[:-1], window[1:], scale=scale, router_scale=coefficient / len(windows)
+            )
             loss_total += loss
+            router_total += router_loss
             for name, gradient in window_gradients.items():
                 if name in gradients:
                     gradients[name] += gradient
                 else:
                     gradients[name] = gradient.copy()
-        return loss_total / targets_total, gradients
+        if not coefficient:
+            return loss_total / targets_total, gradients
+        return loss_total / targets_total + coefficient * router_total / len(windows), gradients
 
     def _preference_gradients(self, data: PreferenceData) -> tuple[float, dict[str, FloatArray]]:
         assert self.reference is not None
@@ -313,7 +334,8 @@ class FineTuner:
         ``adapter_model.safetensors``); ``dllm import DIR --base BASE`` or ``--adapter DIR`` apply it."""
         if self.lora is None:
             raise ValueError("only LoRA runs have an adapter to export")
-        write_peft(directory, self.params, self.lora, (self.metadata.get("source") or {}).get("repository"))
+        repository = (self.metadata.get("source") or {}).get("repository")
+        write_peft(directory, self.params, self.lora, repository, self.config)
 
     def _checkpoint_tensors(self) -> Iterator[tuple[str, FloatArray]]:
         for name in tensor_order(self.params):

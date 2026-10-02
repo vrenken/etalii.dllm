@@ -591,6 +591,32 @@ class Transformer:
             out[rows] += y * weights[rows, ranks][:, None]
         return out
 
+    def mlp_activation(self, middle: npt.ArrayLike, layer: int, expert: int | None = None) -> FloatArray:
+        """The MLP hidden activation ``act(gate(h)) * up(h)`` of ``layer`` for residual stream rows ``middle`` (after
+        the attention block, as :class:`LayerHook` sees it at ``"middle"``): the input of the down projection, the
+        "keys" of model editing. In a sparse layer, that of ``expert``, whether or not the rows were routed to it. On
+        the CPU, with the bits of the forward pass."""
+        config = self.config
+        p = f"layers.{layer}."
+        if config.is_sparse(layer):
+            if expert is None or not 0 <= expert < config.experts:
+                raise ValueError(f"layer {layer} is a mixture of experts; name one of its {config.experts} experts")
+            p = f"{p}mlp.experts.{expert}."
+        elif expert is not None:
+            raise ValueError(f"layer {layer} has no experts")
+        else:
+            p = f"{p}mlp."
+        if self.device != "cpu":
+            raise ValueError("MLP activations are computed on the CPU; load the model with device='cpu'")
+        w = self._w
+        x = np.ascontiguousarray(middle, dtype=np.float32)
+        if config.has_pre_norms:
+            norm = w[f"layers.{layer}.mlp_norm.weight"]
+            x = rms_norm(x, norm, config.rms_norm_eps, add_unit_offset=config.norm_unit_offset)
+        gate = linear(x, w[p + "gate.weight"])  # type: ignore[arg-type]
+        up = linear(x, w[p + "up.weight"])  # type: ignore[arg-type]
+        return swiglu(gate, up, config.activation).numpy().copy()
+
     def _embeddings(self, tokens: list[int]) -> np.ndarray:
         rows = self._embedding[np.asarray(tokens, dtype=np.int64)]
         if self.config.embedding_multiplier != 1.0:

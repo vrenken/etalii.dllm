@@ -31,7 +31,7 @@ def write_raw_safetensors(path, tensors: dict[str, tuple[str, np.ndarray]]) -> N
 
 def valid_adapter(directory, config, lora: LoraConfig = LORA) -> dict[str, np.ndarray]:
     adapters = random_adapters(config, lora)
-    lora_module.write_peft(directory, adapters, lora)
+    lora_module.write_peft(directory, adapters, lora, config=config)
     return adapters
 
 
@@ -41,8 +41,8 @@ def edit_config(directory, **changes) -> None:
     path.write_text(json.dumps({**settings, **changes}), encoding="utf-8")
 
 
-def peft_tensors(adapters: dict[str, np.ndarray]) -> dict[str, tuple[str, np.ndarray]]:
-    return {peft_key(name): ("F32", values) for name, values in adapters.items()}
+def peft_tensors(adapters: dict[str, np.ndarray], config) -> dict[str, tuple[str, np.ndarray]]:
+    return {peft_key(name, config): ("F32", values) for name, values in adapters.items()}
 
 
 @pytest.mark.parametrize(
@@ -108,7 +108,7 @@ def test_corrupt_weights_are_an_adapter_error(base, tmp_path, content):  # noqa:
 )
 def test_unknown_tensors_are_refused(base, tmp_path, name):  # noqa: F811
     adapters = valid_adapter(tmp_path, base.config)
-    tensors = peft_tensors(adapters)
+    tensors = peft_tensors(adapters, base.config)
     tensors[name] = ("F32", np.zeros((2, 16), dtype=np.float32))
     write_raw_safetensors(tmp_path / "adapter_model.safetensors", tensors)
     with pytest.raises(AdapterError, match=f"unsupported adapter tensor '{name}'"):
@@ -125,7 +125,7 @@ def test_unknown_tensors_are_refused(base, tmp_path, name):  # noqa: F811
 )
 def test_tensors_that_do_not_fit_the_model_are_refused(base, tmp_path, name):  # noqa: F811
     adapters = valid_adapter(tmp_path, base.config)
-    tensors = peft_tensors(adapters)
+    tensors = peft_tensors(adapters, base.config)
     tensors[name] = ("F32", np.zeros((2, 16), dtype=np.float32))
     write_raw_safetensors(tmp_path / "adapter_model.safetensors", tensors)
     with pytest.raises(AdapterError, match=f"tensor '{name}' does not fit the model"):
@@ -135,7 +135,7 @@ def test_tensors_that_do_not_fit_the_model_are_refused(base, tmp_path, name):  #
 @pytest.mark.parametrize(("dtype", "numpy_dtype"), [("F64", "<f8"), ("I32", "<i4"), ("U8", "u1")])
 def test_non_float_or_lossy_dtypes_are_refused(base, tmp_path, dtype, numpy_dtype):  # noqa: F811
     adapters = valid_adapter(tmp_path, base.config)
-    tensors = peft_tensors(adapters)
+    tensors = peft_tensors(adapters, base.config)
     first = sorted(tensors)[0]
     tensors[first] = (dtype, tensors[first][1].astype(numpy_dtype))
     write_raw_safetensors(tmp_path / "adapter_model.safetensors", tensors)
@@ -150,11 +150,11 @@ def test_half_precision_adapters_are_read_exactly(base, tmp_path):  # noqa: F811
     for index, (name, values) in enumerate(sorted(adapters.items())):
         if index % 2:
             half = values.astype(np.float16)
-            tensors[peft_key(name)] = ("F16", half)
+            tensors[peft_key(name, base.config)] = ("F16", half)
             expected[name] = half.astype(np.float32)
         else:
             bits = to_bf16_bits(values)
-            tensors[peft_key(name)] = ("BF16", bits)
+            tensors[peft_key(name, base.config)] = ("BF16", bits)
             expected[name] = (bits.astype(np.uint32) << np.uint32(16)).view(np.float32)
     write_raw_safetensors(tmp_path / "adapter_model.safetensors", tensors)
     lora, read = lora_module.read_peft(tmp_path, base.config)
@@ -175,7 +175,7 @@ def test_empty_adapter_is_refused(base, tmp_path):  # noqa: F811
 def test_adapter_must_cover_every_layer(base, tmp_path):  # noqa: F811
     adapters = valid_adapter(tmp_path, base.config)
     first_layer = {name: values for name, values in adapters.items() if name.startswith("layers.0.")}
-    write_raw_safetensors(tmp_path / "adapter_model.safetensors", peft_tensors(first_layer))
+    write_raw_safetensors(tmp_path / "adapter_model.safetensors", peft_tensors(first_layer, base.config))
     with pytest.raises(AdapterError, match=r"does not cover every layer \(missing \['layers\.1\."):
         lora_module.read_peft(tmp_path, base.config)
 
@@ -183,7 +183,7 @@ def test_adapter_must_cover_every_layer(base, tmp_path):  # noqa: F811
 def test_adapter_missing_one_factor_is_refused(base, tmp_path):  # noqa: F811
     adapters = valid_adapter(tmp_path, base.config)
     without = {name: values for name, values in adapters.items() if name != sorted(adapters)[0]}
-    write_raw_safetensors(tmp_path / "adapter_model.safetensors", peft_tensors(without))
+    write_raw_safetensors(tmp_path / "adapter_model.safetensors", peft_tensors(without, base.config))
     with pytest.raises(AdapterError, match=f"missing \\['{sorted(adapters)[0]}'\\]"):
         lora_module.read_peft(tmp_path, base.config)
 
@@ -199,8 +199,8 @@ def test_rank_in_the_config_must_match_the_tensors(base, tmp_path):  # noqa: F81
 def test_transposed_factor_is_refused(base, tmp_path):  # noqa: F811
     adapters = valid_adapter(tmp_path, base.config)
     name = next(n for n in sorted(adapters) if n.endswith(".lora_b"))
-    tensors = peft_tensors(adapters)
-    tensors[peft_key(name)] = ("F32", np.ascontiguousarray(adapters[name].T))
+    tensors = peft_tensors(adapters, base.config)
+    tensors[peft_key(name, base.config)] = ("F32", np.ascontiguousarray(adapters[name].T))
     write_raw_safetensors(tmp_path / "adapter_model.safetensors", tensors)
     expected = adapters[name].shape
     with pytest.raises(AdapterError, match=f"{name} has shape \\({expected[1]}, {expected[0]}\\)"):
@@ -213,7 +213,7 @@ def test_rslora_round_trips(base, tmp_path):  # noqa: F811
     assert LoraConfig.from_dict(lora.to_dict()) == lora
     assert "rslora" not in LoraConfig(4, 8.0).to_dict()
     assert LoraConfig.from_dict(LoraConfig(4, 8.0).to_dict()) == LoraConfig(4, 8.0)
-    lora_module.write_peft(tmp_path, init_adapters(base.config, lora, 3), lora)
+    lora_module.write_peft(tmp_path, init_adapters(base.config, lora, 3), lora, config=base.config)
     assert json.loads((tmp_path / "adapter_config.json").read_text(encoding="utf-8"))["use_rslora"] is True
     read, _ = lora_module.read_peft(tmp_path, base.config)
     assert read == lora and read.scale == 4.0
@@ -235,6 +235,6 @@ def test_adapter_for_another_architecture_is_refused(base, tmp_path):  # noqa: F
     wider = type(config)(
         **{**config.to_dict(), "eos_token_ids": config.eos_token_ids, "hidden_size": 2 * config.hidden_size}
     )
-    lora_module.write_peft(tmp_path, random_adapters(wider, LORA), LORA)
+    lora_module.write_peft(tmp_path, random_adapters(wider, LORA), LORA, config=wider)
     with pytest.raises(AdapterError, match=r"has shape \(\d+, \d+\), expected"):
         lora_module.read_peft(tmp_path, config)

@@ -473,6 +473,27 @@ def softcap_backward(x: npt.ArrayLike | Tensor, dy: npt.ArrayLike | Tensor, cap:
     return Tensor(_kernels.softcap_backward(_float32(x), _float32(dy), float(cap)))
 
 
+def moe_route_backward(
+    logits: npt.ArrayLike | Tensor,
+    indices: npt.ArrayLike,
+    dweights: npt.ArrayLike | Tensor,
+    normalize: bool,
+    dprobabilities: npt.ArrayLike | Tensor | None = None,
+) -> FloatArray:
+    """The gradient ``[rows, experts]`` of the router logits of :func:`moe_route` from the gradients ``dweights``
+    ``[rows, k]`` of its weights (rank order, for the experts ``indices``), plus an optional gradient
+    ``dprobabilities`` ``[rows, experts]`` of the softmax probabilities. The choice of the top ``k`` has no gradient.
+    Per row: back through the renormalisation (with ``normalize``), then through the softmax, in double, in a fixed
+    order (``docs/kernels.md``)."""
+    values = _float32(logits)
+    values = np.ascontiguousarray(values.reshape(-1, values.shape[-1]))
+    chosen = np.ascontiguousarray(indices, dtype=np.int64).reshape(values.shape[0], -1)
+    rows = values.shape[0]
+    extra = None if dprobabilities is None else np.ascontiguousarray(_float32(dprobabilities).reshape(rows, -1))
+    gradients = np.ascontiguousarray(_float32(dweights).reshape(rows, -1))
+    return _kernels.moe_route_backward(values, chosen, gradients, extra, normalize)
+
+
 def attention_backward(
     q: npt.ArrayLike | Tensor,
     k: npt.ArrayLike | Tensor,

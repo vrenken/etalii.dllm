@@ -28,7 +28,10 @@ LORA = LoraConfig(rank=2, alpha=4.0)
 RUN = RunConfig(6, 3, 8, 3, AdamWConfig(learning_rate=3e-2), LORA)
 
 
-@pytest.fixture(scope="module", params=["gemma2", "gemma3", "granite", "llama", "olmo2", "phi3", "qwen3"])
+@pytest.fixture(
+    scope="module",
+    params=["gemma2", "gemma3", "granite", "llama", "mixtral", "olmo2", "olmoe", "phi3", "qwen3", "qwen3_moe"],
+)
 def base(request, tmp_path_factory) -> ModelFile:
     directory = tmp_path_factory.mktemp(f"lora-{request.param}")
     write_hf_checkpoint(directory / "checkpoint", tiny_config(request.param))
@@ -83,7 +86,7 @@ def test_lora_gradients_match_finite_differences(base):
 
     assert abs(loss - loss_at(adapters)) < 1e-4
     random = numerics.DeterministicRandom(5)
-    for name in ("layers.0.attention.q.weight", "layers.1.mlp.down.weight"):
+    for name in ("layers.0.attention.q.weight", lora_module.target_weights(config, LORA)[-1]):
         a, b = adapters[name + ".lora_a"], adapters[name + ".lora_b"]
         analytic = dict(zip(("lora_a", "lora_b"), adapter_gradients(grads[name], a, b, LORA.scale), strict=True))
         for kind in ("lora_a", "lora_b"):
@@ -181,7 +184,7 @@ def test_peft_files(base, tmp_path):
     ],
 )
 def test_unsupported_peft_features_are_refused(base, tmp_path, change, message):
-    lora_module.write_peft(tmp_path, init_adapters(base.config, LORA, 1), LORA)
+    lora_module.write_peft(tmp_path, init_adapters(base.config, LORA, 1), LORA, config=base.config)
     settings = json.loads((tmp_path / "adapter_config.json").read_text(encoding="utf-8"))
     (tmp_path / "adapter_config.json").write_text(json.dumps({**settings, **change}), encoding="utf-8")
     with pytest.raises(AdapterError, match=message):
@@ -189,7 +192,7 @@ def test_unsupported_peft_features_are_refused(base, tmp_path, change, message):
 
 
 def test_adapter_import_needs_a_base_and_a_licence(base, tmp_path):
-    lora_module.write_peft(tmp_path / "adapter", init_adapters(base.config, LORA, 1), LORA)
+    lora_module.write_peft(tmp_path / "adapter", init_adapters(base.config, LORA, 1), LORA, config=base.config)
     with pytest.raises(ModelImportError, match="--base"):
         import_model(tmp_path / "adapter", tmp_path / "out.dllm")
     with pytest.raises(ModelImportError, match="licence"):
