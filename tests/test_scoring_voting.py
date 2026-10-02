@@ -194,7 +194,7 @@ def test_streamed_completions_equal_the_response(served):
 @pytest.mark.parametrize(
     ("change", "message"),
     [
-        ({"suffix": "end"}, "suffix"),
+        ({"suffix": "end"}, "fill-in-the-middle"),
         ({"best_of": 3}, "best_of"),
         ({"n": 17}, "n must be"),
         ({"logprobs": 21}, "logprobs"),

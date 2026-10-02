@@ -356,8 +356,8 @@ def _ollama_error(client: TestClient, path: str, body: dict) -> str:
     [
         ("/api/chat", {"model": "m", "messages": [{"role": "robot", "content": "x"}]}, "unknown message role 'robot'"),
         ("/api/generate", {"model": "m", "prompt": "x", "images": ["AAAA"]}, "images are not supported"),
-        ("/api/generate", {"model": "m", "prompt": "x", "suffix": "y"}, "suffix, template and context"),
-        ("/api/generate", {"model": "m", "prompt": "x", "context": [1, 2]}, "suffix, template and context"),
+        ("/api/generate", {"model": "m", "prompt": "x", "suffix": "y"}, "no fill-in-the-middle tokens"),
+        ("/api/generate", {"model": "m", "prompt": "x", "context": [1, 2]}, "template and context"),
         ("/api/embed", {"model": "m", "input": ""}, "cannot embed an empty input"),
         ("/api/embed", {"model": "m", "input": ["a", ""]}, "cannot embed an empty input"),
         ("/api/embeddings", {"model": "m", "prompt": ""}, "cannot embed an empty input"),
