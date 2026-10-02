@@ -12,7 +12,7 @@ from etalii_dllm.grammar import Grammar, GrammarError, Matcher, TokenConstraint,
 @pytest.mark.parametrize(
     ("schema", "message"),
     [
-        ({"type": "string", "propertyNames": {}}, "not supported by constrained decoding: propertyNames"),
+        ({"type": "string", "if": {}}, "not supported by constrained decoding: if"),
         ({"type": "number", "multipleOf": 0}, "'multipleOf' must be greater than 0"),
         ({"type": "object", "patternProperties": {}}, "patternProperties"),
         ({"type": "array", "uniqueItems": True}, "uniqueItems"),

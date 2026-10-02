@@ -169,7 +169,7 @@ def test_embeddings(sdk, client):
             "messages": [{"role": "user", "content": "x"}],
             "response_format": {
                 "type": "json_schema",
-                "json_schema": {"schema": {"type": "string", "uniqueItems": True}},
+                "json_schema": {"schema": {"type": "string", "not": {}}},
             },
         },
     ],

@@ -138,7 +138,7 @@ AdamW from `grad.hpp`.
 | `chat.py` | Chat messages and the fixed prompt format for models without a chat template. |
 | `chat_template.py` | Renders a model's own Jinja chat template the way `transformers` does. |
 | `tools.py` | Tool calling in the Hermes `<tool_call>` format: presenting tools, constraining and parsing calls. |
-| `grammar.py` | Constrained decoding: byte-level JSON and regex grammars and the token masks they induce over a token trie; string patterns, formats, lengths and integer bounds compile to byte automata. |
+| `grammar.py` | Constrained decoding: byte-level JSON and regex grammars and the token masks they induce over a token trie; string patterns, formats, lengths and integer bounds compile to byte automata; the object and array automata track property counts, tuples, property names and unique choices. |
 | `numeric_automata.py` | Byte automata of decimal number texts under bounds and `multipleOf`, compared in exact decimal arithmetic, for schema constraints. |
 | `gbnf.py` | GBNF grammars parsed and compiled to grammar rules of the same pushdown automaton; left recursion refused, alternatives that cannot finish dropped. |
 | `batch_jobs.py` | `dllm batch`: OpenAI batch files run concurrently with output in input order and content-derived ids, exact resume, digests and `--verify`. |

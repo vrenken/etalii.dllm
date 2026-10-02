@@ -201,14 +201,16 @@ are ranked: the sampler's (probability, token id) order and its random stream ar
 
 Supported schema keywords: `type` (also as a list), `properties`, `required`, `additionalProperties` (no extra
 properties are generated; a schema without `properties` is a free-form object, whose values follow
-`additionalProperties` when that is a schema), `minProperties`, `maxProperties`, `items`, `minItems`, `maxItems`,
-`enum`, `const`, `anyOf`, `oneOf` (as `anyOf`), single-schema `allOf`, local `$ref` (`#/$defs/...`,
-`#/definitions/...`, recursion allowed) and `nullable`. Annotations such as `title` and `description` are ignored.
-Keywords the automaton does not check (`uniqueItems`, `patternProperties`, `propertyNames`, `not`, ...) are refused
-with a 400 error rather than silently ignored. Properties are generated in schema order; optional ones may be skipped.
-At most 16 whitespace bytes may appear between JSON tokens.
+`additionalProperties` when that is a schema), `propertyNames`, `minProperties`, `maxProperties`, `items`,
+`prefixItems` (and `items` arrays with `additionalItems`), `minItems`, `maxItems`, `uniqueItems`, `enum`, `const`,
+`anyOf`, `oneOf` (as `anyOf`), single-schema `allOf`, local `$ref` (`#/$defs/...`, `#/definitions/...`, recursion
+allowed) and `nullable`. Annotations such as `title` and `description` are ignored. Keywords the automaton does not
+check (`patternProperties`, `not`, `contains`, `if`, ...) are refused with a 400 error rather than silently ignored.
+Properties are generated in schema order; optional ones may be skipped. At most 16 whitespace bytes may appear
+between JSON tokens.
 
-Value constraints are exact too (Phases 31 and 33), each compiled to a byte automaton:
+Value constraints are exact too (Phases 31, 33 and 34), each compiled to a byte automaton or checked by the
+automaton of the object or array:
 
 | Keyword | Rule |
 | --- | --- |
@@ -217,6 +219,9 @@ Value constraints are exact too (Phases 31 and 33), each compiled to a byte auto
 | `minLength`, `maxLength` | Counted in code points. |
 | `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum` | On integers and numbers, as numbers (or the draft 4 booleans). The answer is a decimal text in the range, compared exactly with the bound as written (a float bound as its shortest decimal, so `0.1` means 0.1), never with an exponent and never `-0`. |
 | `multipleOf` | An integer or a decimal such as `0.01`: the answer's decimal value divided by it is an integer, in exact decimal arithmetic. Divisors with too many digits (more than the automaton's 10,000 states) are refused. |
+| `prefixItems` | One schema per leading element (a tuple, as pydantic writes it); `items` then applies to the rest, and `items: false` closes the tuple. The older `items` array with `additionalItems` works the same. |
+| `propertyNames` | A string schema (`pattern`, `format`, lengths, `enum`, `const`) for the names of a free-form object. Declared properties whose names break it are left out; a required one is refused. |
+| `uniqueItems` | Enforced when the items come from a finite set (`enum`, `const`, booleans, `null` or unions of those): the automaton remembers the values written, comparing JSON values (`1` equals `1.0`, never `true`). Other items with `uniqueItems: true` are refused. |
 | `minProperties`, `maxProperties` | The number of members. On an object without `properties` (whose names may repeat), `minProperties` above 1 is refused. |
 
 A constrained string is written without escape sequences, so it holds no quote, backslash or control character. Its
