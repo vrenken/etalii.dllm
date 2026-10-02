@@ -128,6 +128,7 @@ def _chat_request(request: MessagesRequest, engine: DllmEngine) -> ChatRequest:
         top_k=request.top_k or 0,
         top_p=request.top_p if request.top_p is not None else 1.0,
         seed=request.seed or 0,
+        **(request.watermark.sampling() if request.watermark else {}),
     )
     tools, choice = _tools(request.tools, request.tool_choice)
     output = request.output_config.format if request.output_config else None

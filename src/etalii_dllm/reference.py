@@ -19,6 +19,7 @@ compiled kernels, their SIMD paths and the GPU on the machine itself: ``tests/te
 
 from __future__ import annotations
 
+import hashlib
 import math
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
@@ -507,6 +508,14 @@ def attention(
 _MASK = (1 << 64) - 1
 
 
+def _mix64(z: int) -> int:
+    """The SplitMix64 output function on ``z mod 2^64``."""
+    z &= _MASK
+    z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & _MASK
+    z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & _MASK
+    return z ^ (z >> 31)
+
+
 class Random:
     """xoshiro256** seeded through SplitMix64."""
 
@@ -578,8 +587,12 @@ class Sampler:
         frequency_penalty: float = 0.0,
         presence_penalty: float = 0.0,
         logit_bias: Mapping[int, float] | None = None,
+        watermark_key: str | None = None,
+        watermark_gamma: float = 0.25,
+        watermark_delta: float = 2.0,
     ) -> None:
         self.temperature, self.top_k, self.top_p, self.min_p = temperature, top_k, top_p, min_p
+        self.watermark_key, self.watermark_gamma, self.watermark_delta = watermark_key, watermark_gamma, watermark_delta
         self.repetition_penalty, self.repeat_last_n = repetition_penalty, repeat_last_n
         self.frequency_penalty, self.presence_penalty = frequency_penalty, presence_penalty
         self.logit_bias = dict(logit_bias or {})
@@ -614,6 +627,16 @@ class Sampler:
                 if 0 <= token < len(values):
                     penalty = F32(count * self.frequency_penalty + self.presence_penalty)
                     values[token] = F32(values[token] - penalty)
+        if self.watermark_key is not None:
+            digest = hashlib.sha256(b"dllm-watermark/1\0" + self.watermark_key.encode("utf-8")).digest()
+            key = int.from_bytes(digest[:8], "little")
+            previous = self._sequence[-1] if self._sequence else -1
+            seed = _mix64(key + (previous + 1) * 0x9E3779B97F4A7C15)
+            limit = math.floor(self.watermark_gamma * 2**64)
+            delta = F32(self.watermark_delta)
+            for token in range(len(values)):
+                if _mix64(seed + (token + 1) * 0x9E3779B97F4A7C15) < limit:
+                    values[token] = F32(values[token] + delta)
         return values
 
     def sample(self, logits: npt.ArrayLike) -> int:
@@ -661,6 +684,9 @@ def sampler(options: Any) -> Sampler:
         frequency_penalty=options.frequency_penalty,
         presence_penalty=options.presence_penalty,
         logit_bias=dict(options.logit_bias),
+        watermark_key=options.watermark_key,
+        watermark_gamma=options.watermark_gamma,
+        watermark_delta=options.watermark_delta,
     )
 
 

@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
+from etalii_dllm import watermark
 from etalii_dllm.numerics import DeterministicRandom, FloatArray, argmax, softmax
 
 
@@ -40,6 +41,12 @@ class SamplingOptions:
     """Subtracted from a token's logit when the output already contains it."""
     logit_bias: tuple[tuple[int, float], ...] = ()
     """``(token, bias)`` pairs in ascending token order, added to the logits first."""
+    watermark_key: str | None = None
+    """Watermark the output with this key (:mod:`etalii_dllm.watermark`); ``None`` disables."""
+    watermark_gamma: float = 0.25
+    """The share of the vocabulary that is green after each token."""
+    watermark_delta: float = 2.0
+    """Added to the logits of the green tokens."""
 
     def __post_init__(self) -> None:
         if self.temperature < 0:
@@ -61,6 +68,12 @@ class SamplingOptions:
             raise ValueError("logit_bias needs distinct non-negative token ids in ascending order")
         if not all(math.isfinite(bias) for _, bias in self.logit_bias):
             raise ValueError("logit_bias values must be finite")
+        if self.watermark_key is not None and not self.watermark_key:
+            raise ValueError("watermark_key must not be empty")
+        if not 0.0 < self.watermark_gamma < 1.0:
+            raise ValueError("watermark_gamma must be between 0 and 1")
+        if not math.isfinite(self.watermark_delta):
+            raise ValueError("watermark_delta must be finite")
 
     @staticmethod
     def bias(values: Mapping[int, float] | Mapping[str, float] | None) -> tuple[tuple[int, float], ...]:
@@ -75,7 +88,7 @@ class SamplingOptions:
     @property
     def adjusts_logits(self) -> bool:
         """Whether the logits change before temperature (bias or a penalty is set)."""
-        return bool(self.logit_bias) or self.penalises
+        return bool(self.logit_bias) or self.penalises or self.watermark_key is not None
 
     @property
     def penalises(self) -> bool:
@@ -118,6 +131,9 @@ _DEFAULTS = {
     "frequency_penalty": 0.0,
     "presence_penalty": 0.0,
     "logit_bias": (),
+    "watermark_key": None,
+    "watermark_gamma": 0.25,
+    "watermark_delta": 2.0,
 }
 
 
@@ -128,14 +144,18 @@ class Sampler:
     Logit bias and penalties change the float32 logits first, each token on its own and in this order (so the
     order tokens are counted in does not matter): ``x + bias``; for the repetition penalty ``r``, ``x / r`` when
     ``x > 0`` else ``x * r``; then ``x - (count * frequency_penalty + presence_penalty)``, the penalty computed in
-    double and rounded to float. ``prompt`` is the context the output continues: the repetition penalty looks at
-    it, frequency and presence count only tokens passed to :meth:`accept`."""
+    double and rounded to float; last, with a watermark key, ``x + delta`` for the tokens green after the previous
+    token (:mod:`etalii_dllm.watermark`). ``prompt`` is the context the output continues: the repetition penalty
+    and the watermark look at it, frequency and presence count only tokens passed to :meth:`accept`."""
 
     def __init__(self, options: SamplingOptions, prompt: Iterable[int] = ()) -> None:
         self._options = options
         self._random = DeterministicRandom(options.seed & 0xFFFFFFFFFFFFFFFF)
         self._history: list[int] = list(prompt) if options.repetition_penalty != 1.0 else []
         self._counts: dict[int, int] = {}
+        prompt = self._history if options.repetition_penalty != 1.0 else list(prompt)
+        self._previous = prompt[-1] if prompt else -1
+        self._watermark = None if options.watermark_key is None else watermark.key_hash(options.watermark_key)
 
     def accept(self, token: int) -> None:
         """Records a generated token for the penalties."""
@@ -144,6 +164,7 @@ class Sampler:
             self._history.append(token)
         if options.frequency_penalty != 0.0 or options.presence_penalty != 0.0:
             self._counts[token] = self._counts.get(token, 0) + 1
+        self._previous = token
 
     def adjust(self, logits: FloatArray) -> FloatArray:
         """The logits after logit bias and penalties (a new array; the input is not changed)."""
@@ -168,6 +189,9 @@ class Sampler:
                 dtype=np.float64,
             ).astype(np.float32)
             values[ids] = values[ids] - penalties
+        if self._watermark is not None:
+            green = watermark.green_mask(self._watermark, self._previous, size, options.watermark_gamma)
+            values[green] = values[green] + np.float32(options.watermark_delta)
         return values
 
     @property

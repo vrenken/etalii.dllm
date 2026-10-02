@@ -191,6 +191,11 @@ is adjusted on its own, so the order tokens are visited in does not matter:
    `x > 0`, else `x = f32(x * f32(r))`.
 3. Frequency and presence penalties: for every token the output (not the prompt) contains `c > 0` times,
    `x = f32(x - f32(c * frequency_penalty + presence_penalty))`, the penalty computed in double.
+4. Watermark (when a key is set; [watermarks](watermarks.md)): with `K` the first 8 bytes (little-endian) of
+   `SHA-256("dllm-watermark/1\0" + key)`, `mix` the SplitMix64 finalizer and `G = 0x9E3779B97F4A7C15`, the seed after
+   the previous token `p` (the last prompt token for the first output token, -1 without one) is
+   `s = mix(K + (p + 1) * G)`, all modulo 2^64. Every token `t` with `mix(s + (t + 1) * G) < floor(gamma * 2^64)` gets
+   `x = f32(x + f32(delta))`.
 
 Log-probabilities reported with an answer come from the unadjusted logits.
 
@@ -313,7 +318,7 @@ for SmolLM2-135M on every release platform and SIMD path, in float32 and Q8_0.
   `{file, dtype, shape, sha256}`.
 - **Kernels covered.** The transcendentals, `linear` (float32 and quantised), `quantize`, `matmul`, `rms_norm`, the
   activations, `softmax`, `rope_inv_freq`, `rope`, `attention`, `random` (the `next_u64`, `next_double` and
-  `next_gaussian` streams), `sample`, `sample_controls` (logit adjustments and `min_p` over a sequence of steps that
+  `next_gaussian` streams), `sample`, `sample_controls` (logit adjustments, the watermark included, and `min_p` over a sequence of steps that
   starts from a `prompt` input), and `decoder`.
 - **The decoder cases.** Each holds a config, its tensors (inputs named `tensor.<name>`), and the logits after each
   token fed one at a time.
