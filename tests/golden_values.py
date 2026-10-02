@@ -277,3 +277,6 @@ LENGTH_FINGERPRINTS = {
     "ignore_eos": "a2f3db3ac0c51ded0fd2e8e7526a49df6a5b50fb478953d98f4422560727c403",
 }
 """Phase 38: answers under min_tokens and ignore_eos on the tiny model (test_length_controls.py)."""
+
+MCP_SAMPLING_FINGERPRINT = "012cbe8e52308a5ade4aba4361371111e45c6620a6cc6b45154cba7b98fbca4a"
+"""Phase 39: the default model's answer to an MCP server's sampling request (test_mcp_context.py)."""

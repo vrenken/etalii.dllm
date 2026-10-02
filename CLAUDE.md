@@ -75,7 +75,7 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
   served at `/`; `docs/api.md`), `mcp_server.py`,
   `cli.py`: thin front ends over `DllmEngine.chat_stream`. Keep logic out of them so all stay output-identical;
   non-streamed responses are assembled from the same event stream as streamed ones. `mcp_host.py` is the MCP client
-  host (the model calls external MCP tools in a loop over `chat_stream`); both MCP directions: `docs/mcp.md`.
+  host (the model calls external MCP tools in a loop over `chat_stream`; the engine answers servers' sampling requests, prompts and resources feed `dllm chat`); both MCP directions: `docs/mcp.md`.
 - `tests/`: pytest. `tests/golden_values.py` holds the reference hashes. `tests/test_reference_models.py` compares the
   real pinned SmolLM2-135M/Qwen2.5-0.5B/Qwen2.5-1.5B/Qwen3-0.6B imports with `transformers` (`DLLM_REFERENCE_MODELS=<dir>`, extra `reference`; the
   `Reference models` workflow downloads them); cached copies live in `/mnt/project-files/models` in cloud sessions.
