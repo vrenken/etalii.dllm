@@ -599,6 +599,18 @@ With a key, the sampler slightly prefers a key-dependent quarter of the vocabula
 after every token, and `dllm watermark detect` (or `POST /v1/watermark/detect`) counts how many tokens fall in it. The
 same key gives the same text and the same score on every machine. Details: [watermarks](watermarks.md).
 
+## 24. Score a text, and let answers vote
+
+```bash
+dllm score story.txt                                             # how likely the model finds every token
+dllm chat "What is 17 * 3? End with 'Answer: N'." --temperature 0.8 --vote 7 --vote-extract "Answer: (\d+)"
+```
+
+`dllm score` prints the log-probability of every token, the log-likelihood and the perplexity. `--vote 7` samples seven
+answers and prints the most common one. Both are exact, so they repeat on every machine. The server has the same as
+`POST /v1/completions` with `echo` and `logprobs`, and a `vote` field on chat completions. Details:
+[scoring](api.md#scoring) and [voting](api.md#voting).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,

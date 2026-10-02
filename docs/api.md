@@ -8,6 +8,7 @@ what the CLI and the MCP server use, so all front ends give the same answer for 
 | --- | --- | --- |
 | `GET /v1/models` | OpenAI | The one model being served |
 | `POST /v1/chat/completions` | OpenAI Chat Completions | Streaming, tools, structured output, logprobs, stop sequences |
+| `POST /v1/completions` | OpenAI Completions (legacy) | Raw prompts continued without a chat template, streaming, `n`, logprobs, `echo` with exact prompt scores. See [completions API](#completions-api) |
 | `POST /v1/responses`, `GET`/`DELETE /v1/responses/{id}` | OpenAI Responses | Streaming (typed `response.*` events), function tools, `text.format` JSON schema, logprobs, `previous_response_id`. See [Responses API](#responses-api) |
 | `POST /v1/embeddings` | OpenAI Embeddings | Final hidden states pooled as the model says (mean, or last token for embedding models), L2-normalised |
 | `POST /v1/messages` | Anthropic Messages | Streaming, tools, structured output (`output_config.format`), stop sequences |
@@ -16,7 +17,7 @@ what the CLI and the MCP server use, so all front ends give the same answer for 
 | `POST /api/embed`, `POST /api/embeddings` | Ollama | Same vectors as `/v1/embeddings` |
 | `POST /v1/rerank`, `POST /rerank` | Cohere/Jina rerank | Documents ranked for a query by the model as a yes/no judge ([reranking](retrieval.md#reranking)) |
 | `GET /api/tags`, `POST /api/show`, `GET /api/ps`, `GET /api/version` | Ollama | The served model, its template and architecture |
-| `POST /v1/receipts/verify` | Extension | Re-runs a [generation receipt](receipts.md) and returns `{"ok", "reasons", "notes", "receipt"}`; a list is a [receipt chain](agents.md#receipt-chains) (`{"ok", "reasons", "notes", "turns"}`) |
+| `POST /v1/receipts/verify` | Extension | Re-runs a [generation receipt](receipts.md) (or re-scores a score receipt, re-votes a vote receipt) and returns `{"ok", "reasons", "notes", "receipt"}`; a list is a [receipt chain](agents.md#receipt-chains) (`{"ok", "reasons", "notes", "turns"}`) |
 | `POST /v1/watermark/detect` | Extension | Green tokens, z-score and verdict of a text for a watermark key ([watermarks](watermarks.md#detecting)) |
 | `GET /v1/audit` | Extension | What `--audit-every` found, the response cache's counters and how many requests were coalesced. See [serving at scale](serving.md) |
 | `GET /` | Browser | A chat page over the streamed `/v1/chat/completions`, with temperature, seed and system prompt; it marks a regenerated answer that is identical to the earlier one. Self-contained, nothing loaded from elsewhere |
@@ -242,6 +243,56 @@ curl -s localhost:5080/v1/chat/completions -H 'content-type: application/json' -
   "response_format": {"type": "regex", "regex": "\\d{4}-\\d{2}-\\d{2}"}
 }'
 ```
+
+## Completions API
+
+`POST /v1/completions` continues a prompt as it is, without a chat template, on the same event stream as every other
+endpoint: a completion equals `dllm generate` with the same prompt and options, bit for bit. `prompt` is a string or
+a list of strings (choice `index` is `prompt_index * n + i`); `max_tokens` defaults to 16 as in OpenAI's API and
+`temperature` to 0 as everywhere here. `stop`, `seed`, `n`, the [decoding controls](#decoding-controls),
+`guided_regex`, `watermark`, `stream` (with `stream_options.include_usage`) and `receipt` (a receipt on each choice)
+work as on chat completions. `suffix` and a `best_of` other than `n` are refused with a 400 error.
+
+`logprobs: N` returns OpenAI's `logprobs` object (`tokens`, `token_logprobs`, `top_logprobs` with N alternatives,
+`text_offset` in characters). With `echo: true` the prompt comes first in `text` and in `logprobs`, its tokens
+[scored exactly](#scoring) (the first prompt token has `null`, as in OpenAI's API).
+
+## Scoring
+
+The log-probability of every token of a given text, with the same bits everywhere
+([specification](specification.md#prompt-scoring)). Three ways to get it:
+
+```bash
+dllm --model qwen2.5-0.5b.dllm score story.txt --top 3        # per token, log-likelihood and perplexity
+dllm --model qwen2.5-0.5b.dllm score story.txt --json --receipt score.json
+curl -s localhost:5080/v1/completions -H 'content-type: application/json' \
+  -d '{"prompt": "The capital of France is Paris.", "max_tokens": 0, "echo": true, "logprobs": 0}'
+```
+
+The scores are the logprobs generation reports for the same tokens: scoring a prompt plus an answer gives the
+answer's `logprobs` exactly. `dllm score --receipt` writes a score receipt (`"score": "dllm-score/1"`, the text and
+a fingerprint of every log-probability) that `dllm replay` and `POST /v1/receipts/verify` check by scoring again.
+[`dllm eval`](evaluation.md) uses the same log-likelihoods for perplexity and multiple-choice tasks.
+
+## Voting
+
+Self-consistency: sample several answers and return the most common one. A vote is exact too
+([specification](specification.md#voting)): the answers are the choices with seeds `seed + i`, each is normalised
+(NFKC, lower case, whitespace collapsed; optionally only the last match of an `extract` regex counts), and the most
+frequent answer wins, a tie going to the one that appeared first.
+
+```bash
+dllm chat "What is 17 * 3? End with 'Answer: N'." --temperature 0.8 --vote 7 --vote-extract "Answer: (\d+)"
+curl -s localhost:5080/v1/chat/completions -H 'content-type: application/json' -d '{
+  "messages": [{"role": "user", "content": "What is 17 * 3?"}], "temperature": 0.8,
+  "vote": {"n": 7, "extract": "(\\d+)"}, "receipt": true}'
+```
+
+The response's one choice is the winning answer in full; `vote` holds every normalised answer, the ballots (answer,
+votes, choice indexes) and the winner's index, and `usage.completion_tokens` counts all the samples. With
+`"receipt": true` the receipt is a vote receipt (`"vote": "dllm-vote/1"`: the request, every answer's receipt id, the
+ballots and the winner), which `dllm replay` and `POST /v1/receipts/verify` check by voting again. `vote` cannot be
+combined with `stream` or `n`; `n` in a vote is 1 to 16.
 
 ## Reasoning
 

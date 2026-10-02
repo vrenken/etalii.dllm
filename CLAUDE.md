@@ -66,9 +66,10 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
   `docs/evaluation.md`), `retrieval` (exact document index, `dllm index`, chats
   grounded with `--index`, BM25 and hybrid search, embedding-model pooling in `engine.embed`; `docs/retrieval.md`),
   `reranking` (a chat model as a yes/no relevance judge: `dllm rerank`, `/v1/rerank`, `--rerank-model`), `watermark` (keyed green-list watermarks in the sampler, exact detection,
-  `dllm watermark detect`, `/v1/watermark/detect`; `docs/watermarks.md`).
+  `dllm watermark detect`, `/v1/watermark/detect`; `docs/watermarks.md`), `scoring` (exact prompt scores, `dllm score`, score
+  receipts) and `voting` (self-consistency votes, `vote`/`--vote`, vote receipts; `docs/api.md#voting`).
   Tests compare against the reference packages `gguf`, `safetensors` and `tokenizers` (dev dependencies).
-- `src/etalii_dllm/server/` (OpenAI `app.py`, `responses_api.py` and `batches_api.py`, Anthropic `anthropic_api.py`, Ollama `ollama_api.py`, the browser chat page `static/chat.html`
+- `src/etalii_dllm/server/` (OpenAI `app.py`, `responses_api.py`, `completions_api.py` and `batches_api.py`, Anthropic `anthropic_api.py`, Ollama `ollama_api.py`, the browser chat page `static/chat.html`
   served at `/`; `docs/api.md`), `mcp_server.py`,
   `cli.py`: thin front ends over `DllmEngine.chat_stream`. Keep logic out of them so all stay output-identical;
   non-streamed responses are assembled from the same event stream as streamed ones. `mcp_host.py` is the MCP client

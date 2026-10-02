@@ -293,6 +293,24 @@ text matching (the text is the decoded output bytes, without a trailing incomple
   and they count toward `max_tokens` and the context window, whichever ends first. Sampling then continues.
   Usage reports the counted tokens as `reasoning_tokens`.
 
+### Prompt scoring
+
+The score of a text ([scoring](api.md#scoring)) tokenizes it as a prompt is tokenized. Token `i >= 1` gets
+`log_softmax(z_i)[t_i]`, where `z_i` are the logits after tokens `0 .. i-1` (one forward pass over the text; the
+decoder's logits do not depend on how the tokens were batched) and `log_softmax` is section 3's kernel; the first
+token is not scored. Alternatives are ordered by log-probability descending, then id ascending. The log-likelihood is
+the float32 log-probabilities summed in token order in double, and the perplexity `exp(-log_likelihood / n)` with the
+portable `exp`, for the `n` scored tokens.
+
+### Voting
+
+A vote over `n` answers ([voting](api.md#voting)) samples choices `0 .. n-1` (seeds `seed + i`). Each answer is
+normalised: with an `extract` regex, its last match (group 1 when the pattern has groups) is the answer, and no match
+casts no vote; then NFKC and lower case from the pinned tables, runs of `[ \t\n\r\f\v]` become one space and the
+ends are stripped; an empty result casts no vote. The winner is the answer with the most votes, ties going to the
+answer whose first vote has the lowest choice index; the response is that choice's answer, or choice 0 when nobody
+voted.
+
 Not covered here, but just as fixed:
 
 - tokenization: byte-level BPE and SentencePiece-style tokenizers, with Unicode handling pinned to version 15.1
@@ -306,7 +324,7 @@ Not covered here, but just as fixed:
 SIMD path, thread count or GPU is in use) with the reference implementation. It checks the prompt's logits and a
 greedy, a sampled and a controlled 16-token answer (every logit adjustment and `min_p` at once) and a greedy answer in a window just
 longer than the prompt, which rolls it ([the context window](#the-context-window)), and a greedy answer that starts in a
-thinking block with a budget of 2 tokens ([reasoning](#reasoning)), and prints `equal` for each part, or where the two first differ. CI runs it
+thinking block with a budget of 2 tokens ([reasoning](#reasoning)), and the prompt's scores ([prompt scoring](#prompt-scoring)), and prints `equal` for each part, or where the two first differ. CI runs it
 for SmolLM2-135M on every release platform and SIMD path, in float32 and Q8_0.
 
 **Elsewhere.** `dllm conformance write DIR` writes the vectors:

@@ -269,6 +269,10 @@ def main(argv: list[str] | None = None) -> int:
     chat.add_argument(
         "--truncate", action="store_true", help="drop the oldest messages when the prompt does not fit the window"
     )
+    chat.add_argument(
+        "--vote", type=int, metavar="N", help="sample N answers (seeds SEED..SEED+N-1) and print the most common one"
+    )
+    chat.add_argument("--vote-extract", metavar="REGEX", help="with --vote: vote on the last match of REGEX")
     chat.add_argument("--max-tool-rounds", type=int, default=8, help="MCP tool rounds before the answer is cut off")
     chat.add_argument("--receipt", metavar="FILE", help="write the answer's generation receipt to FILE (JSON)")
     chat.add_argument(
@@ -359,6 +363,12 @@ def main(argv: list[str] | None = None) -> int:
     detect.add_argument("--key", required=True, help="the watermark key")
     detect.add_argument("--gamma", type=float, default=0.25, help="the share of green tokens it was made with")
     detect.add_argument("--json", action="store_true", help="print the result as JSON")
+
+    scorer = commands.add_parser("score", help="the exact log-probability of every token of a text")
+    scorer.add_argument("file", help="the text file to score ('-' reads standard input)")
+    scorer.add_argument("--top", type=int, default=0, help="also list the N most likely tokens at each position")
+    scorer.add_argument("--json", action="store_true", help="print the scores (and a receipt) as JSON")
+    scorer.add_argument("--receipt", metavar="FILE", help="write a score receipt to FILE (dllm replay checks it)")
 
     rerank = commands.add_parser("rerank", help="rank documents for a query with the model as a judge (exact)")
     rerank.add_argument("query")
@@ -565,6 +575,8 @@ def main(argv: list[str] | None = None) -> int:
         return _rerank(args, engine)
     if args.command == "watermark":
         return _watermark(args, engine)
+    if args.command == "score":
+        return _score(args, engine)
     if args.command == "batch":
         return _batch(args, engine)
 
@@ -710,6 +722,32 @@ def _index(args: argparse.Namespace, engine: DllmEngine) -> int:
     for hit in hits:
         print(f"{hit.rank}. {hit.score:.4f}  {hit.chunk.source}:{hit.chunk.start}-{hit.chunk.end}")
         print("   " + hit.chunk.text.replace("\n", "\n   "))
+    return 0
+
+
+def _score(args: argparse.Namespace, engine: DllmEngine) -> int:
+    from etalii_dllm import scoring
+
+    try:
+        text = sys.stdin.read() if args.file == "-" else Path(args.file).read_text(encoding="utf-8")
+        result = scoring.score_text(engine, text, args.top)
+    except (OSError, ValueError) as error:
+        print(f"dllm score: {error}", file=sys.stderr)
+        return 2
+    receipt = scoring.record(engine, text, args.top, result)
+    if args.receipt:
+        Path(args.receipt).write_text(json.dumps(receipt, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    if args.json:
+        print(json.dumps({**result.to_json(engine), "receipt": receipt}, indent=2, ensure_ascii=False))
+        return 0
+    for entry in result.to_json(engine)["tokens"]:
+        logprob = "" if entry["logprob"] is None else f"{entry['logprob']:.6f}"
+        alternatives = "  ".join(f"{a['text']!r} {a['logprob']:.4f}" for a in entry.get("top_logprobs", []))
+        print(f"{entry['text']!r:>16} {logprob:>12}  {alternatives}".rstrip())
+    perplexity = "-" if result.perplexity is None else f"{result.perplexity:.6f}"
+    print(f"tokens: {len(result.tokens)}  scored: {result.scored}  log-likelihood: {result.log_likelihood:.6f}  "
+          f"perplexity: {perplexity}")  # fmt: skip
+    print(f"fingerprint: {result.fingerprint}", file=sys.stderr)
     return 0
 
 
@@ -1037,7 +1075,16 @@ def _replay(engine: DllmEngine, args: argparse.Namespace) -> int:
             raise ValueError(f"not a {receipts.FORMAT} receipt")
         if "transcript" in receipt:
             return _replay_transcript(engine, receipt, args.json)
-        verification = receipts.verify(engine, receipt)
+        if "score" in receipt:
+            from etalii_dllm import scoring
+
+            verification = scoring.verify(engine, receipt)
+        elif "vote" in receipt:
+            from etalii_dllm import voting
+
+            verification = voting.verify(engine, receipt)
+        else:
+            verification = receipts.verify(engine, receipt)
     except (OSError, ValueError, KeyError) as error:
         print(f"dllm replay: {error}", file=sys.stderr)
         return 2
@@ -1132,6 +1179,8 @@ def _chat(engine: DllmEngine, args: argparse.Namespace, options: SamplingOptions
     )
     if args.mcp_config or args.mcp_server or args.tool:
         return _chat_with_mcp(engine, args, request)
+    if args.vote is not None:
+        return _chat_vote(engine, args, request)
     try:
         stream = engine.chat_stream(request)
     except ValueError as error:
@@ -1156,6 +1205,25 @@ def _chat(engine: DllmEngine, args: argparse.Namespace, options: SamplingOptions
                 file=sys.stderr,
             )
             _write_receipt(args.receipt, event)
+    return 0
+
+
+def _chat_vote(engine: DllmEngine, args: argparse.Namespace, request: ChatRequest) -> int:
+    from etalii_dllm import voting
+
+    try:
+        outcome = voting.vote(engine, request, args.vote, args.vote_extract)
+    except ValueError as error:
+        print(f"dllm chat: {error}", file=sys.stderr)
+        return 1
+    _write(outcome.result.content + "\n")
+    for ballot in outcome.ballots:
+        choices = ", ".join(map(str, ballot.choices))
+        print(f"votes: {ballot.votes}  {ballot.answer!r}  (choices {choices})", file=sys.stderr)
+    print(f"winner: choice {outcome.winner}  fingerprint: {outcome.result.fingerprint}", file=sys.stderr)
+    if args.receipt:
+        receipt = voting.record(engine, request, outcome)
+        Path(args.receipt).write_text(json.dumps(receipt, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return 0
 
 
