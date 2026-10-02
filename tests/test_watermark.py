@@ -40,6 +40,11 @@ def tiny(model_path) -> DllmEngine:  # noqa: F811
 
 @pytest.fixture
 def served(model_path, monkeypatch):  # noqa: F811
+    # Earlier tests leave runtime settings such as DLLM_AUDIT_EVERY behind; an auditor would still be replaying
+    # these answers on a daemon thread when the interpreter exits.
+    for name in dir(engine_module):
+        if name.endswith("_ENVIRONMENT_VARIABLE"):
+            monkeypatch.delenv(getattr(engine_module, name), raising=False)
     monkeypatch.setenv(engine_module.MODEL_ENVIRONMENT_VARIABLE, str(model_path))
     default_engine.cache_clear()
     yield default_engine()
