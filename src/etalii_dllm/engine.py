@@ -91,20 +91,23 @@ AUDIT_EVERY_ENVIRONMENT_VARIABLE = "DLLM_AUDIT_EVERY"
 
 @dataclass(frozen=True)
 class ResponseFormat:
-    """``text`` (free), ``json_object`` (any JSON object), ``json_schema`` (a value valid under ``schema``) or
-    ``regex`` (text matching ``pattern`` in full)."""
+    """``text`` (free), ``json_object`` (any JSON object), ``json_schema`` (a value valid under ``schema``),
+    ``regex`` (text matching the regular expression ``pattern`` in full) or ``grammar`` (text the GBNF grammar
+    ``pattern`` derives, :mod:`etalii_dllm.gbnf`)."""
 
     type: str = "text"
     schema: Mapping[str, Any] | None = None
     pattern: str | None = None
 
     def __post_init__(self) -> None:
-        if self.type not in ("text", "json_object", "json_schema", "regex"):
+        if self.type not in ("text", "json_object", "json_schema", "regex", "grammar"):
             raise ValueError(f"unknown response format {self.type!r}")
         if (self.type == "json_schema") != (self.schema is not None):
             raise ValueError("a json_schema response format needs a schema")
-        if (self.type == "regex") != (self.pattern is not None):
-            raise ValueError("a regex response format needs a pattern")
+        if (self.type in ("regex", "grammar")) != (self.pattern is not None):
+            if self.pattern is None:
+                raise ValueError(f"a {self.type} response format needs a pattern")
+            raise ValueError("only regex and grammar response formats take a pattern")
 
     def grammar(self) -> Grammar | None:
         if self.type == "json_object":
@@ -115,6 +118,9 @@ class ResponseFormat:
         if self.type == "regex":
             assert self.pattern is not None
             return Grammar.regex(self.pattern)
+        if self.type == "grammar":
+            assert self.pattern is not None
+            return Grammar.gbnf(self.pattern)
         return None
 
     def record(self) -> dict[str, Any]:
@@ -477,13 +483,19 @@ class DllmEngine:
         options: SamplingOptions,
         *,
         regex: str | None = None,
+        grammar: str | None = None,
         overflow: str = "stop",
     ) -> Generation:
-        """Continues ``prompt``; ``regex`` restricts the continuation to text matching it in full and ``overflow``
-        says what happens at a full context window (docs/api.md#long-conversations)."""
+        """Continues ``prompt``; ``regex`` restricts the continuation to text matching it in full, ``grammar`` to
+        text the GBNF grammar derives, and ``overflow`` says what happens at a full context window
+        (docs/api.md#long-conversations)."""
+        if regex is not None and grammar is not None:
+            raise ValueError("a regex and a grammar cannot be combined")
         constraint = None
         if regex is not None:
             constraint = TokenConstraint(Grammar.regex(regex), self._token_trie())
+        elif grammar is not None:
+            constraint = TokenConstraint(Grammar.gbnf(grammar), self._token_trie())
         guide = self.guide(options, raw=True)
         return self._generator.stream(
             prompt, max_tokens, options, constraint=constraint, overflow=overflow, guide=guide

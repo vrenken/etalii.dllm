@@ -1,9 +1,10 @@
 """Constrained decoding: byte-level JSON grammars and the token masks they induce.
 
 A :class:`Grammar` describes the bytes the model may produce: literal text, JSON values of a JSON schema, text
-matching a regular expression (:mod:`etalii_dllm.regexp`), or a sequence of those (a tool call is ``<tool_call>``
-+ a JSON object + ``</tool_call>``). It is recognised by a small nondeterministic pushdown automaton over bytes, so
-tokens that end mid-character (byte-level BPE) are handled exactly.
+matching a regular expression (:mod:`etalii_dllm.regexp`), text a GBNF grammar derives (:mod:`etalii_dllm.gbnf`),
+or a sequence of those (a tool call is ``<tool_call>`` + a JSON object + ``</tool_call>``). It is recognised by a
+small nondeterministic pushdown automaton over bytes, so tokens that end mid-character (byte-level BPE) are handled
+exactly.
 
 :class:`TokenConstraint` turns a grammar into the set of tokens allowed at each step. Every token's bytes are put in
 a trie once per tokenizer; a depth-first walk over the trie, pruned as soon as the automaton rejects a prefix, finds
@@ -154,6 +155,17 @@ class _Any(_Node):
     """Any JSON value."""
 
     __slots__ = ()
+
+
+class _Rule(_Node):
+    """A grammar rule (:mod:`etalii_dllm.gbnf`): alternatives that are sequences of automaton items. Filled in after
+    creation, so rules can refer to each other and to themselves."""
+
+    __slots__ = ("alternatives", "name")
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.alternatives: tuple[tuple[tuple[Any, ...], ...], ...] = ()
 
 
 _ANY = _Any()
@@ -473,6 +485,8 @@ def _expand(node: _Node, rest: Stack) -> list[Stack]:
         return [_push(rest, [_literal(b"{"), _WS_ITEM, (_OBJ, node, 0, False)])]
     if isinstance(node, _Array):
         return [_push(rest, [_literal(b"["), _WS_ITEM, (_ARR, node, 0)])]
+    if isinstance(node, _Rule):
+        return [_push(rest, alternative) for alternative in node.alternatives]
     if isinstance(node, _Any):
         # Shared node objects: stacks compare nodes by identity, so fresh ones would defeat state interning.
         return [s for option in (_FREE_OBJECT, _ANY_ARRAY, *_ANY_SCALARS) for s in _expand(option, rest)]
@@ -665,6 +679,13 @@ class Grammar:
         from etalii_dllm.regexp import compile_regex
 
         return cls([(_RE, compile_regex(pattern), 0)])
+
+    @classmethod
+    def gbnf(cls, text: str) -> Grammar:
+        """Text the GBNF grammar ``text`` derives from its ``root`` rule (:mod:`etalii_dllm.gbnf` lists the syntax)."""
+        from etalii_dllm.gbnf import compile_gbnf
+
+        return compile_gbnf(text)
 
     @classmethod
     def literal(cls, text: str) -> Grammar:

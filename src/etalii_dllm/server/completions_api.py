@@ -66,6 +66,8 @@ class CompletionRequest(BaseModel):
     repetition_penalty: float | None = None
     repeat_last_n: int | None = None
     guided_regex: str | None = None
+    grammar: str | None = None
+    """Extension (as in llama.cpp): a GBNF grammar the completion must follow (docs/api.md#grammars)."""
     watermark: WatermarkOptions | None = None
     guidance: GuidanceOptions | None = None
     """Extension: classifier-free guidance away from a negative prompt (docs/api.md#guided-decoding)."""
@@ -148,9 +150,13 @@ def _requests(request: CompletionRequest, engine: DllmEngine) -> list[ChatReques
         **(request.watermark.sampling() if request.watermark else {}),
         **guided(request.guidance, request.contrast),
     )
-    response_format = (
-        ResponseFormat("regex", pattern=request.guided_regex) if request.guided_regex else ResponseFormat()
-    )
+    if request.guided_regex is not None and request.grammar is not None:
+        raise ValueError("guided_regex and grammar cannot be combined")
+    response_format = ResponseFormat()
+    if request.guided_regex:
+        response_format = ResponseFormat("regex", pattern=request.guided_regex)
+    elif request.grammar is not None:
+        response_format = ResponseFormat("grammar", pattern=request.grammar)
     request_id = engine.derive_id(
         "cmpl-", id_payload(request.model_dump(mode="json", exclude={"stream", "stream_options", "receipt", "user"}))
     )

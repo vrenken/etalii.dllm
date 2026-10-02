@@ -301,6 +301,9 @@ def main(argv: list[str] | None = None) -> int:
             "--logit-bias", action="append", default=[], metavar="TOKEN=BIAS", help="add BIAS to a token (repeatable)"
         )
         command.add_argument("--regex", help="only produce text matching this regular expression in full")
+        command.add_argument(
+            "--grammar", help="only produce text this GBNF grammar derives (a file, or the grammar itself)"
+        )
         command.add_argument("--watermark-key", help="watermark the output with this key (dllm watermark detect)")
         command.add_argument("--watermark-gamma", type=float, default=0.25, help="share of green tokens")
         command.add_argument("--watermark-delta", type=float, default=2.0, help="logit boost of green tokens")
@@ -602,8 +605,13 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
+    try:
+        grammar = _grammar_text(args.grammar)
+    except OSError as error:
+        print(f"error: --grammar: {error}", file=sys.stderr)
+        return 2
     if args.command == "chat":
-        return _chat(engine, args, options)
+        return _chat(engine, args, options, grammar)
     if args.beams is not None or args.receipt is not None:
         return _beam_search(engine, args, options)
     if not 1 <= args.n <= MAX_CHOICES:
@@ -618,6 +626,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.max_tokens,
                 options.for_choice(index),
                 regex=args.regex,
+                grammar=grammar,
                 overflow=args.context_overflow,
             )
         except ValueError as error:
@@ -642,8 +651,8 @@ def _beam_search(engine: DllmEngine, args: argparse.Namespace, options: Sampling
     try:
         if args.beams is None:
             raise ValueError("--receipt needs --beams")
-        if args.n != 1 or args.regex is not None:
-            raise ValueError("--beams cannot be combined with --n or --regex (use --n-best)")
+        if args.n != 1 or args.regex is not None or args.grammar is not None:
+            raise ValueError("--beams cannot be combined with --n, --regex or --grammar (use --n-best)")
         request = ChatRequest([], args.max_tokens, options, prompt=args.prompt, context_overflow=args.context_overflow)
         outcome = beam.search(engine, request, args.beams, args.n_best, args.length_penalty)
     except ValueError as error:
@@ -1209,7 +1218,14 @@ def _write(text: str) -> None:
     sys.stdout.flush()
 
 
-def _chat(engine: DllmEngine, args: argparse.Namespace, options: SamplingOptions) -> int:
+def _grammar_text(source: str | None) -> str | None:
+    """``--grammar``: the grammar itself when it defines a rule, else the file it names."""
+    if source is None or "::=" in source:
+        return source
+    return Path(source).read_text(encoding="utf-8")
+
+
+def _chat(engine: DllmEngine, args: argparse.Namespace, options: SamplingOptions, grammar: str | None) -> int:
     response_format = ResponseFormat("json_object") if args.json else ResponseFormat()
     if args.json_schema:
         source = args.json_schema
@@ -1224,6 +1240,11 @@ def _chat(engine: DllmEngine, args: argparse.Namespace, options: SamplingOptions
             print("dllm chat: --regex cannot be combined with --json or --json-schema", file=sys.stderr)
             return 1
         response_format = ResponseFormat("regex", pattern=args.regex)
+    if grammar is not None:
+        if args.json or args.json_schema or args.regex is not None:
+            print("dllm chat: --grammar cannot be combined with --json, --json-schema or --regex", file=sys.stderr)
+            return 1
+        response_format = ResponseFormat("grammar", pattern=grammar)
     messages = [ChatMessage("system", args.system)] if args.system else []
     request = ChatRequest(
         [*messages, ChatMessage("user", args.message)],

@@ -645,6 +645,20 @@ dllm chat "Book a flight" --json-schema '{"type": "object", "properties": {"from
 Structured output now also enforces string patterns, formats such as dates, string lengths and integer ranges, so
 the answer is valid under the whole schema, not only its shape. Details: [structured output](api.md#structured-output).
 
+## 28. Answers that follow your own grammar
+
+```bash
+cat > colours.gbnf <<'GBNF'
+root   ::= "Colours: " colour (", " colour){1,3} "."
+colour ::= "red" | "green" | "blue" | "yellow"
+GBNF
+dllm chat "Name some colours" --grammar colours.gbnf --temperature 0.8 --seed 3
+```
+
+A GBNF grammar (the format llama.cpp uses) can describe answers JSON schemas and regexes cannot, such as nested
+expressions. Every answer follows the grammar, and the same request gives the same answer on every machine. The
+server takes it as a `grammar` field on chat completions and completions. Details: [grammars](api.md#grammars).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
@@ -669,7 +683,8 @@ the answer is valid under the whole schema, not only its shape. Details: [struct
   guarantees that every call names a real tool with arguments that fit its schema.
 - Structured output supports the common JSON-schema keywords, including `pattern`, `format`, string lengths and
   integer bounds; `multipleOf`, `uniqueItems`, bounds on non-integer numbers and similar are refused with an error
-  (see [HTTP API](api.md#structured-output)). No images or audio.
+  (see [HTTP API](api.md#structured-output)). GBNF grammars may not be left-recursive and cannot use llama.cpp's
+  token references (`<...>`) ([grammars](api.md#grammars)). No images or audio.
 - MCP servers' own resources and prompts are not offered to the model (only their tools), and servers that ask
   the client for sampling or elicitation are not supported.
 - Models with Unigram or WordPiece tokenizers, GGUF files with a SentencePiece vocabulary (convert from the
