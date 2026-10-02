@@ -15,6 +15,7 @@ difference between an edited and an unedited model is exactly the edit.
 | Activation tracing | | `etalii_dllm.interpret.trace` | ✅ |
 | Logit lens | `dllm lens` | `etalii_dllm.interpret.logit_lens` | ✅ |
 | Attention maps | `dllm attention` | `trace(...).attention` | ✅ |
+| Expert routing | `dllm experts` | `etalii_dllm.interpret.routing` | ✅ |
 | Embedding explorer and word clouds | `dllm neighbours` | `etalii_dllm.interpret.neighbours` | ✅ |
 | Steering vectors | `dllm steer`, `--steer` | `etalii_dllm.interpret.steering` | ✅ |
 | Model editing (ROME) | `dllm edit` | `etalii_dllm.interpret.editing` | ✅ |
@@ -86,6 +87,26 @@ dllm --model smollm2-135m.dllm attention --prompt "The cat sat on the mat. The c
 The text output lists, for every query position, the keys it attends to most. `--layer` is 1-based and `--head`
 0-based; without them every layer or head is shown. `--html` writes one heatmap per head (rows: queries, columns:
 keys), `--json` the full probability matrices.
+
+## Expert routing
+
+Mixture-of-experts models (Mixtral, OLMoE, Qwen3-MoE) send every token to a few of each layer's experts.
+
+```bash
+dllm --model olmoe.dllm experts --prompt "The cat sat on the mat"
+dllm --model olmoe.dllm experts --prompt "The cat sat on the mat" --layer 3 --json
+```
+
+For every mixture-of-experts layer the text output lists each token's experts in rank order with their weights,
+then how many tokens each expert received. `--layer` (1-based) picks one layer, `--json` prints the experts, weights
+and usage per layer. In Python, `routing(model, tokens)` returns the same as arrays, and `trace(...)` carries
+`experts` and `expert_weights` for every layer (-1 and 0 in dense layers; mixture-of-experts traces have no
+`mlp_activation`). A `LayerHook` sees each sparse layer's routing in `routing(layer, experts, weights)`.
+
+The routing is part of the exactly specified forward pass, so it is the same on every run, thread count and machine
+and does not depend on what else is in the batch. In engines that group tokens by expert in batch-dependent ways, a
+token's experts and outputs can change with the load. Model editing (ROME) and fine-tuning do not support
+mixture-of-experts models yet.
 
 ## Embedding explorer and word clouds
 

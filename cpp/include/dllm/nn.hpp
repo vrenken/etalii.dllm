@@ -781,4 +781,44 @@ inline void attention_reference(const float* q, const float* k, const float* v, 
     }
 }
 
+// Mixture-of-experts routing of rows logits[rows, experts]: per row, the softmax of softmax() (the maximum
+// subtracted, exponentials and their total in double over experts ascending, times the reciprocal, rounded to
+// float), then the k largest probabilities in a total order (larger first, equal ones by lower expert index). With
+// normalize, each chosen probability is divided by their total, summed in double in that rank order, and rounded
+// once to float. indices[rows, k] and weights[rows, k] are in rank order. Each row is routed on its own, so the
+// result never depends on how many rows are routed together.
+inline void moe_route(const float* logits, std::int64_t* indices, float* weights, std::size_t rows,
+                      std::size_t experts, std::size_t k, bool normalize) {
+    if (k == 0 || k > experts) {
+        throw std::invalid_argument("experts per token must be between 1 and the number of experts");
+    }
+    std::vector<double> scratch(experts);
+    std::vector<float> probabilities(experts);
+    std::vector<unsigned char> taken(experts);
+    for (std::size_t r = 0; r < rows; ++r) {
+        softmax(logits + r * experts, probabilities.data(), scratch.data(), experts);
+        for (std::size_t e = 0; e < experts; ++e) {
+            taken[e] = 0;
+        }
+        double total = 0.0;
+        for (std::size_t j = 0; j < k; ++j) {
+            std::size_t best = experts;
+            for (std::size_t e = 0; e < experts; ++e) {
+                if (!taken[e] && (best == experts || probabilities[e] > probabilities[best])) {
+                    best = e;
+                }
+            }
+            taken[best] = 1;
+            indices[r * k + j] = static_cast<std::int64_t>(best);
+            weights[r * k + j] = probabilities[best];
+            total += static_cast<double>(probabilities[best]);
+        }
+        if (normalize) {
+            for (std::size_t j = 0; j < k; ++j) {
+                weights[r * k + j] = static_cast<float>(static_cast<double>(weights[r * k + j]) / total);
+            }
+        }
+    }
+}
+
 }  // namespace dllm

@@ -58,7 +58,9 @@ Every import maps onto one naming scheme, and weight matrices use the `[out, in]
 | `layers.N.{attention,mlp}_post_norm.weight` | `[hidden]`, OLMo 2 only (it has no `attention_norm`/`mlp_norm`): RMSNorm on the output of attention and of the MLP, before the residual add |
 | `layers.N.attention.o.weight` | `[hidden, heads * head_dim]` |
 | `layers.N.mlp_norm.weight` | `[hidden]` |
-| `layers.N.mlp.{gate,up}.weight`, `layers.N.mlp.down.weight` | `[intermediate, hidden]`, `[hidden, intermediate]` |
+| `layers.N.mlp.{gate,up}.weight`, `layers.N.mlp.down.weight` | `[intermediate, hidden]`, `[hidden, intermediate]`; dense layers only |
+| `layers.N.mlp.router.weight` | `[experts, hidden]`, mixture-of-experts layers: the router logits |
+| `layers.N.mlp.experts.E.{gate,up}.weight`, `layers.N.mlp.experts.E.down.weight` | `[expert_size, hidden]`, `[hidden, expert_size]`: expert `E` of a mixture-of-experts layer |
 | `final_norm.weight` | `[hidden]` |
 | `lm_head.weight` | `[vocab, hidden]`, absent when embeddings are tied |
 
@@ -75,7 +77,7 @@ original checkpoint import to the same bytes and the same fingerprint.
   import is deterministic, but a quantised source is of course only as precise as its quantisation.
   Running quantised (`--quantize q8_0` or `q4_0`) requantises the float32 tensors at load time; the file itself
   stays float32, so one file serves every precision.
-- **Fail loudly.** Unknown tensors, unsupported families (anything but Gemma 2, Gemma 3 text, Granite, Llama, Mistral, OLMo 2, Phi-3, Qwen2 and Qwen3),
+- **Fail loudly.** Unknown tensors, unsupported families (anything but Gemma 2, Gemma 3 text, Granite, Llama, Mistral, Mixtral, OLMo 2, OLMoE, Phi-3, Qwen2, Qwen3 and Qwen3-MoE),
   activations other than SiLU and GELU (tanh), MLP biases and RoPE scaling other than `linear`/`llama3`/`longrope`/`yarn` stop the import. Sliding-window
   attention comes from `sliding_window` (Mistral: every layer; Qwen2/Qwen3 with `use_sliding_window`: the layers from
   `max_window_layers` on; a `layer_types` list names them explicitly); a window at least as long as the context is
@@ -114,6 +116,17 @@ original checkpoint import to the same bytes and the same fingerprint.
   A longer one than the model's own uses LongRoPE's long factors (above), or else adds YaRN with
   `factor = N / context_length` and the old context as `original_max_position_embeddings` (the recipe Qwen publishes
   for Qwen2.5 and Qwen3). A model that already scales its RoPE another way cannot be stretched further.
+- **Mixtures of experts.** Mixtral (`mixtral`), OLMoE (`olmoe`) and Qwen3-MoE (`qwen3_moe`) store `experts`
+  (`num_local_experts` or `num_experts`), `experts_per_token` (`num_experts_per_tok`) and
+  `normalize_expert_weights` (always for Mixtral, else `norm_topk_prob`). Qwen3-MoE adds `expert_intermediate_size`
+  (`moe_intermediate_size`) and `dense_layers`: the layers in `mlp_only_layers` or skipped by
+  `decoder_sparse_step`, which keep a dense MLP of `intermediate_size`. Per-expert checkpoint tensors
+  (`mlp.experts.E.gate_proj`, Mixtral's `block_sparse_moe.experts.E.w1/w3/w2`) and transformers v5's stacked
+  `experts.gate_up_proj`/`down_proj` import to the same tensors; the router is `mlp.gate` (`block_sparse_moe.gate`).
+  GGUF files of architecture `qwen3moe`, `olmoe` and `llama` with `expert_count` (Mixtral) import from
+  `ffn_gate_inp` and the stacked `ffn_{gate,up,down}_exps` (or older per-expert `ffn_gate.E`); `expert_weights_norm`
+  is honoured when present. OLMoE's `clip_qkv`, shared experts and gating other than softmax are refused. The
+  routing is in the [specification](specification.md#5-the-decoder).
 - **Licences.** Apache-2.0 and MIT import directly. Anything else needs `--accept-licence` and is recorded as not
   redistributable. A source with no stated licence needs `--licence`; a licence with no text in the source and no
   standard text bundled needs `--licence-file`.

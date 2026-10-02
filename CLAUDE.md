@@ -43,7 +43,7 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
   truncation is `engine.fit_messages`, `docs/api.md#long-conversations`), `infill` (fill-in-the-middle prompts from the model's FIM tokens, `suffix`; `docs/api.md#fill-in-the-middle`), `reasoning` (thinking models: `<think>` split, the
   thinking switch and budget; `docs/api.md#reasoning`), `prompt_cache` (KV caches reused across requests),
   `batching` (concurrent generations share `forward_batch` steps), `chat`, `engine` (`DllmEngine`, the facade shared by every front
-  end; `DLLM_MODEL`/`--model` selects a `model.dllm`), `transformer` (Llama/Qwen2/Qwen3 decoder + KV cache), `bpe`, `unicode` (Unicode tables pinned to one version) and
+  end; `DLLM_MODEL`/`--model` selects a `model.dllm`), `transformer` (the decoder of every family, mixtures of experts included, + KV cache), `bpe`, `unicode` (Unicode tables pinned to one version) and
   `chat_template` (the model's own tokenizer and Jinja template), `sampling` (logit bias, penalties, top-k/top-p/
   min-p, choice seeds; `docs/api.md#decoding-controls`), `regexp` (regexes compiled to byte DFAs for `grammar`), `numeric_automata` (number bounds and `multipleOf` as byte DFAs, exact decimals), `schema_algebra` (`allOf`/`not`/`if` merged and negated into plain schemas for `grammar`), `gbnf` (GBNF grammars for `grammar`; `docs/api.md#grammars`), `cuda` (the GPU backend: NVRTC discovery, `CudaTensor`, device
   ops; `--device cuda`/`DLLM_DEVICE`), `architecture` (`TransformerConfig`), `modelfile`
@@ -52,8 +52,8 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
   `training/preference.py`, `docs/training.md`), `lora` (LoRA
   adapters, always merged into the weights; the PEFT format), `grammar`
   (JSON-schema constrained decoding over a token trie), `tools` (tool calling in the Hermes `<tool_call>` format), `interpret/` (activation tracing via `LayerHook`, logit lens,
-  embedding explorer, attention maps, steering vectors, ROME edits, sparse autoencoders; `dllm lens|attention|
-  neighbours|steer|edit|sae`, `docs/interpretability.md`), `receipts` (generation receipts, receipt chains and `dllm replay`, `docs/receipts.md`), `transcripts` (agent transcripts
+  embedding explorer, attention maps, expert routing, steering vectors, ROME edits, sparse autoencoders; `dllm lens|attention|
+  experts|neighbours|steer|edit|sae`, `docs/interpretability.md`), `receipts` (generation receipts, receipt chains and `dllm replay`, `docs/receipts.md`), `transcripts` (agent transcripts
   and their offline replay), `builtin_tools` (deterministic calculator/files/documents tools, `dllm chat --tool`,
   `dllm-tools`; `docs/agents.md`), `signing` (Ed25519 signatures, `dllm sign`, `--sign-key`, `--trust`;
   `docs/provenance.md`; model lineage lives in `modelfile`, training receipts in `training/receipt.py`), `serving` (exact

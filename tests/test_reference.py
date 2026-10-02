@@ -196,6 +196,13 @@ VARIANTS = {
                   "rope_scaling": {"rope_type": "longrope", "short_factor": [4.0, 1.0, 2.0, 1.5],
                                    "long_factor": [8.0, 2.0, 3.0, 1.0], "factor_set": "long",
                                    "attention_factor": 1.2}},
+    # Phase 42: mixtures of experts (routed rows, renormalised or not, a dense layer, quantised experts).
+    "mixtral": {"family": "mixtral", "experts": 4, "experts_per_token": 2, "normalize_expert_weights": True,
+                "tie_word_embeddings": False},
+    "olmoe": {"family": "olmoe", "qk_norm": True, "qk_norm_scope": "all", "experts": 4, "experts_per_token": 2,
+              "intermediate_size": 32},
+    "qwen3_moe": {"family": "qwen3_moe", "qk_norm": True, "experts": 8, "experts_per_token": 3,
+                  "expert_intermediate_size": 32, "normalize_expert_weights": True, "dense_layers": (0,)},
 }  # fmt: skip
 
 

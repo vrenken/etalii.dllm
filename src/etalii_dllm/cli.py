@@ -63,6 +63,8 @@ def _import(args: argparse.Namespace) -> int:
     config = result.config
     print(f"wrote:              {result.path}")
     print(f"architecture:       {config.family}, {config.layers} layers, hidden {config.hidden_size}")
+    if config.experts:
+        print(f"experts:            {config.experts}, {config.experts_per_token} per token")
     print(f"context:            {config.context_length} tokens{_rope_note(config.rope_scaling)}")
     print(f"licence:            {result.licence['spdx']}")
     print(f"system_fingerprint: {result.fingerprint}")
@@ -81,6 +83,16 @@ def _inspect(args: argparse.Namespace) -> int:
     parameters = sum(int(t.size) for t in model.tensors.values())
     print(f"architecture:       {json.dumps(model.config.to_dict(), sort_keys=True)}")
     print(f"parameters:         {parameters}")
+    if model.config.experts:
+        config = model.config
+        active = parameters - sum(
+            int(t.size)
+            for name, t in model.tensors.items()
+            if ".mlp.experts." in name and int(name.split(".")[4]) >= config.experts_per_token
+        )
+        print(
+            f"experts:            {config.experts}, {config.experts_per_token} per token ({active} active parameters)"
+        )
     print(f"source:             {json.dumps({k: v for k, v in model.source.items() if k != 'files'}, sort_keys=True)}")
     print(f"licence:            {model.licence.get('spdx')}")
     print(f"attribution:        {model.licence.get('attribution')}")

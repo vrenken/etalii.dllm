@@ -50,6 +50,8 @@ class DecoderGradients:
     def __init__(self, config: TransformerConfig) -> None:
         if config.rope_interleaved:
             raise ValueError("training expects the Hugging Face rotary layout (imports convert to it)")
+        if config.experts:
+            raise ValueError("fine-tuning mixture-of-experts models is not supported yet")
         self.config = config
         self.inv_freq = rope_inv_freq(
             config.head_dim, config.rope_theta, rotary_dim=config.rotary_dimension, scaling=config.rope_scaling

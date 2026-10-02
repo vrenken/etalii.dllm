@@ -156,14 +156,14 @@ AdamW from `grad.hpp`.
 | `conformance.py` | `dllm conformance write/check`: test vectors (inputs and exact outputs of every kernel, the sampler and two decoders) for any implementation. |
 | `unicode.py` | Normalisation, lower-casing and regex categories from Unicode 15.1 tables shipped in the package, so the Python version cannot change tokenization. |
 | `models.py` | The `LanguageModel` protocol and the seeded placeholder `BigramModel`. |
-| `transformer.py` | The Llama/Qwen2/Qwen3 decoder (RMSNorm, QK-norm, RoPE, grouped-query attention, SwiGLU) and its KV cache, on CPU or GPU, float32, Q8_0 or Q4_0. |
+| `transformer.py` | The decoder of every family (RMSNorm, QK-norm, RoPE, grouped-query attention, SwiGLU, mixtures of experts with the `moe_route` kernel) and its KV cache, on CPU or GPU, float32, Q8_0 or Q4_0. |
 | `lora.py` | LoRA adapters: merging `W + scale · B·A` with the `linear` kernel, adapter gradients, and the PEFT directory format. |
 | `architecture.py` | `TransformerConfig`: the shape of a decoder, independent of where its weights came from. |
 | `modelfile.py` | Reading and writing the `model.dllm` container ([format](../model-format.md)), its lineage and whole-file hash ([verifiable models](../provenance.md)). |
 | `numerics.py`, `tensor.py` | Thin wrappers over the C++ kernels, fingerprints, `DeterministicRandom`, and the 64-byte aligned float32 `Tensor`. |
 | `cuda.py` | The GPU backend: finding NVRTC, `CudaTensor`, device-side operations. |
-| `importing/` | Readers for safetensors and GGUF (with GGML dequantisation), the Hugging Face download pinned to a commit, the licence policy, and `dllm import` (with `--context-length`: YaRN or LongRoPE long factors fixed per model file). |
-| `interpret/` | Interpretability tools on the decoder's own pass: activation tracing through `LayerHook` (observation cannot change a bit), the logit lens, the embedding explorer, attention maps and their HTML/SVG views (`dllm lens`, `attention`, `neighbours`), steering vectors (`steer`, `--steer`), ROME edits (`edit`) and sparse autoencoders (`sae`); [interpretability](../interpretability.md). |
+| `importing/` | Readers for safetensors and GGUF (with GGML dequantisation), the Hugging Face download pinned to a commit, the licence policy, and `dllm import` (with `--context-length`: YaRN or LongRoPE long factors fixed per model file; Mixtral, OLMoE and Qwen3-MoE experts from per-expert or stacked tensors). |
+| `interpret/` | Interpretability tools on the decoder's own pass: activation tracing through `LayerHook` (observation cannot change a bit), the logit lens, the embedding explorer, attention maps and their HTML/SVG views (`dllm lens`, `attention`, `neighbours`), expert routing (`experts`), steering vectors (`steer`, `--steer`), ROME edits (`edit`) and sparse autoencoders (`sae`); [interpretability](../interpretability.md). |
 | `evaluation.py` | `dllm eval`: log-likelihood scoring (perplexity and multiple choice, as lm-evaluation-harness does) with fixed-order sums and a fingerprint over every log-probability; [evaluation](../evaluation.md). |
 | `receipts.py` | Generation receipts: the engine request and hashes of the output as content-addressed JSON, and `verify`, which replays a receipt (`dllm replay`, `POST /v1/receipts/verify`); [receipts](../receipts.md). |
 | `transcripts.py`, `builtin_tools.py` | Agent transcripts and their offline replay; deterministic built-in tools ([reproducible agents](../agents.md)). |

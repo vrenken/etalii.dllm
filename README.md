@@ -199,6 +199,7 @@ module map), with Mermaid diagrams.
 | 39. Deterministic MCP sampling, prompts and resources ✅ | ✅ MCP sampling answered exactly by the engine (#257); ✅ MCP prompts in the host and `dllm chat` (#258); ✅ MCP resources in the host and `dllm chat` (#259); ✅ docs and tests (#260). See [MCP](docs/mcp.md#sampling-prompts-and-resources) |
 | 40. Reproducible fine-tuning of every model family ✅ | ✅ Fine-tuning OLMo 2 and Granite (#262); ✅ Gemma 2 and Gemma 3, with backward kernels for the tanh GELU, soft-caps and unit-offset norms (#263); ✅ Phi-3/Phi-4-mini with LongRoPE, and LoRA, DPO and distillation for every family (#264); ✅ docs, tests and golden values (#265). See [fine-tuning](docs/training.md#what-makes-it-reproducible) |
 | 41. Exact long-context RoPE scaling ✅ | ✅ YaRN RoPE scaling from Hugging Face and GGUF models (#267); ✅ `dllm import --context-length` with YaRN or LongRoPE's long factors, fixed per model file (#268); ✅ in the specification, the reference implementation and fine-tuning (#269); ✅ docs, tests and golden values (#270). See [model format](docs/model-format.md#conversion-rules) |
+| 42. Exact mixture-of-experts models ✅ | ✅ Mixture-of-experts layers with an exactly specified, batch-invariant routing (#272); ✅ Qwen3-MoE, OLMoE and Mixtral from Hugging Face and GGUF, and back (#273); ✅ in the specification, the reference implementation and the conformance vectors (#274); ✅ routing in traces and `dllm experts` (#275). See [model format](docs/model-format.md#conversion-rules) |
 
 ## Working with Claude Code
 

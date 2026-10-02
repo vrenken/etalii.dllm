@@ -33,6 +33,7 @@ from etalii_dllm.numerics import (
     attention,
     attention_weights,
     linear,
+    moe_route,
     rms_norm,
     rope,
     rope_inv_freq,
@@ -73,6 +74,10 @@ class LayerHook:
 
     def mlp_output(self, layer: int, out: np.ndarray) -> None:
         """What the MLP block adds to the residual stream, ``[positions, hidden]``."""
+
+    def routing(self, layer: int, experts: np.ndarray, weights: np.ndarray) -> None:
+        """The experts ``[positions, k]`` each position of a mixture-of-experts layer was routed to, in rank order,
+        and their weights ``[positions, k]`` (sparse layers only; they have no :meth:`mlp_activation`)."""
 
 
 def _prepare(weight: Tensor, quantize: str | None, device: str) -> Weight:
@@ -286,7 +291,9 @@ class Transformer:
         # GPU they are uploaded too); the embedding table stays on the host, which looks up the rows.
         self._w: dict[str, Tensor | Weight | CudaTensor] = {}
         for name, tensor in weights.items():
-            if name.endswith(_MATRICES):
+            if name.endswith(".router.weight"):  # routers stay float32, as in llama.cpp
+                self._w[name] = _prepare(tensor, None, self.device)
+            elif name.endswith(_MATRICES):
                 self._w[name] = _prepare(tensor, quantize, self.device)
                 if release is not None:
                     release(name)
@@ -526,12 +533,15 @@ class Transformer:
                 hook.attention_output(layer, out.numpy().copy())
             x = observe(layer, "middle", x + out.numpy())
             h = norm(x, p + "mlp_norm.weight") if config.has_pre_norms else x
-            gate = linear(h, w[p + "mlp.gate.weight"])
-            up = linear(h, w[p + "mlp.up.weight"])
-            activation = swiglu(gate, up, config.activation).numpy()
-            if hook is not None:
-                hook.mlp_activation(layer, activation.copy())
-            out = linear(activation, w[p + "mlp.down.weight"])
+            if config.is_sparse(layer):
+                out = Tensor(self._experts(h.numpy() if isinstance(h, Tensor) else h, layer, hook))
+            else:
+                gate = linear(h, w[p + "mlp.gate.weight"])
+                up = linear(h, w[p + "mlp.up.weight"])
+                activation = swiglu(gate, up, config.activation).numpy()
+                if hook is not None:
+                    hook.mlp_activation(layer, activation.copy())
+                out = linear(activation, w[p + "mlp.down.weight"])
             if config.has_post_norms:
                 out = norm(out, p + "mlp_post_norm.weight")
             if hook is not None:
@@ -541,6 +551,45 @@ class Transformer:
                 x = x + self.steering[layer]
             x = observe(layer, "output", x)
         return norm(x, "final_norm.weight")
+
+    def route(self, h: np.ndarray, layer: int) -> tuple[np.ndarray, np.ndarray]:
+        """The experts ``[rows, k]`` (rank order) and weights of ``layer``'s router for MLP inputs ``h`` ``[rows,
+        hidden]``: router logits from :func:`linear`, then :func:`moe_route`."""
+        router = self._w[f"layers.{layer}.mlp.router.weight"]
+        if self.device == "cuda":
+            logits = cuda.linear(CudaTensor.upload(h), router).numpy()  # type: ignore[arg-type]
+        else:
+            logits = linear(h, router).numpy()  # type: ignore[arg-type]
+        return moe_route(logits, self.config.experts_per_token, self.config.normalize_expert_weights)
+
+    def _experts(self, h: np.ndarray, layer: int, hook: LayerHook | None = None) -> np.ndarray:
+        """The output ``[rows, hidden]`` of ``layer``'s mixture of experts for inputs ``h``. Each row's chosen experts
+        run on that row alone (the linear kernels compute rows independently, so which rows share an expert cannot
+        change a bit); each expert's output is scaled by its weight and the products are added to zero in increasing
+        expert order, elementwise in float32."""
+        config = self.config
+        h = np.ascontiguousarray(h, dtype=np.float32)
+        chosen, weights = self.route(h, layer)
+        if hook is not None:
+            hook.routing(layer, chosen.copy(), weights.copy())
+        out = np.zeros_like(h)
+        p = f"layers.{layer}.mlp.experts."
+        for expert in np.unique(chosen):  # ascending, so each row adds its experts in increasing order
+            rows, ranks = np.nonzero(chosen == expert)
+            q = f"{p}{int(expert)}."
+            if self.device == "cuda":
+                x = CudaTensor.upload(np.ascontiguousarray(h[rows]))
+                gate = cuda.linear(x, self._w[q + "gate.weight"])  # type: ignore[arg-type]
+                up = cuda.linear(x, self._w[q + "up.weight"])  # type: ignore[arg-type]
+                act = cuda.swiglu(gate, up, config.activation)
+                y = cuda.linear(act, self._w[q + "down.weight"]).numpy()  # type: ignore[arg-type]
+            else:
+                x = np.ascontiguousarray(h[rows])
+                gate = linear(x, self._w[q + "gate.weight"])  # type: ignore[arg-type]
+                up = linear(x, self._w[q + "up.weight"])  # type: ignore[arg-type]
+                y = linear(swiglu(gate, up, config.activation), self._w[q + "down.weight"]).numpy()  # type: ignore[arg-type]
+            out[rows] += y * weights[rows, ranks][:, None]
+        return out
 
     def _embeddings(self, tokens: list[int]) -> np.ndarray:
         rows = self._embedding[np.asarray(tokens, dtype=np.int64)]
@@ -617,9 +666,12 @@ class Transformer:
                 out = norm(out, p + "attention_post_norm.weight")
             x = cuda.add(x, out)
             h = norm(x, p + "mlp_norm.weight") if config.has_pre_norms else x
-            gate = cuda.linear(h, w[p + "mlp.gate.weight"])
-            up = cuda.linear(h, w[p + "mlp.up.weight"])
-            out = cuda.linear(cuda.swiglu(gate, up, config.activation), w[p + "mlp.down.weight"])
+            if config.is_sparse(layer):  # routed on the host; each expert's rows run on the GPU
+                out = CudaTensor.upload(self._experts(h.numpy(), layer))
+            else:
+                gate = cuda.linear(h, w[p + "mlp.gate.weight"])
+                up = cuda.linear(h, w[p + "mlp.up.weight"])
+                out = cuda.linear(cuda.swiglu(gate, up, config.activation), w[p + "mlp.down.weight"])
             if config.has_post_norms:
                 out = norm(out, p + "mlp_post_norm.weight")
             x = cuda.add(x, out)

@@ -104,8 +104,23 @@ def reference_logits(
         attended = out.reshape(n, -1) @ w[p + "attention.o.weight"].T * config.residual_multiplier
         x = x + (norm(attended, w[p + "attention_post_norm.weight"]) if post else attended)
         h = norm(x, w[p + "mlp_norm.weight"]) if pre else x
-        gate = h @ w[p + "mlp.gate.weight"].T
-        mlp = (act(gate) * (h @ w[p + "mlp.up.weight"].T)) @ w[p + "mlp.down.weight"].T
+        if config.is_sparse(i):  # softmax over the router logits, top-k, optionally renormalised
+            logits = h @ w[p + "mlp.router.weight"].T
+            probs = np.exp(logits - logits.max(-1, keepdims=True))
+            probs = probs / probs.sum(-1, keepdims=True)
+            mlp = np.zeros_like(h)
+            for row in range(n):
+                chosen = np.argsort(-probs[row], kind="stable")[: config.experts_per_token]
+                weights = probs[row, chosen]
+                if config.normalize_expert_weights:
+                    weights = weights / weights.sum()
+                for e, weight in zip(chosen, weights, strict=True):
+                    q = f"{p}mlp.experts.{e}."
+                    gate = h[row] @ w[q + "gate.weight"].T
+                    mlp[row] += weight * ((act(gate) * (h[row] @ w[q + "up.weight"].T)) @ w[q + "down.weight"].T)
+        else:
+            gate = h @ w[p + "mlp.gate.weight"].T
+            mlp = (act(gate) * (h @ w[p + "mlp.up.weight"].T)) @ w[p + "mlp.down.weight"].T
         mlp = mlp * config.residual_multiplier
         x = x + (norm(mlp, w[p + "mlp_post_norm.weight"]) if post else mlp)
     head = w["token_embedding.weight"] if config.tie_word_embeddings else w["lm_head.weight"]
@@ -116,9 +131,10 @@ def reference_logits(
     return logits
 
 
-@pytest.fixture(
-    scope="module", params=["gemma2", "gemma3", "granite", "llama", "mistral", "olmo2", "phi3", "qwen2", "qwen3"]
-)
+FAMILIES = sorted(TINY_LOGITS_FINGERPRINT)
+
+
+@pytest.fixture(scope="module", params=FAMILIES)
 def model(request, tmp_path_factory) -> Transformer:
     directory = tmp_path_factory.mktemp(request.param)
     config = tiny_config(request.param)

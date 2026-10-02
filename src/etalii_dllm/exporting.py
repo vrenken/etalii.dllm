@@ -7,9 +7,11 @@ export is byte-identical on every platform, and importing it again gives the sam
 - ``safetensors``: a Hugging Face model directory (``config.json``, ``generation_config.json``, the tokenizer files,
   ``LICENSE``, a ``README.md`` with the attribution, and one ``model.safetensors`` in float32). The ``config.json`` is
   checked by importing it again: a model whose description does not survive that round trip is refused rather than
-  exported approximately. Llama, Mistral, Qwen2, Qwen3, OLMo 2 and Granite.
+  exported approximately. Llama, Mistral, Qwen2, Qwen3, OLMo 2, Granite, Mixtral, OLMoE and Qwen3-MoE (one tensor
+  per expert, as their checkpoints store them).
 - ``gguf``: one GGUF v3 file in float32 as llama.cpp writes it (Llama Q/K rows permuted, the vocabulary padded to
-  the embedding size). Llama, Qwen2 and Qwen3 with byte-level BPE tokenizers. GGUF stores ``rms_norm_eps`` as
+  the embedding size, experts stacked into one tensor per projection). Llama, Qwen2, Qwen3, Mixtral, OLMoE and
+  Qwen3-MoE with byte-level BPE tokenizers. GGUF stores ``rms_norm_eps`` as
   float32, so a re-imported GGUF can differ from the original in that one value, as any GGUF does, and keeps two
   end-of-sequence ids (``eos`` and ``eot``).
 """
@@ -37,6 +39,9 @@ _HF_ARCHITECTURES = {
     "qwen3": "Qwen3ForCausalLM",
     "olmo2": "Olmo2ForCausalLM",
     "granite": "GraniteForCausalLM",
+    "mixtral": "MixtralForCausalLM",
+    "olmoe": "OlmoeForCausalLM",
+    "qwen3_moe": "Qwen3MoeForCausalLM",
 }
 _HF_ACTIVATIONS = {"silu": "silu", "gelu_tanh": "gelu_pytorch_tanh"}
 
@@ -115,6 +120,17 @@ def hf_config_json(config: TransformerConfig) -> dict[str, Any]:
         }
         if config.attention_multiplier is not None:
             document["attention_multiplier"] = config.attention_multiplier
+    if config.experts:
+        document["num_local_experts" if config.family == "mixtral" else "num_experts"] = config.experts
+        document["num_experts_per_tok"] = config.experts_per_token
+        if config.family != "mixtral":
+            document["norm_topk_prob"] = config.normalize_expert_weights
+        if config.family == "qwen3_moe":
+            document |= {
+                "moe_intermediate_size": config.expert_size,
+                "decoder_sparse_step": 1,
+                "mlp_only_layers": list(config.dense_layers or ()),
+            }
     try:
         again = hf_config(document)
     except ModelImportError as error:
@@ -151,10 +167,20 @@ _HF_GLOBALS = {
 }
 
 
+_MIXTRAL_EXPERTS = {"gate": "w1", "down": "w2", "up": "w3"}
+
+
 def hf_tensor_name(name: str, config: TransformerConfig) -> str:
     if name in _HF_GLOBALS:
         return _HF_GLOBALS[name]
     _, index, rest = name.split(".", 2)
+    moe = "block_sparse_moe" if config.family == "mixtral" else "mlp"
+    if rest == "mlp.router.weight":
+        return f"model.layers.{index}.{moe}.gate.weight"
+    if rest.startswith("mlp.experts."):
+        _, _, expert, projection, _ = rest.split(".")
+        hf = _MIXTRAL_EXPERTS[projection] if config.family == "mixtral" else f"{projection}_proj"
+        return f"model.layers.{index}.{moe}.experts.{expert}.{hf}.weight"
     names = {**_HF_NAMES, **(_HF_POST_NORMS if config.norm_placement == "post" else _HF_PRE_NORMS)}
     return f"model.layers.{index}.{names[rest]}"
 
@@ -237,7 +263,9 @@ def export_safetensors(model: ModelFile, directory: str | Path) -> list[Path]:
 
 # -- GGUF -------------------------------------------------------------------------------------------------------------
 
-_GGUF_FAMILIES = ("llama", "qwen2", "qwen3")
+# family -> GGUF architecture; llama.cpp stores Mixtral as "llama" with experts.
+_GGUF_FAMILIES = {"llama": "llama", "qwen2": "qwen2", "qwen3": "qwen3", "mixtral": "llama", "olmoe": "olmoe",
+                  "qwen3_moe": "qwen3moe"}  # fmt: skip
 _GGUF_NAMES = {
     "attention_norm.weight": "attn_norm.weight",
     "mlp_norm.weight": "ffn_norm.weight",
@@ -253,6 +281,7 @@ _GGUF_NAMES = {
     "mlp.gate.weight": "ffn_gate.weight",
     "mlp.up.weight": "ffn_up.weight",
     "mlp.down.weight": "ffn_down.weight",
+    "mlp.router.weight": "ffn_gate_inp.weight",
 }
 _GGUF_GLOBALS = {"token_embedding.weight": "token_embd.weight", "final_norm.weight": "output_norm.weight",
                  "lm_head.weight": "output.weight"}  # fmt: skip
@@ -271,9 +300,13 @@ def permute_rotary(weight: np.ndarray, heads: int) -> np.ndarray:
 
 
 def gguf_tensor_name(name: str) -> str:
+    """The GGUF name of a tensor; every expert's ``mlp.experts.<e>.<projection>.weight`` maps to the stacked
+    ``ffn_<projection>_exps.weight``."""
     if name in _GGUF_GLOBALS:
         return _GGUF_GLOBALS[name]
     _, index, rest = name.split(".", 2)
+    if rest.startswith("mlp.experts."):
+        return f"blk.{index}.ffn_{rest.split('.')[3]}_exps.weight"
     return f"blk.{index}.{_GGUF_NAMES[rest]}"
 
 
@@ -345,7 +378,9 @@ def export_gguf(model: ModelFile, path: str | Path) -> Path:
     config = model.config
     family = config.family
     if family not in _GGUF_FAMILIES:
-        raise ExportError(f"exporting {family} models to GGUF is not supported (supported: llama, qwen2, qwen3)")
+        supported = ", ".join(sorted(_GGUF_FAMILIES))
+        raise ExportError(f"exporting {family} models to GGUF is not supported (supported: {supported})")
+    architecture = _GGUF_FAMILIES[family]
     if config.sliding_window is not None or config.rotary_dim is not None:
         raise ExportError("sliding windows and partial rotary embeddings cannot be written to GGUF")
     scaling = dict(config.rope_scaling or {})
@@ -358,40 +393,51 @@ def export_gguf(model: ModelFile, path: str | Path) -> Path:
             raise ExportError("this YaRN scaling (betas, attention factor or factor) cannot be written to GGUF exactly")
     elif scaling and scaling["rope_type"] != "linear":
         raise ExportError(f"RoPE scaling {scaling['rope_type']!r} cannot be written to GGUF")
-    if (family == "qwen3" and not config.qk_norm) or (family == "llama" and config.qk_norm):
+    if config.qk_norm != (family in ("olmoe", "qwen3", "qwen3_moe")) or config.qk_norm_scope != (
+        "all" if family == "olmoe" else "head"
+    ):
         raise ExportError("the model's normalisation has no GGUF equivalent")
     licence = model.licence
     name = (model.source.get("repository") or Path(model.path).stem).split("/")[-1]
     metadata: list[tuple[str, int, Any]] = [
-        ("general.architecture", _STRING, family),
+        ("general.architecture", _STRING, architecture),
         ("general.name", _STRING, name),
         ("general.alignment", _U32, _ALIGNMENT),
         ("general.file_type", _U32, 0),
     ]
     if licence.get("spdx"):
         metadata.append(("general.license", _STRING, str(licence["spdx"]).lower()))
+    a = architecture
     metadata += [
-        (f"{family}.context_length", _U32, config.context_length),
-        (f"{family}.embedding_length", _U32, config.hidden_size),
-        (f"{family}.block_count", _U32, config.layers),
-        (f"{family}.feed_forward_length", _U32, config.intermediate_size),
-        (f"{family}.attention.head_count", _U32, config.heads),
-        (f"{family}.attention.head_count_kv", _U32, config.kv_heads),
-        (f"{family}.attention.key_length", _U32, config.head_dim),
-        (f"{family}.attention.value_length", _U32, config.head_dim),
-        (f"{family}.attention.layer_norm_rms_epsilon", _F32, config.rms_norm_eps),
-        (f"{family}.rope.freq_base", _F32, config.rope_theta),
-        (f"{family}.rope.dimension_count", _U32, config.head_dim),
-        (f"{family}.vocab_size", _U32, config.vocabulary_size),
+        (f"{a}.context_length", _U32, config.context_length),
+        (f"{a}.embedding_length", _U32, config.hidden_size),
+        (f"{a}.block_count", _U32, config.layers),
+        (f"{a}.feed_forward_length", _U32, config.intermediate_size),
+        (f"{a}.attention.head_count", _U32, config.heads),
+        (f"{a}.attention.head_count_kv", _U32, config.kv_heads),
+        (f"{a}.attention.key_length", _U32, config.head_dim),
+        (f"{a}.attention.value_length", _U32, config.head_dim),
+        (f"{a}.attention.layer_norm_rms_epsilon", _F32, config.rms_norm_eps),
+        (f"{a}.rope.freq_base", _F32, config.rope_theta),
+        (f"{a}.rope.dimension_count", _U32, config.head_dim),
+        (f"{a}.vocab_size", _U32, config.vocabulary_size),
     ]
+    if config.experts:
+        metadata += [
+            (f"{a}.expert_count", _U32, config.experts),
+            (f"{a}.expert_used_count", _U32, config.experts_per_token),
+            (f"{a}.expert_weights_norm", _BOOL, config.normalize_expert_weights),
+        ]
+        if config.expert_intermediate_size is not None:
+            metadata.append((f"{a}.expert_feed_forward_length", _U32, config.expert_intermediate_size))
     if scaling:
         metadata += [
-            (f"{family}.rope.scaling.type", _STRING, scaling["rope_type"]),
-            (f"{family}.rope.scaling.factor", _F32, float(scaling["factor"])),
+            (f"{a}.rope.scaling.type", _STRING, scaling["rope_type"]),
+            (f"{a}.rope.scaling.factor", _F32, float(scaling["factor"])),
         ]
     if scaling and scaling["rope_type"] == "yarn":
         original = scaling["original_max_position_embeddings"]
-        metadata.append((f"{family}.rope.scaling.original_context_length", _U32, original))
+        metadata.append((f"{a}.rope.scaling.original_context_length", _U32, original))
     metadata += _gguf_tokenizer(model.tokenizer, config.vocabulary_size)
     # The special ids come from the model's own description, as the importer reads them back: GGUF has room for one
     # end-of-sequence and one end-of-turn token.
@@ -402,17 +448,33 @@ def export_gguf(model: ModelFile, path: str | Path) -> Path:
     if model.chat_template is not None:
         metadata.append(("tokenizer.chat_template", _STRING, model.chat_template))
 
-    def data(name: str) -> np.ndarray:
-        values = _rows(model, name)
-        if family == "llama" and name.split(".", 2)[-1] in ("attention.q.weight", "attention.k.weight"):
-            values = permute_rotary(values, config.heads if ".q." in name else config.kv_heads)
+    # GGUF tensors in model order; each layer's experts become one stacked tensor per projection, at the place of
+    # expert 0.
+    stacks: dict[str, list[str]] = {}
+    for tensor in tensor_order(model.tensors):
+        stacks.setdefault(gguf_tensor_name(tensor), []).append(tensor)
+    for parts in stacks.values():
+        parts.sort(key=lambda name: int(name.split(".")[4]) if ".mlp.experts." in name else 0)
+
+    def data(target: str) -> np.ndarray:
+        parts = stacks[target]
+        if ".mlp.experts." in parts[0]:
+            return np.ascontiguousarray(np.stack([_rows(model, part) for part in parts]))
+        values = _rows(model, parts[0])
+        if architecture == "llama" and parts[0].split(".", 2)[-1] in ("attention.q.weight", "attention.k.weight"):
+            values = permute_rotary(values, config.heads if ".q." in parts[0] else config.kv_heads)
         return values
 
-    names = tensor_order(model.tensors)
+    def shape_of(target: str) -> tuple[int, ...]:
+        parts = stacks[target]
+        shape = tuple(model.tensors[parts[0]].shape)
+        return (len(parts), *shape) if ".mlp.experts." in parts[0] else shape
+
+    names = list(stacks)
     infos, offset = [], 0
     for tensor in names:
-        shape = model.tensors[tensor].shape
-        infos.append(_string(gguf_tensor_name(tensor)) + struct.pack("<I", len(shape)))
+        shape = shape_of(tensor)
+        infos.append(_string(tensor) + struct.pack("<I", len(shape)))
         infos[-1] += b"".join(struct.pack("<Q", d) for d in reversed(shape)) + struct.pack("<IQ", 0, offset)
         nbytes = int(np.prod(shape)) * 4
         offset += nbytes + (-nbytes % _ALIGNMENT)
