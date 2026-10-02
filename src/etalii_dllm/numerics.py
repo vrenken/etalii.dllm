@@ -253,8 +253,10 @@ def rope_inv_freq(
 
     ``scaling`` takes a Hugging Face ``rope_scaling`` dict: ``rope_type`` (or ``type``) ``"default"``, ``"linear"``
     (positions divided by ``factor``) or ``"llama3"`` (``factor``, ``low_freq_factor``, ``high_freq_factor``,
-    ``original_max_position_embeddings``) or ``"longrope"`` (every frequency divided by its ``short_factor``; the
-    ``long_factor`` set is never used, see ``docs/model-format.md``).
+    ``original_max_position_embeddings``), ``"longrope"`` (every frequency divided by its ``short_factor``, or its
+    ``long_factor`` when ``factor_set`` is ``"long"``; the set is fixed per model file, see ``docs/model-format.md``) or
+    ``"yarn"`` (``factor``, ``original_max_position_embeddings``, ``beta_fast``, ``beta_slow``, ``truncate``: a linear
+    ramp between interpolated and extrapolated frequencies, as transformers computes it, in double).
     """
     dim = head_dim if rotary_dim is None else rotary_dim
     if dim <= 0 or dim % 2 or dim > head_dim:
@@ -287,13 +289,42 @@ def rope_inv_freq(
         freqs = scaled
     elif kind == "longrope":
         assert scaling is not None
-        short = [float(f) for f in scaling["short_factor"]]
-        if len(short) != len(freqs):
-            raise ValueError(f"longrope short_factor needs {len(freqs)} values, got {len(short)}")
-        freqs = [f / s for f, s in zip(freqs, short, strict=True)]
+        name = "long_factor" if scaling.get("factor_set") == "long" else "short_factor"
+        factors = [float(f) for f in scaling[name]]
+        if len(factors) != len(freqs):
+            raise ValueError(f"longrope {name} needs {len(freqs)} values, got {len(factors)}")
+        freqs = [f / s for f, s in zip(freqs, factors, strict=True)]
+    elif kind == "yarn":
+        assert scaling is not None
+        freqs = _yarn(freqs, dim, log_theta, scaling)
     elif kind != "default":
         raise ValueError(f"unsupported rope scaling {kind!r}")
     return np.array(freqs, dtype=np.float64)
+
+
+def _yarn(freqs: list[float], dim: int, log_theta: float, scaling: Mapping[str, Any]) -> list[float]:
+    """YaRN: frequencies whose wavelength fits the original context many times keep their value (extrapolation),
+    those that fit it less than once are divided by ``factor`` (interpolation), and a linear ramp over the pair
+    index blends the two in between."""
+    factor = float(scaling["factor"])
+    original = float(scaling["original_max_position_embeddings"])
+    beta_fast = float(scaling.get("beta_fast", 32.0))
+    beta_slow = float(scaling.get("beta_slow", 1.0))
+
+    def correction(rotations: float) -> float:  # the pair index that turns ``rotations`` times over the original
+        return dim * log(original / (rotations * 2 * math.pi)) / (2 * log_theta)
+
+    low, high = correction(beta_fast), correction(beta_slow)
+    if scaling.get("truncate", True):
+        low, high = math.floor(low), math.ceil(high)
+    low, high = max(low, 0), min(high, dim - 1)
+    if low == high:
+        high += 0.001
+    scaled = []
+    for i, f in enumerate(freqs):
+        ramp = min(max((i - low) / (high - low), 0.0), 1.0)  # 0: extrapolate, 1: interpolate
+        scaled.append(f / factor * ramp + f * (1 - ramp))
+    return scaled
 
 
 def rope(

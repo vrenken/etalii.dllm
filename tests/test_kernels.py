@@ -209,7 +209,7 @@ def test_rope_inv_freq():
     assert all(plain[i] / 8 < scaled[i] < plain[i] for i in band)
     assert numerics.rope_inv_freq(64, rotary_dim=32).shape == (16,)
     with pytest.raises(ValueError):
-        numerics.rope_inv_freq(64, scaling={"rope_type": "yarn"})
+        numerics.rope_inv_freq(64, scaling={"rope_type": "dynamic"})
 
 
 @pytest.mark.parametrize("interleaved", [False, True])

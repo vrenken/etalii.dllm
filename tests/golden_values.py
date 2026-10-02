@@ -210,8 +210,9 @@ EVAL_FINGERPRINTS = {
 
 # SHA-256 of the conformance vectors' manifest.json (`dllm conformance write`, Phase 20). It covers every input and
 # output file's SHA-256, so it pins the bits of every kernel case, the sampler and the two small decoders. Phase 21
-# added the two sample-penalties cases (penalties, min-p and logit bias).
-CONFORMANCE_MANIFEST_SHA256 = "36b478022962b57a959502bce02235322836f5fc9bea3db927c56cf884800957"
+# added the two sample-penalties cases (penalties, min-p and logit bias); Phase 41 the YaRN and LongRoPE long-factor
+# rope-inv-freq cases.
+CONFORMANCE_MANIFEST_SHA256 = "9fbc625af37a98eb4d77eede439bbd714df022c1a02daf4c718bb78e4c822721"
 
 # Phase 21: the placeholder model continuing "Deterministic decoding controls are" with every decoding control set
 # (tests/test_decoding_controls.py::CONTROLLED): penalties, min-p and logit bias.
@@ -301,3 +302,12 @@ LENGTH_FINGERPRINTS = {
 
 MCP_SAMPLING_FINGERPRINT = "012cbe8e52308a5ade4aba4361371111e45c6620a6cc6b45154cba7b98fbca4a"
 """Phase 39: the default model's answer to an MCP server's sampling request (test_mcp_context.py)."""
+
+# Phase 41. fingerprint() of tests/test_long_context.py's tiny extended models' logits for test_transformer.PROMPT:
+# YaRN (Qwen3 and OLMo 2 carry its attention factor in their QK-norm weights) and Phi-3's LongRoPE long factors.
+LONG_CONTEXT_FINGERPRINTS = {
+    "llama-yarn": "124e881bb202418bd56b57c5e8f61f437695325d44f93587352054963b44903d",
+    "olmo2-yarn": "e8b23279aed18aa1d601b16e6852d73e1f6c55564f82fb71e1826639072ebe66",
+    "phi3-long": "a7d0e7e064c329096b58bb6eb270b3cefb7beaa3c8205cdac4f5aec8eb855f14",
+    "qwen3-yarn": "6ab6b7248b8a6a9a17e5f7547f1acd188831e3c1caa065253e0b93cf91347c33",
+}

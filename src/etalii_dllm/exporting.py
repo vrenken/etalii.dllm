@@ -348,8 +348,16 @@ def export_gguf(model: ModelFile, path: str | Path) -> Path:
         raise ExportError(f"exporting {family} models to GGUF is not supported (supported: llama, qwen2, qwen3)")
     if config.sliding_window is not None or config.rotary_dim is not None:
         raise ExportError("sliding windows and partial rotary embeddings cannot be written to GGUF")
-    if config.rope_scaling and config.rope_scaling.get("rope_type") != "linear":
-        raise ExportError(f"RoPE scaling {config.rope_scaling.get('rope_type')!r} cannot be written to GGUF")
+    scaling = dict(config.rope_scaling or {})
+    if scaling and scaling["rope_type"] == "yarn":
+        from etalii_dllm.importing.importer import yarn_scaling
+
+        if scaling != yarn_scaling(scaling["factor"], scaling["original_max_position_embeddings"]) or float(
+            np.float32(scaling["factor"])
+        ) != float(scaling["factor"]):
+            raise ExportError("this YaRN scaling (betas, attention factor or factor) cannot be written to GGUF exactly")
+    elif scaling and scaling["rope_type"] != "linear":
+        raise ExportError(f"RoPE scaling {scaling['rope_type']!r} cannot be written to GGUF")
     if (family == "qwen3" and not config.qk_norm) or (family == "llama" and config.qk_norm):
         raise ExportError("the model's normalisation has no GGUF equivalent")
     licence = model.licence
@@ -376,11 +384,14 @@ def export_gguf(model: ModelFile, path: str | Path) -> Path:
         (f"{family}.rope.dimension_count", _U32, config.head_dim),
         (f"{family}.vocab_size", _U32, config.vocabulary_size),
     ]
-    if config.rope_scaling:
+    if scaling:
         metadata += [
-            (f"{family}.rope.scaling.type", _STRING, "linear"),
-            (f"{family}.rope.scaling.factor", _F32, float(config.rope_scaling["factor"])),
+            (f"{family}.rope.scaling.type", _STRING, scaling["rope_type"]),
+            (f"{family}.rope.scaling.factor", _F32, float(scaling["factor"])),
         ]
+    if scaling and scaling["rope_type"] == "yarn":
+        original = scaling["original_max_position_embeddings"]
+        metadata.append((f"{family}.rope.scaling.original_context_length", _U32, original))
     metadata += _gguf_tokenizer(model.tokenizer, config.vocabulary_size)
     # The special ids come from the model's own description, as the importer reads them back: GGUF has room for one
     # end-of-sequence and one end-of-turn token.

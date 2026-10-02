@@ -148,7 +148,11 @@ multiple of 32 are quantised. The embedding stays float32, and the LM head is qu
     - `f / factor` when `wavelen > original / low`;
     - otherwise `(1 - s) * f / factor + s * f`, with `s = (original / wavelen - low) / (high - low)`.
     - Defaults: `low = 1`, `high = 4`, `original = 8192`.
-  - `longrope`: `f / short_factor[i]`.
+  - `longrope`: `f / short_factor[i]`, or `f / long_factor[i]` when `factor_set` is `long`.
+  - `yarn`: with `d = rotary_dim`, `c(r) = d * log(original / (r * 2π)) / (2 * log(theta))` (`2π` is the double
+    product `2 * π`), `low = c(beta_fast)` and `high = c(beta_slow)`, rounded down and up with `truncate`, then
+    `low = max(low, 0)`, `high = min(high, d - 1)`, and `high + 0.001` when the two are equal. With
+    `ramp = min(max((i - low) / (high - low), 0), 1)`, the frequency is `f / factor * ramp + f * (1 - ramp)`.
 - `rope(x[t, h, d], positions, inv_freq)`:
   - The angle is `position * inv_freq[i]`, in double.
   - With `c = cos(angle)` and `s = sin(angle)`, pair `(a, b)` becomes `(f32(a * c - b * s), f32(a * s + b * c))`.
@@ -238,8 +242,9 @@ The model file ([format](model-format.md)) gives a `TransformerConfig` and float
 made once at load time, as float32 multiplications:
 
 - Granite multiplies `attention.o.weight` and `mlp.down.weight` by `residual_multiplier`.
-- LongRoPE multiplies the rows of `attention.q`/`k` (weights and biases) that feed the rotated dimensions of each head
-  by `attention_factor`.
+- LongRoPE and YaRN multiply the rows of `attention.q`/`k` (weights and biases) that feed the rotated dimensions of
+  each head by `attention_factor`. A model with QK-norm multiplies the entries of `attention.q_norm`/`k_norm` that
+  feed the rotated dimensions instead (the norm comes after the projection).
 
 For new tokens at positions `start …`, all in float32 unless stated:
 

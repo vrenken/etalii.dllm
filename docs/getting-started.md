@@ -757,6 +757,19 @@ Fine-tuning, LoRA, DPO and distillation work for every model family the engine r
 Qwen: OLMo 2, Granite, Gemma 2, Gemma 3 and Phi-3/Phi-4-mini (with LongRoPE) too. As before, the same model, data
 and options give a byte-identical result on every machine. Details: [training](training.md#what-makes-it-reproducible).
 
+## 37. Longer context windows
+
+```bash
+dllm import hf:Qwen/Qwen2.5-0.5B-Instruct -o qwen2.5-0.5b-128k.dllm --context-length 131072
+dllm inspect qwen2.5-0.5b-128k.dllm
+```
+
+`--context-length` sets how many tokens a model can read and write. Going beyond the model's own window extends it
+with YaRN, the method Qwen publishes for its models, or, for Phi-3 and Phi-4-mini, with their LongRoPE long factors,
+so the 128k models run their whole advertised context. The extension is fixed in the model file, so every token
+gives the same bits no matter how long the conversation gets. Models that ship with YaRN in their config import as
+they are. Details: [model format](model-format.md#conversion-rules).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
@@ -765,8 +778,8 @@ and options give a byte-identical result on every machine. Details: [training](t
   same greedy answer; see `tests/test_reference_models.py`), and so is the embedding model Qwen3-Embedding-0.6B. Other Llama/Qwen2/Qwen3 models should work but are not
   checked. Mistral, Granite, Phi-3 and Gemma 2 are checked against `transformers` only on tiny synthetic models (their real
   checkpoints are gated or too large for a CI runner in float32). Fine-tuning is checked on tiny synthetic models
-  of every family, not on the real checkpoints; Phi-3/Phi-4-mini with LongRoPE run up to their
-  original context (4096 tokens) rather than the advertised 128k. If one misbehaves,
+  of every family, not on the real checkpoints. Phi-3/Phi-4-mini with LongRoPE run up to their original context
+  (4096 tokens) unless imported with `--context-length` (section 37). If one misbehaves,
   please open an issue with the `dllm inspect` output.
 - Speed: on a 4-core cloud VM, SmolLM2-135M reads a prompt at about 300 tokens per second and generates about 45
   tokens per second (about 57 with `--quantize q8_0`); Qwen2.5-0.5B is roughly three times slower. On an RTX 4080,
@@ -788,5 +801,5 @@ and options give a byte-identical result on every machine. Details: [training](t
 - MCP servers that ask the client for elicitation or roots are not supported, and image, audio or binary MCP
   content is refused.
 - Models with Unigram or WordPiece tokenizers, GGUF files with a SentencePiece vocabulary (convert from the
-  Hugging Face checkpoint instead), YaRN RoPE scaling or other architectures (including
+  Hugging Face checkpoint instead), dynamic NTK RoPE scaling or other architectures (including
   Qwen3's mixture-of-experts models) are refused at import; Phase 9 of the roadmap adds the mainstream ones.

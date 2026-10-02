@@ -403,7 +403,7 @@ def rope_inv_freq(
     head_dim: int, theta: float = 10000.0, *, rotary_dim: int | None = None, scaling: Mapping[str, Any] | None = None
 ) -> np.ndarray:
     """``exp(-(2i / rotary_dim) log theta)`` in double, then Hugging Face ``rope_scaling`` (linear, llama3,
-    longrope)."""
+    longrope with either factor set, yarn)."""
     dim = head_dim if rotary_dim is None else rotary_dim
     log_theta = float(log(float(theta)))
     freqs = [float(exp(-(2 * i / dim) * log_theta)) for i in range(dim // 2)]
@@ -430,7 +430,21 @@ def rope_inv_freq(
         freqs = scaled
     elif kind == "longrope":
         assert scaling is not None
-        freqs = [f / float(s) for f, s in zip(freqs, scaling["short_factor"], strict=True)]
+        factors = scaling["long_factor"] if scaling.get("factor_set") == "long" else scaling["short_factor"]
+        freqs = [f / float(s) for f, s in zip(freqs, factors, strict=True)]
+    elif kind == "yarn":
+        assert scaling is not None
+        factor = float(scaling["factor"])
+        original = float(scaling["original_max_position_embeddings"])
+        # The pair index at which a frequency turns `beta` times over the original context.
+        low = dim * float(log(original / (float(scaling.get("beta_fast", 32.0)) * 2 * math.pi))) / (2 * log_theta)
+        high = dim * float(log(original / (float(scaling.get("beta_slow", 1.0)) * 2 * math.pi))) / (2 * log_theta)
+        if scaling.get("truncate", True):
+            low, high = math.floor(low), math.ceil(high)
+        low, high = max(low, 0), min(high, dim - 1)
+        high = high + 0.001 if low == high else high
+        ramps = [min(max((i - low) / (high - low), 0.0), 1.0) for i in range(len(freqs))]
+        freqs = [f / factor * r + f * (1 - r) for f, r in zip(freqs, ramps, strict=True)]
     elif kind != "default":
         raise ValueError(f"unsupported rope scaling {kind!r}")
     return np.array(freqs, dtype=F64)
@@ -849,9 +863,12 @@ class ReferenceTransformer:
             for name in weights:
                 if name.endswith(("attention.o.weight", "mlp.down.weight")):
                     weights[name] = weights[name] * F32(config.residual_multiplier)
-        if config.rope_attention_factor != 1.0:  # LongRoPE: scale the q/k rows feeding the rotated dimensions
+        if config.rope_attention_factor != 1.0:  # LongRoPE/YaRN: scale what feeds the rotated q/k dimensions
+            scaled = ("attention.q.weight", "attention.q.bias", "attention.k.weight", "attention.k.bias")
+            if config.qk_norm:  # the norm comes after the projection, so its weights carry the factor
+                scaled = ("attention.q_norm.weight", "attention.k_norm.weight")
             for name in weights:
-                if name.endswith(("attention.q.weight", "attention.q.bias", "attention.k.weight", "attention.k.bias")):
+                if name.endswith(scaled):
                     rows = weights[name].reshape(-1, config.head_dim, *weights[name].shape[1:]).copy()
                     rows[:, : config.rotary_dimension] *= F32(config.rope_attention_factor)
                     weights[name] = rows.reshape(weights[name].shape)

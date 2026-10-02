@@ -28,6 +28,16 @@ from etalii_dllm.generation import OVERFLOWS
 from etalii_dllm.sampling import SamplingOptions
 
 
+def _rope_note(scaling: dict[str, Any] | None) -> str:
+    if not scaling:
+        return ""
+    if scaling["rope_type"] == "longrope":
+        return f" (LongRoPE, {scaling.get('factor_set', 'short')} factors)"
+    if scaling["rope_type"] == "yarn":
+        return f" (YaRN, factor {scaling['factor']:g})"
+    return f" ({scaling['rope_type']} RoPE scaling)"
+
+
 def _import(args: argparse.Namespace) -> int:
     from etalii_dllm.importing import ModelImportError, import_model
     from etalii_dllm.importing.gguf import GgufError
@@ -45,6 +55,7 @@ def _import(args: argparse.Namespace) -> int:
             accept_licence=args.accept_licence,
             cache=args.cache,
             base=args.base,
+            context_length=args.context_length,
         )
     except (ModelImportError, GgufError, SafetensorsError, OSError) as error:
         print(f"dllm import: {error}", file=sys.stderr)
@@ -52,6 +63,7 @@ def _import(args: argparse.Namespace) -> int:
     config = result.config
     print(f"wrote:              {result.path}")
     print(f"architecture:       {config.family}, {config.layers} layers, hidden {config.hidden_size}")
+    print(f"context:            {config.context_length} tokens{_rope_note(config.rope_scaling)}")
     print(f"licence:            {result.licence['spdx']}")
     print(f"system_fingerprint: {result.fingerprint}")
     print(f"file_sha256:        {file_sha256(result.path)}")
@@ -429,6 +441,11 @@ def main(argv: list[str] | None = None) -> int:
     importer.add_argument("--accept-licence", action="store_true", help="import a model that is not Apache/MIT")
     importer.add_argument("--cache", help="download cache for hf: sources")
     importer.add_argument("--base", help="the model.dllm to merge a PEFT LoRA adapter source into")
+    importer.add_argument(
+        "--context-length",
+        type=int,
+        help="context window in tokens; longer than the model's own uses YaRN, or LongRoPE's long factors",
+    )
 
     inspect = commands.add_parser("inspect", help="show a model.dllm file's architecture, source and licence")
     inspect.add_argument("path")

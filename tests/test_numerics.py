@@ -156,8 +156,8 @@ def test_rope_inv_freq_rejects_bad_rotary_dims_and_scalings():
     for head_dim, rotary_dim in ((8, 0), (8, 3), (8, 10), (7, None)):
         with pytest.raises(ValueError, match="rotary_dim must be even, positive and at most head_dim"):
             numerics.rope_inv_freq(head_dim, rotary_dim=rotary_dim)
-    with pytest.raises(ValueError, match="unsupported rope scaling 'yarn'"):
-        numerics.rope_inv_freq(8, scaling={"rope_type": "yarn", "factor": 2.0})
+    with pytest.raises(ValueError, match="unsupported rope scaling 'dynamic'"):
+        numerics.rope_inv_freq(8, scaling={"rope_type": "dynamic", "factor": 2.0})
     freqs = numerics.rope_inv_freq(16, 10000.0, rotary_dim=8)
     np.testing.assert_allclose(freqs, 10000.0 ** (-np.arange(0, 8, 2) / 8), rtol=1e-14)
     assert np.array_equal(numerics.rope_inv_freq(8, scaling={"rope_type": "default"}), numerics.rope_inv_freq(8))
@@ -196,10 +196,15 @@ def test_config_rejects_bad_rotary_dims_and_longrope_with_qk_norm():
     longrope = {"rope_type": "longrope", "short_factor": [1.0] * 4, "attention_factor": 2.0}
     with pytest.raises(ValueError, match="longrope short_factor needs 2 values"):
         replace(base, rotary_dim=4, rope_scaling=longrope)
+    with pytest.raises(ValueError, match="longrope long_factor needs 4 values"):
+        replace(base, rope_scaling={**longrope, "factor_set": "long"})
+    with pytest.raises(ValueError, match="attention factor together with unit-offset QK-norm"):
+        replace(base, rope_scaling=longrope, qk_norm=True, norm_unit_offset=True)
+    # With QK-norm the factor goes into the norm weights' rotated entries instead of the projections.
     config = replace(base, rope_scaling=longrope, qk_norm=True)
     tensors = {name: np.ones(shape, dtype=np.float32) for name, shape in config.tensor_shapes().items()}
-    with pytest.raises(ValueError, match="LongRoPE attention factor together with QK-norm"):
-        Transformer(config, tensors)
+    folded = Transformer(config, tensors)._w
+    assert folded["layers.0.attention.q_norm.weight"].numpy().tolist() == [2.0] * 8
 
 
 def test_unknown_devices_and_approximations_are_rejected():

@@ -225,7 +225,7 @@ def test_export_errors(tmp_path, capsys):
     with pytest.raises(exporting.ExportError, match="cannot be described exactly"):
         exporting.hf_config_json(dataclasses.replace(config, qk_norm=True))
     with pytest.raises(exporting.ExportError, match="cannot be described"):
-        exporting.hf_config_json(dataclasses.replace(config, rope_scaling={"rope_type": "yarn", "factor": 2.0}))
+        exporting.hf_config_json(dataclasses.replace(config, rope_scaling={"rope_type": "dynamic", "factor": 2.0}))
     with pytest.raises(exporting.ExportError, match="unknown export format"):
         exporting.export_model(path, tmp_path / "x", "onnx")
     with pytest.raises(exporting.ExportError, match="only byte-level BPE"):

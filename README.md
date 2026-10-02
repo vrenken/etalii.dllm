@@ -198,6 +198,7 @@ module map), with Mermaid diagrams.
 | 38. Exact length and stop controls ✅ | ✅ `min_tokens` and `ignore_eos` (#252); ✅ `stop_token_ids` and `include_stop_str_in_output` (#253); ✅ in receipts, the specification and the reference implementation (#254); ✅ docs, tests and golden values (#255). See [length and stop controls](docs/api.md#length-and-stop-controls) |
 | 39. Deterministic MCP sampling, prompts and resources ✅ | ✅ MCP sampling answered exactly by the engine (#257); ✅ MCP prompts in the host and `dllm chat` (#258); ✅ MCP resources in the host and `dllm chat` (#259); ✅ docs and tests (#260). See [MCP](docs/mcp.md#sampling-prompts-and-resources) |
 | 40. Reproducible fine-tuning of every model family ✅ | ✅ Fine-tuning OLMo 2 and Granite (#262); ✅ Gemma 2 and Gemma 3, with backward kernels for the tanh GELU, soft-caps and unit-offset norms (#263); ✅ Phi-3/Phi-4-mini with LongRoPE, and LoRA, DPO and distillation for every family (#264); ✅ docs, tests and golden values (#265). See [fine-tuning](docs/training.md#what-makes-it-reproducible) |
+| 41. Exact long-context RoPE scaling ✅ | ✅ YaRN RoPE scaling from Hugging Face and GGUF models (#267); ✅ `dllm import --context-length` with YaRN or LongRoPE's long factors, fixed per model file (#268); ✅ in the specification, the reference implementation and fine-tuning (#269); ✅ docs, tests and golden values (#270). See [model format](docs/model-format.md#conversion-rules) |
 
 ## Working with Claude Code
 
