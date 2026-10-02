@@ -14,6 +14,7 @@ what the CLI and the MCP server use, so all front ends give the same answer for 
 | `POST /v1/messages/count_tokens` | Anthropic | Input tokens of a request, tools included |
 | `POST /api/chat`, `POST /api/generate` | Ollama | Streaming (NDJSON, the default), tools, `format` (JSON or a schema), logprobs, `raw` prompts. See [Ollama API](#ollama-api) |
 | `POST /api/embed`, `POST /api/embeddings` | Ollama | Same vectors as `/v1/embeddings` |
+| `POST /v1/rerank`, `POST /rerank` | Cohere/Jina rerank | Documents ranked for a query by the model as a yes/no judge ([reranking](retrieval.md#reranking)) |
 | `GET /api/tags`, `POST /api/show`, `GET /api/ps`, `GET /api/version` | Ollama | The served model, its template and architecture |
 | `POST /v1/receipts/verify` | Extension | Re-runs a [generation receipt](receipts.md) and returns `{"ok", "reasons", "notes", "receipt"}`; a list is a [receipt chain](agents.md#receipt-chains) (`{"ok", "reasons", "notes", "turns"}`) |
 | `GET /v1/audit` | Extension | What `--audit-every` found, the response cache's counters and how many requests were coalesced. See [serving at scale](serving.md) |
@@ -355,6 +356,8 @@ embedding. The extension field `input_type` names one of the model's prompts (`"
 
 A server started with `--index` grounds every chat request in the passages its document index finds for the last
 user message, and its `system_fingerprint` includes the index ([retrieval](retrieval.md#grounded-chat)).
+`--index-mode` chooses dense, lexical (BM25) or hybrid search, and `--rerank-model` reranks the passages first.
+`/v1/rerank` ranks documents for a query with the served model ([reranking](retrieval.md#reranking)).
 
 ## Examples
 

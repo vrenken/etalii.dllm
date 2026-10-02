@@ -211,3 +211,11 @@ DPO_FINETUNE_FINGERPRINT = {
     "llama": "69d5ef4720169229deed88b5e753d99b2dd145b6fef9be5fc795ae35e8095d7d",
     "qwen3": "06bd4f073a3d8530c1fbbb47002f00e2def08b56f36d158fe0b1b9e1579591ee",
 }
+
+# Phase 26. Fingerprints (SHA-256 of [[chunk, score as a hex double], ...]) of tests/test_hybrid_search.py's lexical
+# and hybrid rankings of "the capital cat", and of the reranked hybrid passages for "Where is Paris?".
+SEARCH_FINGERPRINTS = {
+    "lexical": "3b519ea98f501a45a49efaf7e0bfaf4e69275dab26b4d914fb6f9391ca908695",
+    "hybrid": "6f385ca748bb98c871344bc3d97cd143bc4abc68db89b41402bf2a153bdc866b",
+    "reranked": "b99dea3a6c24f9ca202b15d3115c6b02cd5788cd67d1608605b10e77348cf567",
+}
