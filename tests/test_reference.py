@@ -135,6 +135,10 @@ def test_attention_is_the_kernels_bits(options):
         {"rope_type": "llama3", "factor": 8.0, "low_freq_factor": 1.0, "high_freq_factor": 4.0,
          "original_max_position_embeddings": 16},
         {"type": "longrope", "short_factor": [1.0, 2.0, 3.0, 4.0]},
+        {"type": "longrope", "short_factor": [1.0] * 4, "long_factor": [1.5, 2.0, 3.0, 4.0], "factor_set": "long"},
+        {"rope_type": "yarn", "factor": 4.0, "original_max_position_embeddings": 64},
+        {"rope_type": "yarn", "factor": 3.0, "original_max_position_embeddings": 4096, "beta_fast": 8.0,
+         "beta_slow": 2.0, "truncate": False},
     ],
 )  # fmt: skip
 def test_rope_is_the_kernels_bits(scaling):
@@ -165,6 +169,8 @@ BASE = {
     "rope_theta": 10000.0,
     "tie_word_embeddings": True,
 }
+YARN = {"rope_type": "yarn", "factor": 4.0, "original_max_position_embeddings": 32, "beta_fast": 32.0,
+        "beta_slow": 1.0, "truncate": True, "attention_factor": 1.1386294361119891}  # fmt: skip
 GEMMA = {"norm_placement": "sandwich", "norm_unit_offset": True, "activation": "gelu_tanh"}
 VARIANTS = {
     "llama": {"rope_scaling": {"rope_type": "llama3", "factor": 4.0, "original_max_position_embeddings": 16}},
@@ -181,6 +187,15 @@ VARIANTS = {
                "rope_scaling": {"rope_type": "linear", "factor": 2.0}},
     "gemma2": {"family": "gemma2", **GEMMA, "sliding_window": 3, "sliding_window_layers": (0,),
                "attention_softcap": 0.5, "logits_softcap": 2.0, "attention_multiplier": 0.3},
+    # Phase 41: YaRN (its attention factor through the QK-norm weights) and LongRoPE's long factors.
+    "qwen3-yarn": {"family": "qwen3", "qk_norm": True, "rope_scaling": YARN},
+    "olmo2-yarn": {"family": "olmo2", "norm_placement": "post", "qk_norm": True, "qk_norm_scope": "all",
+                   "rope_scaling": YARN},
+    "llama-yarn": {"rope_scaling": YARN},
+    "phi3-long": {"family": "phi3", "rotary_dim": 8, "tie_word_embeddings": False,
+                  "rope_scaling": {"rope_type": "longrope", "short_factor": [4.0, 1.0, 2.0, 1.5],
+                                   "long_factor": [8.0, 2.0, 3.0, 1.0], "factor_set": "long",
+                                   "attention_factor": 1.2}},
 }  # fmt: skip
 
 

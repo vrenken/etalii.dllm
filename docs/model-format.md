@@ -76,7 +76,7 @@ original checkpoint import to the same bytes and the same fingerprint.
   Running quantised (`--quantize q8_0` or `q4_0`) requantises the float32 tensors at load time; the file itself
   stays float32, so one file serves every precision.
 - **Fail loudly.** Unknown tensors, unsupported families (anything but Gemma 2, Gemma 3 text, Granite, Llama, Mistral, OLMo 2, Phi-3, Qwen2 and Qwen3),
-  activations other than SiLU and GELU (tanh), MLP biases and RoPE scaling other than `linear`/`llama3`/`longrope` stop the import. Sliding-window
+  activations other than SiLU and GELU (tanh), MLP biases and RoPE scaling other than `linear`/`llama3`/`longrope`/`yarn` stop the import. Sliding-window
   attention comes from `sliding_window` (Mistral: every layer; Qwen2/Qwen3 with `use_sliding_window`: the layers from
   `max_window_layers` on; a `layer_types` list names them explicitly); a window at least as long as the context is
   dropped.
@@ -99,7 +99,21 @@ original checkpoint import to the same bytes and the same fingerprint.
   context, which would make earlier tokens' output depend on the sequence length; dllm always uses the short factors
   and caps `context_length` at the original context, so it matches transformers everywhere it runs. The attention
   factor scales the rotated query and key dimensions; the decoder folds it into the rows of the q/k projections when
-  the model loads.
+  the model loads. `dllm import --context-length N` with `N` above the original context (and at most
+  `max_position_embeddings`) stores `"factor_set": "long"`: then every token uses the long factors, so a Phi-3 or
+  Phi-4-mini 128k model runs its whole advertised context and a token's output still never depends on how long the
+  sequence grows.
+- **YaRN.** `rope_scaling` of type `yarn` (Hugging Face; GGUF `rope.scaling.type` `yarn` with `rope.scaling.factor`
+  and `rope.scaling.original_context_length`) is stored with `factor`, `original_max_position_embeddings`,
+  `beta_fast` (default 32), `beta_slow` (default 1), `truncate` (default true) and `attention_factor` (from `mscale`
+  and `mscale_all_dim` when both are given, else `0.1 ln(factor) + 1`, as transformers computes it). The frequencies
+  are in the [specification](specification.md); the context is `factor` times the original context (or
+  `max_position_embeddings` when longer). Like LongRoPE's, the attention factor is folded into the q/k rows, or into
+  the QK-norm weights for models with QK-norm (Qwen3, OLMo 2).
+- **Context length.** `dllm import --context-length N` sets `context_length`. A shorter window just lowers the limit.
+  A longer one than the model's own uses LongRoPE's long factors (above), or else adds YaRN with
+  `factor = N / context_length` and the old context as `original_max_position_embeddings` (the recipe Qwen publishes
+  for Qwen2.5 and Qwen3). A model that already scales its RoPE another way cannot be stretched further.
 - **Licences.** Apache-2.0 and MIT import directly. Anything else needs `--accept-licence` and is recorded as not
   redistributable. A source with no stated licence needs `--licence`; a licence with no text in the source and no
   standard text bundled needs `--licence-file`.

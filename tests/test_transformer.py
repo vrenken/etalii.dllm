@@ -17,6 +17,21 @@ from etalii_dllm.transformer import Transformer
 PROMPT = [1, 17, 42, 5, 63, 0, 9, 9, 30]
 
 
+def yarn_inv_freq(inv_freq: np.ndarray, dim: int, theta: float, scaling: dict) -> np.ndarray:
+    """transformers' ``_compute_yarn_parameters`` in float64 (the yardstick for YaRN frequencies)."""
+
+    def correction(rotations):
+        return dim * np.log(scaling["original_max_position_embeddings"] / (rotations * 2 * np.pi)) / (2 * np.log(theta))
+
+    low, high = correction(scaling.get("beta_fast", 32)), correction(scaling.get("beta_slow", 1))
+    if scaling.get("truncate", True):
+        low, high = np.floor(low), np.ceil(high)
+    low, high = max(low, 0), min(high, dim - 1)
+    high = high + 0.001 if low == high else high
+    extrapolation = 1 - np.clip((np.arange(dim // 2) - low) / (high - low), 0, 1)
+    return inv_freq / scaling["factor"] * (1 - extrapolation) + inv_freq * extrapolation
+
+
 def reference_logits(
     config: TransformerConfig, w: dict[str, np.ndarray], tokens: list[int], *, every_position: bool = False
 ) -> np.ndarray:
@@ -29,9 +44,11 @@ def reference_logits(
     def tables(theta, scaling):
         inv_freq = theta ** (-np.arange(0, rd, 2, dtype=np.float64) / rd)
         if scaling and scaling["rope_type"] == "longrope":
-            inv_freq = inv_freq / np.array(scaling["short_factor"])
+            inv_freq = inv_freq / np.array(scaling["long_factor" if scaling.get("factor_set") else "short_factor"])
         elif scaling and scaling["rope_type"] == "linear":
             inv_freq = inv_freq / scaling["factor"]
+        elif scaling and scaling["rope_type"] == "yarn":
+            inv_freq = yarn_inv_freq(inv_freq, rd, theta, scaling)
         angles = np.arange(n, dtype=np.float64)[:, None] * inv_freq[None, :]
         factor = config.rope_attention_factor
         angles = np.concatenate([angles, angles], 1)

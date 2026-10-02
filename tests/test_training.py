@@ -464,7 +464,7 @@ def test_cli_finetune_and_resume(tmp_path, capsys, monkeypatch):
 
 
 def test_layouts_without_a_backward_pass_are_refused():
-    """Interleaved rotary halves (imports convert them) and a LongRoPE factor with QK-norm have no gradient code."""
+    """Interleaved rotary halves (imports convert them) have no gradient code."""
     import dataclasses
 
     from etalii_dllm.importing.importer import hf_config
@@ -472,6 +472,3 @@ def test_layouts_without_a_backward_pass_are_refused():
     config = hf_config(tiny_config("llama"))
     with pytest.raises(ValueError, match="rotary layout"):
         DecoderGradients(dataclasses.replace(config, rope_interleaved=True))
-    phi3 = hf_config(tiny_config("phi3"))
-    with pytest.raises(ValueError, match="LongRoPE"):
-        DecoderGradients(dataclasses.replace(phi3, qk_norm=True))

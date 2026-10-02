@@ -745,7 +745,7 @@ def test_built_gguf_imports_like_the_checkpoint(tmp_path):
         (("llama.feed_forward_length",), {}, "GGUF metadata llama.feed_forward_length is missing"),
         (("llama.attention.layer_norm_rms_epsilon",), {}, "llama.attention.layer_norm_rms_epsilon is missing"),
         ((), {"llama.rope.dimension_count": 2}, "partial rotary embeddings are not supported"),
-        ((), {"llama.rope.scaling.type": "yarn"}, "GGUF RoPE scaling 'yarn' is not supported"),
+        ((), {"llama.rope.scaling.type": "dynamic"}, "GGUF RoPE scaling 'dynamic' is not supported"),
         ((), {"llama.rope.scaling.type": "linear"}, "GGUF metadata llama.rope.scaling.factor is missing"),
     ],
 )

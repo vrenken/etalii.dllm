@@ -109,6 +109,9 @@ def cases() -> list[tuple[str, str, dict[str, Any], Arrays]]:
         ("llama3", {"rope_type": "llama3", "factor": 8.0, "low_freq_factor": 1.0, "high_freq_factor": 4.0,
                     "original_max_position_embeddings": 16}),
         ("longrope", {"rope_type": "longrope", "short_factor": [1.0, 2.0, 3.0, 4.0]}),
+        ("longrope-long", {"rope_type": "longrope", "short_factor": [1.0] * 4, "long_factor": [1.5, 2.0, 3.0, 4.0],
+                           "factor_set": "long"}),
+        ("yarn", {"rope_type": "yarn", "factor": 4.0, "original_max_position_embeddings": 64}),
     ]  # fmt: skip
     for name, scaling in scalings:
         params = {"head_dim": 16, "theta": 10000.0, "rotary_dim": 8, "scaling": scaling}

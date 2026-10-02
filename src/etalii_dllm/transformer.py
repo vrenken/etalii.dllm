@@ -191,10 +191,18 @@ class KVCache:
         self.tokens = list(tokens)
 
 
+def rope_scaled_tensors(config: TransformerConfig) -> tuple[str, ...]:
+    """The tensors (by name suffix) that carry the RoPE attention factor: the QK-norm weights when the model has
+    QK-norm (the norm comes after the projection), else the query and key projections."""
+    if config.qk_norm:
+        return ("attention.q_norm.weight", "attention.k_norm.weight")
+    return ("attention.q.weight", "attention.q.bias", "attention.k.weight", "attention.k.bias")
+
+
 def _rope_scaled(name: str, tensor: Tensor, config: TransformerConfig) -> Tensor:
-    """``tensor`` with the rows feeding the rotated dimensions of each query or key head multiplied (elementwise,
-    float32) by the LongRoPE attention factor; other tensors unchanged."""
-    if not name.endswith(("attention.q.weight", "attention.q.bias", "attention.k.weight", "attention.k.bias")):
+    """``tensor`` with the entries feeding the rotated dimensions of each query or key head multiplied (elementwise,
+    float32) by the RoPE attention factor (:func:`rope_scaled_tensors`); other tensors unchanged."""
+    if not name.endswith(rope_scaled_tensors(config)):
         return tensor
     values = tensor.numpy()
     heads = values.shape[0] // config.head_dim
@@ -206,8 +214,9 @@ def _rope_scaled(name: str, tensor: Tensor, config: TransformerConfig) -> Tensor
 def fold_scales(config: TransformerConfig, weights: Mapping[str, Tensor]) -> dict[str, Tensor]:
     """``weights`` with the architecture's constant scales folded in, elementwise in float32: Granite's residual
     multiplier into the attention and MLP output projections, and the LongRoPE attention factor into the rows of the
-    query and key projections that feed the rotated dimensions. Both are linear maps, so folding them keeps the
-    decoder on one code path (CPU, GPU and the training forward pass)."""
+    query and key projections that feed the rotated dimensions (the LongRoPE or YaRN attention factor; for models with
+    QK-norm, the entries of the norm weights instead). Both are linear maps, so folding them keeps the decoder on one
+    code path (CPU, GPU and the training forward pass)."""
     folded = dict(weights)
     if config.residual_multiplier != 1.0:
         # Granite scales the outputs of attention and the MLP before the residual add; scaling the two output
@@ -219,10 +228,9 @@ def fold_scales(config: TransformerConfig, weights: Mapping[str, Tensor]) -> dic
             for name, tensor in folded.items()
         }
     if config.rope_attention_factor != 1.0:
-        if config.qk_norm:
-            raise ValueError("a LongRoPE attention factor together with QK-norm is not supported")
-        # LongRoPE scales the rotated query and key dimensions by its attention factor. Rotation is linear, so
-        # scaling the rows of the q/k projections that produce those dimensions is the same map.
+        # LongRoPE and YaRN scale the rotated query and key dimensions by an attention factor. Rotation is linear,
+        # so scaling the rows of the q/k projections (or the QK-norm weights) that produce those dimensions is the
+        # same map.
         folded = {name: _rope_scaled(name, tensor, config) for name, tensor in folded.items()}
     return folded
 

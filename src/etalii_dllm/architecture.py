@@ -105,10 +105,22 @@ class TransformerConfig:
                 raise ValueError(f"{name} must be positive")
         if self.rotary_dim is not None and not (0 < self.rotary_dim <= self.head_dim and self.rotary_dim % 2 == 0):
             raise ValueError("rotary_dim must be even, positive and at most head_dim")
-        if self.rope_scaling and self.rope_scaling.get("rope_type") == "longrope":
+        kind = self.rope_scaling.get("rope_type") if self.rope_scaling else None
+        if kind == "longrope":
             pairs = self.rotary_dimension // 2
-            if len(self.rope_scaling.get("short_factor", ())) != pairs:
-                raise ValueError(f"longrope short_factor needs {pairs} values")
+            names = (
+                ("short_factor", "long_factor") if self.rope_scaling.get("factor_set") == "long" else ("short_factor",)
+            )  # type: ignore[union-attr]
+            for name in names:
+                if len(self.rope_scaling.get(name, ())) != pairs:  # type: ignore[union-attr]
+                    raise ValueError(f"longrope {name} needs {pairs} values")
+        if kind == "yarn":
+            factor = self.rope_scaling.get("factor", 0)  # type: ignore[union-attr]
+            original = self.rope_scaling.get("original_max_position_embeddings", 0)  # type: ignore[union-attr]
+            if not factor > 0 or not original > 0:
+                raise ValueError("yarn needs a positive factor and original_max_position_embeddings")
+        if self.rope_attention_factor != 1.0 and self.qk_norm and self.norm_unit_offset:
+            raise ValueError("a RoPE attention factor together with unit-offset QK-norm is not supported")
 
     @property
     def attention_scale(self) -> float:
@@ -132,8 +144,9 @@ class TransformerConfig:
 
     @property
     def rope_attention_factor(self) -> float:
-        """LongRoPE's ``attention_factor``, which scales the rotated query and key dimensions (1 otherwise)."""
-        if not self.rope_scaling or self.rope_scaling.get("rope_type") != "longrope":
+        """The ``attention_factor`` of LongRoPE or YaRN, which scales the rotated query and key dimensions (1
+        otherwise)."""
+        if not self.rope_scaling or self.rope_scaling.get("rope_type") not in ("longrope", "yarn"):
             return 1.0
         return float(self.rope_scaling.get("attention_factor", 1.0))
 

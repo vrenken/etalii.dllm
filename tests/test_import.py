@@ -234,7 +234,7 @@ def test_missing_licence_is_refused(tmp_path):
     [
         ({"model_type": "gpt2"}, "not supported"),
         ({"hidden_act": "gelu"}, "activation"),
-        ({"rope_scaling": {"rope_type": "yarn", "factor": 4.0}}, "yarn"),
+        ({"rope_scaling": {"rope_type": "dynamic", "factor": 4.0}}, "dynamic"),
         ({"mlp_bias": True}, "MLP biases"),
     ],
 )

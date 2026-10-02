@@ -40,7 +40,7 @@ from etalii_dllm.numerics import (
     softcap_backward,
 )
 from etalii_dllm.tensor import Tensor
-from etalii_dllm.transformer import fold_scales
+from etalii_dllm.transformer import fold_scales, rope_scaled_tensors
 
 
 class DecoderGradients:
@@ -50,8 +50,6 @@ class DecoderGradients:
     def __init__(self, config: TransformerConfig) -> None:
         if config.rope_interleaved:
             raise ValueError("training expects the Hugging Face rotary layout (imports convert to it)")
-        if config.rope_attention_factor != 1.0 and config.qk_norm:
-            raise ValueError("a LongRoPE attention factor together with QK-norm is not supported")
         self.config = config
         self.inv_freq = rope_inv_freq(
             config.head_dim, config.rope_theta, rotary_dim=config.rotary_dimension, scaling=config.rope_scaling
@@ -267,7 +265,7 @@ class DecoderGradients:
                     grads[name] = grads[name] * residual
         if config.rope_attention_factor != 1.0:
             for name, values in grads.items():
-                if name.endswith(("attention.q.weight", "attention.q.bias", "attention.k.weight", "attention.k.bias")):
+                if name.endswith(rope_scaled_tensors(config)):
                     rows = values.reshape(-1, config.head_dim, *values.shape[1:]).copy()
                     rows[:, : config.rotary_dimension] *= np.float32(config.rope_attention_factor)
                     grads[name] = rows.reshape(values.shape)

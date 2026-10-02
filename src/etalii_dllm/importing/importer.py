@@ -131,6 +131,8 @@ def _rope_from_hf(config: dict[str, Any]) -> tuple[float, dict[str, Any] | None]
             scaling = {"rope_type": kind, **scaling}
         elif kind == "longrope":
             scaling = _longrope_from_hf(config, scaling)
+        elif kind == "yarn":
+            scaling = _yarn_from_hf(config, scaling)
         else:
             raise ModelImportError(f"RoPE scaling {kind!r} is not supported yet")
     return float(theta), scaling or None
@@ -158,6 +160,91 @@ def _longrope_from_hf(config: dict[str, Any], scaling: dict[str, Any]) -> dict[s
     }
 
 
+def _yarn_mscale(scale: float, mscale: float = 1.0) -> float:
+    return 1.0 if scale <= 1.0 else 0.1 * mscale * log(scale) + 1.0
+
+
+def yarn_scaling(
+    factor: float,
+    original: int,
+    *,
+    beta_fast: float = 32.0,
+    beta_slow: float = 1.0,
+    truncate: bool = True,
+    attention_factor: float | None = None,
+) -> dict[str, Any]:
+    """A YaRN ``rope_scaling`` that stretches a context of ``original`` tokens ``factor`` times. The attention factor
+    defaults to transformers' ``0.1 ln(factor) + 1``, in dllm's portable ``log``."""
+    if not factor > 0 or original < 1:
+        raise ModelImportError("YaRN needs a positive factor and original_max_position_embeddings")
+    return {
+        "rope_type": "yarn",
+        "factor": float(factor),
+        "original_max_position_embeddings": int(original),
+        "beta_fast": float(beta_fast),
+        "beta_slow": float(beta_slow),
+        "truncate": bool(truncate),
+        "attention_factor": float(_yarn_mscale(float(factor)) if attention_factor is None else attention_factor),
+    }
+
+
+def _yarn_from_hf(config: dict[str, Any], scaling: dict[str, Any]) -> dict[str, Any]:
+    """YaRN with its attention factor worked out as transformers does (from ``mscale`` and ``mscale_all_dim`` when
+    both are set, else ``0.1 ln(factor) + 1``)."""
+    original = scaling.get("original_max_position_embeddings") or config.get("max_position_embeddings")
+    if "factor" not in scaling or original is None:
+        raise ModelImportError("YaRN needs factor and original_max_position_embeddings")
+    factor = float(scaling["factor"])
+    attention = scaling.get("attention_factor")
+    mscale, mscale_all_dim = scaling.get("mscale"), scaling.get("mscale_all_dim")
+    if attention is None and mscale and mscale_all_dim:
+        attention = _yarn_mscale(factor, float(mscale)) / _yarn_mscale(factor, float(mscale_all_dim))
+    return yarn_scaling(
+        factor,
+        int(original),
+        beta_fast=float(scaling.get("beta_fast") or 32.0),
+        beta_slow=float(scaling.get("beta_slow") or 1.0),
+        truncate=bool(scaling.get("truncate", True)),
+        attention_factor=None if attention is None else float(attention),
+    )
+
+
+def _extend_context(
+    scaling: dict[str, Any] | None, context: int, length: int, limit: int | None
+) -> tuple[dict[str, Any] | None, int]:
+    """``(scaling, context)`` for a window of ``length`` tokens instead of ``context``: a longer one is reached with
+    YaRN (factor = ``length / context``) or, for LongRoPE, with its long factors (up to ``limit``, the longest context
+    the model was trained for). The frequencies are fixed in the model file, so a token's output never depends on
+    how long its sequence grows. A shorter window just lowers the limit."""
+    if length < 1:
+        raise ModelImportError("the context length must be positive")
+    kind = scaling["rope_type"] if scaling else None
+    if kind == "longrope":
+        assert scaling is not None
+        scaling = {k: v for k, v in scaling.items() if k != "factor_set"}
+        if length > scaling["original_max_position_embeddings"]:
+            if limit is not None and length > limit:
+                raise ModelImportError(f"this LongRoPE model was trained for at most {limit} tokens of context")
+            scaling["factor_set"] = "long"
+    elif length > context:
+        if scaling is not None:
+            raise ModelImportError(
+                f"this model already scales its RoPE ({kind}); its context is at most {context} tokens"
+            )
+        scaling = yarn_scaling(length / context, context)
+    return scaling, length
+
+
+def with_context_length(config: TransformerConfig, length: int, limit: int | None = None) -> TransformerConfig:
+    """``config`` with a context window of ``length`` tokens (see ``_extend_context``); ``dllm import
+    --context-length`` for GGUF sources."""
+    scaling, context = _extend_context(config.rope_scaling, config.context_length, length, limit)
+    try:
+        return dataclasses.replace(config, context_length=context, rope_scaling=scaling)
+    except ValueError as error:
+        raise ModelImportError(str(error)) from error
+
+
 def _rotary_dim(config: dict[str, Any], head_dim: int) -> int | None:
     parameters = config.get("rope_parameters")
     factor = config.get("partial_rotary_factor")
@@ -168,9 +255,12 @@ def _rotary_dim(config: dict[str, Any], head_dim: int) -> int | None:
     return int(head_dim * float(factor))
 
 
-def hf_config(config: dict[str, Any], generation: dict[str, Any] | None = None) -> TransformerConfig:
+def hf_config(
+    config: dict[str, Any], generation: dict[str, Any] | None = None, *, context_length: int | None = None
+) -> TransformerConfig:
     """Maps a Hugging Face ``config.json`` (Gemma 2, Gemma 3, Granite, Llama, Mistral, OLMo 2, Phi-3, Qwen2 or
-    Qwen3) to our description."""
+    Qwen3) to our description, with a context window of ``context_length`` tokens when given
+    (:func:`with_context_length`)."""
     model_type = config.get("model_type")
     family = _HF_MODEL_TYPES.get(model_type)
     if family is None:
@@ -191,11 +281,17 @@ def hf_config(config: dict[str, Any], generation: dict[str, Any] | None = None) 
     local_theta = None
     if family == "gemma3":
         theta, scaling, local_theta = _gemma3_rope_from_hf(config)
-    context = int(config.get("max_position_embeddings", 2048))
+    trained = int(config.get("max_position_embeddings", 2048))
+    context = trained
     if scaling and scaling["rope_type"] == "longrope":
         # transformers switches to the long factors once a sequence outgrows the original context, which would make
-        # a token's output depend on how long the sequence gets; dllm keeps the short factors and that context.
+        # a token's output depend on how long the sequence gets; dllm keeps the short factors and that context
+        # unless the import asks for a longer one (then the long factors, for every token).
         context = min(context, scaling["original_max_position_embeddings"])
+    if scaling and scaling["rope_type"] == "yarn":  # YaRN stretches the original context factor times
+        context = max(context, int(scaling["factor"] * scaling["original_max_position_embeddings"]))
+    if context_length is not None:
+        scaling, context = _extend_context(scaling, context, context_length, trained)
     if window is not None and window >= context:  # the window never binds
         window, window_layers = None, None
     eos = _ids(config.get("eos_token_id"))
@@ -424,12 +520,12 @@ def _embedding_settings(directory: Path) -> dict[str, Any] | None:
     }
 
 
-def _convert_huggingface(directory: Path) -> _Converted:
+def _convert_huggingface(directory: Path, context_length: int | None = None) -> _Converted:
     config_path = directory / "config.json"
     if not config_path.exists():
         raise ModelImportError(f"{directory}: no config.json")
     raw_config = _read_json(config_path)
-    config = hf_config(raw_config, _read_json(directory / "generation_config.json"))
+    config = hf_config(raw_config, _read_json(directory / "generation_config.json"), context_length=context_length)
     pooling = _embedding_settings(directory)
     checkpoint = open_checkpoint(directory)
     if pooling is not None and "model.embed_tokens.weight" not in checkpoint:
@@ -560,6 +656,8 @@ def gguf_config(gguf: GgufFile) -> TransformerConfig:
         scaling = None
     elif scaling_type == "linear":
         scaling = {"rope_type": "linear", "factor": float(key("rope.scaling.factor"))}
+    elif scaling_type == "yarn":
+        scaling = yarn_scaling(float(key("rope.scaling.factor")), int(key("rope.scaling.original_context_length")))
     else:
         raise ModelImportError(f"GGUF RoPE scaling {scaling_type!r} is not supported yet")
     vocabulary = metadata.get(f"{family}.vocab_size")
@@ -591,9 +689,11 @@ def gguf_config(gguf: GgufFile) -> TransformerConfig:
     )
 
 
-def _convert_gguf(path: Path) -> _Converted:
+def _convert_gguf(path: Path, context_length: int | None = None) -> _Converted:
     gguf = GgufFile(path)
     config = gguf_config(gguf)
+    if context_length is not None:
+        config = with_context_length(config, context_length)
     metadata = gguf.metadata
     tensors: dict[str, TensorSource] = {}
     for tensor in gguf:
@@ -682,11 +782,13 @@ def import_model(
     cache: str | Path | None = None,
     opener: hub.Opener | None = None,
     base: str | Path | None = None,
+    context_length: int | None = None,
 ) -> ImportResult:
     """Imports ``source`` (a checkpoint directory, a ``.gguf`` file, or ``hf:org/name[@revision]``) into
     ``output``. ``repository``/``revision`` record provenance for local sources; ``licence`` overrides the licence
     the source states; ``licence_file`` supplies its text. With ``base`` (a ``model.dllm``), ``source`` is a PEFT
-    LoRA adapter and ``output`` is the base model with the adapter merged into its weights."""
+    LoRA adapter and ``output`` is the base model with the adapter merged into its weights. ``context_length``
+    sets the model's context window (:func:`with_context_length`)."""
     source_text = str(source)
     if source_text.startswith("hf:"):
         repo, rev = hub.parse_reference(source_text)
@@ -695,15 +797,17 @@ def import_model(
     else:
         path = Path(source)
     if (path / ADAPTER_CONFIG).exists():
+        if context_length is not None:
+            raise ModelImportError("--context-length is for model sources, not LoRA adapters")
         if base is None:
             raise ModelImportError(f"{source} is a LoRA adapter; pass --base <model.dllm> to merge it into")
         return _import_adapter(path, output, base, repository, revision, licence, accept_licence)
     if base is not None:
         raise ModelImportError(f"{source} is not a LoRA adapter (no {ADAPTER_CONFIG}); --base is for adapters")
     if path.is_dir():
-        converted = _convert_huggingface(path)
+        converted = _convert_huggingface(path, context_length)
     elif path.is_file() and path.suffix.lower() == ".gguf":
-        converted = _convert_gguf(path)
+        converted = _convert_gguf(path, context_length)
     else:
         raise ModelImportError(f"{source}: expected a checkpoint directory, a .gguf file or hf:org/name")
 
