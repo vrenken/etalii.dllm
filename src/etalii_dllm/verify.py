@@ -189,8 +189,8 @@ class ReferenceCheck:
     """``dllm verify --reference``: the engine against the independent reference implementation (issue #162)."""
 
     results: dict[str, str]
-    """``logits``, ``greedy``, ``sampled``, ``controlled``, ``rolled`` and ``budgeted``: ``"equal"``, or where the
-    two first differ."""
+    """``logits``, ``greedy``, ``sampled``, ``controlled``, ``rolled``, ``budgeted`` and ``scored``: ``"equal"``, or
+    where the two first differ."""
 
     @property
     def equal(self) -> bool:
@@ -255,4 +255,17 @@ def check_reference(engine: Any, max_tokens: int = MAX_TOKENS) -> ReferenceCheck
     budget = reference.ThinkingBudget(THINKING_BUDGET, True, engine.tokenizer.decode_bytes, engine.tokenizer.encode)
     tokens, _ = twin.generate(context, max_tokens, reference.sampler(GREEDY), stops, thinking=budget)
     results["budgeted"] = _first_difference(answer.tokens, tokens)
+    # The prompt scored token by token (docs/specification.md#prompt-scoring), as /v1/completions echoes it.
+    from etalii_dllm import scoring
+
+    scored = np.asarray([t.logprob for t in scoring.score_tokens(engine, context).tokens[1:]], dtype=np.float32)
+    twin.reset()
+    rows = [twin.forward([token]) for token in context[:-1]]
+    expected_scores = np.asarray([reference.log_softmax(row)[t] for row, t in zip(rows, context[1:], strict=True)],
+                                 dtype=np.float32)  # fmt: skip
+    if scored.tobytes() == expected_scores.tobytes():
+        results["scored"] = "equal"
+    else:
+        differing = np.flatnonzero(scored.view(np.uint32) != expected_scores.view(np.uint32))
+        results["scored"] = f"{len(differing)} of {len(scored)} differ, first at token {int(differing[0]) + 1}"
     return ReferenceCheck(results)

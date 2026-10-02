@@ -20,7 +20,7 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
-from etalii_dllm import __version__, receipts
+from etalii_dllm import __version__, receipts, scoring, voting
 from etalii_dllm.chat import ChatMessage, ToolCall
 from etalii_dllm.engine import (
     MAX_CHOICES,
@@ -37,7 +37,7 @@ from etalii_dllm.engine import (
 )
 from etalii_dllm.generation import ContextLengthError, TokenLogprobs
 from etalii_dllm.sampling import SamplingOptions
-from etalii_dllm.server import anthropic_api, batches_api, ollama_api, responses_api
+from etalii_dllm.server import anthropic_api, batches_api, completions_api, ollama_api, responses_api
 from etalii_dllm.server.contracts import (
     AssistantMessage,
     ChatCompletionChoice,
@@ -82,6 +82,7 @@ app.include_router(anthropic_api.router)
 app.include_router(ollama_api.router)
 app.include_router(responses_api.router)
 app.include_router(batches_api.router)
+app.include_router(completions_api.router)
 
 
 CONTEXT_LENGTH_EXCEEDED = "context_length_exceeded"
@@ -221,6 +222,10 @@ def chat_completions(
     n = request.n if request.n is not None else 1
     try:
         chat = _chat_request(request, engine)
+        if request.vote is not None:
+            if request.stream or (request.n is not None and request.n != 1):
+                raise ValueError("vote cannot be combined with stream or n")
+            return _vote(request, chat, engine)
         if request.stream:
             if not 1 <= n <= MAX_CHOICES:
                 raise ValueError(f"n must be between 1 and {MAX_CHOICES}")
@@ -270,6 +275,43 @@ def chat_completions(
             **_reasoning_usage(sum(result.reasoning_tokens for result in results)),
         ),
         **({"receipt": first.receipt} if request.receipt else {}),
+    )
+
+
+def _vote(request: ChatCompletionRequest, chat: ChatRequest, engine: DllmEngine) -> ChatCompletionResponse:
+    """The winning answer of a vote as choice 0, the ballots as ``vote`` and the vote's receipt."""
+    assert request.vote is not None
+    outcome = voting.vote(engine, chat, request.vote.n, request.vote.extract)
+    result = outcome.result
+    completion_tokens = sum(r.completion_tokens for r in outcome.results)
+    calls = [
+        ToolCallModel(id=c.id, function=FunctionCall(name=c.name, arguments=c.arguments)) for c in result.tool_calls
+    ]
+    choice = ChatCompletionChoice(
+        index=0,
+        message=AssistantMessage(
+            content=result.content or (None if calls else ""),
+            tool_calls=calls or None,
+            **({"reasoning_content": result.reasoning} if result.reasoning is not None else {}),
+        ),
+        logprobs=_logprobs(engine, result.logprobs) if chat.top_logprobs is not None else None,
+        finish_reason=result.finish_reason,
+    )
+    return ChatCompletionResponse(
+        id=chat.request_id,
+        created=0,
+        model=engine.model.id,
+        system_fingerprint=engine.system_fingerprint,
+        choices=[choice],
+        usage=ChatCompletionUsage(
+            prompt_tokens=result.prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=result.prompt_tokens + completion_tokens,
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=outcome.results[0].cached_tokens),
+            **_reasoning_usage(sum(r.reasoning_tokens for r in outcome.results)),
+        ),
+        vote=outcome.to_json(),
+        **({"receipt": voting.record(engine, chat, outcome)} if request.receipt else {}),
     )
 
 
@@ -420,11 +462,17 @@ def rerank(request: RerankRequest, engine: Engine) -> JSONResponse:
 @app.post("/v1/receipts/verify", response_model=None)
 def verify_receipt(receipt: dict[str, Any] | list[dict[str, Any]], engine: Engine) -> JSONResponse:
     """Extension: re-runs the request a generation receipt records and says whether the output is the same. A list
-    is a conversation's receipt chain, oldest first (:func:`etalii_dllm.receipts.verify_chain`)."""
+    is a conversation's receipt chain, oldest first (:func:`etalii_dllm.receipts.verify_chain`); score and vote
+    receipts are scored or voted again."""
     try:
         if isinstance(receipt, list):
             return JSONResponse(receipts.verify_chain(engine, receipt).to_json())
-        verification = receipts.verify(engine, receipt)
+        if "score" in receipt:
+            verification = scoring.verify(engine, receipt)
+        elif "vote" in receipt:
+            verification = voting.verify(engine, receipt)
+        else:
+            verification = receipts.verify(engine, receipt)
     except (ValueError, KeyError, TypeError) as problem:
         return _error(f"not a valid receipt: {problem}")
     return JSONResponse(verification.to_json())

@@ -226,3 +226,10 @@ WATERMARK_FINGERPRINTS = {
     "generation": "3470b949f942fcbde059fef7380b5a1250992d37fcce73dae0d93ccaf341115a",
     "detection": "b233101d2d72ef04390bcc609427d20aa19459e833b87e2bf48a529fd0a3490d",
 }
+
+# Phase 28: the score of a text (test_scoring_voting.TEXT, 3 alternatives) and a vote's receipt output on the tiny
+# imported test model.
+SCORING_FINGERPRINTS = {
+    "score": "4a7a62dd75c5a91cb52b0ef6dc50776b555e54dbe908dd40863e5ae28b3921e1",
+    "vote": "d892352c347fc5553d8845f7026be0e6dad98a17afe25ba466b67b75b8476487",
+}

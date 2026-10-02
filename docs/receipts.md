@@ -92,3 +92,5 @@ note: versions that keep the kernels and the sampler give the same output, and t
   round's receipt and replays the whole run.
 - One receipt covers one turn; a [receipt chain](agents.md#receipt-chains) covers a whole conversation.
 - Logprobs are not hashed; they follow from the same computation as the tokens.
+- A score (`dllm score --receipt`) and a vote (`"vote"` with `"receipt": true`) have receipts of their own,
+  `dllm-score/1` and `dllm-vote/1`, which replay the same way ([scoring](api.md#scoring), [voting](api.md#voting)).

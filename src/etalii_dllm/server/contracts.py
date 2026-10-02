@@ -83,6 +83,14 @@ class WatermarkOptions(BaseModel):
         return {"watermark_key": self.key, "watermark_gamma": self.gamma, "watermark_delta": self.delta}
 
 
+class VoteOptions(BaseModel):
+    """Extension: self-consistency voting over ``n`` sampled answers (docs/api.md#voting)."""
+
+    n: int
+    extract: str | None = None
+    """A regex whose last match (its first group, when it has groups) is the answer that votes."""
+
+
 class StreamOptions(BaseModel):
     include_usage: bool | None = None
 
@@ -135,6 +143,8 @@ class ChatCompletionRequest(BaseModel):
     """Extension: the most tokens a thinking model's ``<think>`` block may take (docs/api.md#reasoning)."""
     watermark: WatermarkOptions | None = None
     """Extension: watermark the answer with a key (docs/watermarks.md)."""
+    vote: VoteOptions | None = None
+    """Extension: sample several answers and return the most common one (docs/api.md#voting)."""
 
 
 DECODING_CONTROLS = (
@@ -160,6 +170,7 @@ DECODING_CONTROLS = (
     "watermark_key",
     "watermark_gamma",
     "watermark_delta",
+    "vote",
 )
 """Request fields added since Phase 21: left out of the payloads ids are derived from while unset, so the ids of
 requests without them did not change."""

@@ -169,8 +169,9 @@ AdamW from `grad.hpp`.
 | `retrieval.py` | Exact document retrieval: fixed chunking, the `dllm index` file (vectors plus chunks in safetensors), cosine, BM25 (pinned-Unicode terms) and hybrid (reciprocal rank fusion) search with a total order, and the `Retriever` that grounds chats (`--index`, `--index-mode`); [retrieval](../retrieval.md). |
 | `reranking.py` | A chat model as a relevance judge, `sigmoid(logit(yes) - logit(no))` after a fixed prompt (`dllm rerank`, `/v1/rerank`, `--rerank-model`); [reranking](../retrieval.md#reranking). |
 | `watermark.py` | Keyed green-list watermarks with integer-only green lists: the sampler's bias (`--watermark-key`, `watermark`) and exact detection (`dllm watermark detect`, `/v1/watermark/detect`); [watermarks](../watermarks.md). |
+| `scoring.py`, `voting.py` | Exact prompt scores (`dllm score`, `echo` with `logprobs` on `/v1/completions`) and self-consistency votes with a fixed rule (`vote`, `--vote`), each with its own receipt; [scoring](../api.md#scoring), [voting](../api.md#voting). |
 | `training/` | Gradients of the decoder, AdamW, fixed data order and checkpoints that resume bit for bit (`dllm finetune`), for all parameters or LoRA adapters; training receipts that replay a run (`training/receipt.py`). |
-| `server/` | The OpenAI Chat Completions (`app.py`, `contracts.py`), OpenAI Responses (`responses_api.py`), Anthropic (`anthropic_api.py`, `anthropic_contracts.py`) and Ollama (`ollama_api.py`) wire formats, and the chat page `static/chat.html`. |
+| `server/` | The OpenAI Chat Completions (`app.py`, `contracts.py`), OpenAI Completions (`completions_api.py`), OpenAI Responses (`responses_api.py`), Anthropic (`anthropic_api.py`, `anthropic_contracts.py`) and Ollama (`ollama_api.py`) wire formats, and the chat page `static/chat.html`. |
 | `mcp_server.py` | The model as an MCP server over stdio (tools, prompts, resources). |
 | `mcp_host.py` | The MCP client host: the model calls external MCP tools in a loop over `chat_stream`. |
 | `cli.py` | The `dllm` command. |

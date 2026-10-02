@@ -227,6 +227,7 @@ def test_reference_generation_matches_the_engine(tmp_path):
         "controlled": "equal",
         "rolled": "equal",
         "budgeted": "equal",
+        "scored": "equal",
     }
 
 
