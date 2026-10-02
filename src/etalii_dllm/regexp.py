@@ -497,6 +497,47 @@ def intersect(first: Dfa, second: Dfa) -> Dfa:
     return _trimmed(f"({first.pattern}) and ({second.pattern})", table, accepting)
 
 
+def difference(first: Dfa, second: Dfa) -> Dfa:
+    """The automaton of the texts ``first`` matches and ``second`` does not (the product automaton, with ``second``
+    falling into a dead state where it has no move, trimmed)."""
+    ids = {(0, 0): 0}
+    pairs = [(0, 0)]
+    table: list[dict[int, int]] = []
+    index = 0
+    while index < len(pairs):
+        a, b = pairs[index]
+        index += 1
+        row: dict[int, int] = {}
+        for byte in sorted(first._table[a]):
+            target = (first._table[a][byte], second.step(b, byte) if b >= 0 else -1)
+            if target not in ids:
+                if len(pairs) >= MAX_DFA_STATES:
+                    raise _error("the combined string constraints are too large")
+                ids[target] = len(pairs)
+                pairs.append(target)
+            row[byte] = ids[target]
+        table.append(row)
+    accepting = [first.accepting(a) and not (b >= 0 and second.accepting(b)) for a, b in pairs]
+    return _trimmed(f"({first.pattern}) and not ({second.pattern})", table, accepting)
+
+
+def literal_automaton(texts: Sequence[bytes]) -> Dfa:
+    """The automaton of exactly ``texts`` (a trie)."""
+    table: list[dict[int, int]] = [{}]
+    accepting = [False]
+    for text in texts:
+        state = 0
+        for byte in text:
+            if byte not in table[state]:
+                table[state][byte] = len(table)
+                table.append({})
+                accepting.append(False)
+            state = table[state][byte]
+        accepting[state] = True
+    shown = " | ".join(t.decode("utf-8", "replace") for t in texts)
+    return _trimmed(f"one of {shown}", table, accepting)
+
+
 class Counted:
     """An automaton that also counts code points: the texts ``dfa`` matches with ``minimum`` to ``maximum``
     (``None``: no limit) characters. A state is a pair (``dfa`` state, characters so far), interned to an integer

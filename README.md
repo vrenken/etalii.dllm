@@ -192,6 +192,7 @@ module map), with Mermaid diagrams.
 | 32. Exact context-free grammars ✅ | ✅ GBNF grammars compiled to the byte pushdown automaton, recursion included and left recursion refused (#221); ✅ grammar output in every API and the CLI (#222); ✅ grammars in receipts, replay and the specification (#223); ✅ docs, examples and golden values (#224). See [grammars](docs/api.md#grammars) |
 | 33. Exact numeric and object constraints ✅ | ✅ Bounds on decimal numbers, compared exactly (#226); ✅ `multipleOf` on integers and decimals (#227); ✅ property counts and typed map objects (#228); ✅ docs, tests and golden values (#229). See [structured output](docs/api.md#structured-output) |
 | 34. Exact tuples, key names and unique items ✅ | ✅ Tuples with `prefixItems` (#231); ✅ constrained property names (#232); ✅ `uniqueItems` over finite item sets (#233); ✅ docs, tests and golden values (#234). See [structured output](docs/api.md#structured-output) |
+| 35. Exact schema combinators ✅ | ✅ `allOf` over several schemas (#236); ✅ `not` and `if`/`then`/`else` over decidable conditions (#237); ✅ `patternProperties` (#238); ✅ `contains` with `minContains`/`maxContains` (#239); ✅ docs, tests and golden values (#240). See [structured output](docs/api.md#structured-output) |
 
 ## Working with Claude Code
 

@@ -221,6 +221,12 @@ encoding of a string the pattern matches, where `\d`, `\w` and `\s` have their A
 surrogates). The supported syntax is listed in `etalii_dllm.regexp`. A token is allowed when its bytes extend the
 output to a prefix of such an encoding; a stop token is allowed when the output so far is a full match.
 
+**JSON schemas.** A schema constraint allows a subset of the JSON texts the schema accepts: properties in schema
+order, constrained strings without escapes, constrained numbers as decimal texts without an exponent. Before
+compiling, `allOf`, `not` and `if`/`then`/`else` are rewritten into equivalent schemas as `etalii_dllm.schema_algebra`
+describes (keys and branches in the order the schema gives them); a schema that cannot be rewritten exactly is
+refused rather than approximated.
+
 **Grammars.** A GBNF grammar constraint allows exactly the outputs whose UTF-8 bytes are the encoding of a string
 the `root` rule derives, where literals and classes hold code points (never surrogates) and `.` is any code point.
 Before decoding, alternatives that derive no finite string are removed; grammars with left recursion are refused.

@@ -41,7 +41,10 @@ def _error(message: str) -> Exception:
 
 
 def exact(value: Any, name: str) -> Decimal:
-    """A JSON number as an exact decimal: an integer as is, a float as its shortest round-trip decimal."""
+    """A JSON number as an exact decimal: an integer as is, a float as its shortest round-trip decimal (a decimal
+    from a merged schema as is)."""
+    if isinstance(value, Decimal) and value.is_finite():
+        return value
     if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
         raise _error(f"'{name}' must be a finite number")
     return Decimal(value) if isinstance(value, int) else Decimal(repr(value))
@@ -198,7 +201,7 @@ def _divisible(divisor: Decimal) -> Dfa:
 def number_automaton(low: Bound, high: Bound, multiple: Decimal | None, integer: bool) -> Dfa:
     """The texts of the numbers (``integer``: the integers) within ``low`` and ``high`` that are multiples of
     ``multiple``, written as described in the module docstring."""
-    from etalii_dllm.grammar import GrammarError
+    from etalii_dllm.grammar import GrammarError, _Unsatisfiable
 
     dfa = compile_regex(_INTEGER if integer else _NUMBER)
     try:
@@ -211,5 +214,5 @@ def number_automaton(low: Bound, high: Bound, multiple: Decimal | None, integer:
         if "no text satisfies" not in str(error):
             raise
         kind = "integer" if integer else "number"
-        raise _error(f"no {kind} satisfies the bounds and 'multipleOf' of the schema") from None
+        raise _Unsatisfiable(f"no {kind} satisfies the bounds and 'multipleOf' of the schema") from None
     return dfa

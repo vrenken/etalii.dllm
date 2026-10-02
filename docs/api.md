@@ -203,13 +203,14 @@ Supported schema keywords: `type` (also as a list), `properties`, `required`, `a
 properties are generated; a schema without `properties` is a free-form object, whose values follow
 `additionalProperties` when that is a schema), `propertyNames`, `minProperties`, `maxProperties`, `items`,
 `prefixItems` (and `items` arrays with `additionalItems`), `minItems`, `maxItems`, `uniqueItems`, `enum`, `const`,
-`anyOf`, `oneOf` (as `anyOf`), single-schema `allOf`, local `$ref` (`#/$defs/...`, `#/definitions/...`, recursion
-allowed) and `nullable`. Annotations such as `title` and `description` are ignored. Keywords the automaton does not
-check (`patternProperties`, `not`, `contains`, `if`, ...) are refused with a 400 error rather than silently ignored.
+`anyOf`, `oneOf` (as `anyOf`), `allOf`, `not`, `if`/`then`/`else`, `patternProperties`, `contains` (with
+`minContains`/`maxContains`), local `$ref` (`#/$defs/...`, `#/definitions/...`, recursion allowed) and `nullable`.
+Annotations such as `title` and `description` are ignored. Keywords the automaton does not check
+(`dependentSchemas`, `unevaluatedProperties`, ...) are refused with a 400 error rather than silently ignored.
 Properties are generated in schema order; optional ones may be skipped. At most 16 whitespace bytes may appear
 between JSON tokens.
 
-Value constraints are exact too (Phases 31, 33 and 34), each compiled to a byte automaton or checked by the
+Value constraints are exact too (Phases 31, 33, 34 and 35), each compiled to a byte automaton or checked by the
 automaton of the object or array:
 
 | Keyword | Rule |
@@ -223,6 +224,17 @@ automaton of the object or array:
 | `propertyNames` | A string schema (`pattern`, `format`, lengths, `enum`, `const`) for the names of a free-form object. Declared properties whose names break it are left out; a required one is refused. |
 | `uniqueItems` | Enforced when the items come from a finite set (`enum`, `const`, booleans, `null` or unions of those): the automaton remembers the values written, comparing JSON values (`1` equals `1.0`, never `true`). Other items with `uniqueItems: true` are refused. |
 | `minProperties`, `maxProperties` | The number of members. On an object without `properties` (whose names may repeat), `minProperties` above 1 is refused. |
+| `patternProperties` | A name that matches patterns (found anywhere, as for `pattern`) gets the merged schemas of all of them; other names get `additionalProperties`. Names are split by automaton intersection and difference, so every name has exactly one rule. Declared properties also obey the patterns they match. |
+| `contains`, `minContains`, `maxContains` | At least `minContains` (default 1) elements match `contains`, for any items. `maxContains` is enforced when the items come from a finite set (it works together with `uniqueItems`) and refused otherwise. |
+| `allOf` | Merged keyword by keyword into one schema: types intersect, `enum` values intersect, bounds take the tighter value, `multipleOf` the exact least common multiple, every `pattern` applies, properties merge per name, tuples per position and `anyOf` branches distribute. Two different `contains` or two sets of `patternProperties` are refused. |
+| `not` | Exact when the schema can be negated: types (not `integer` alone), `enum`/`const` (values removed from strings and numbers by automaton difference, so `not: {"const": 1}` also rules out `1.0`), string lengths, patterns and formats, number bounds, `multipleOf`, and object conditions of `properties` and `required`; `anyOf`, `allOf` and `not` negate by De Morgan's laws. Anything else is refused. |
+| `if`, `then`, `else` | Rewritten as (`if` and `then`) or (`not if` and `else`), so `if` must be negatable as for `not`. A discriminator such as `"if": {"properties": {"kind": {"const": "circle"}}}` picks which properties are required. |
+
+`enum` and `const` values are also checked against the schema's other keywords: `{"type": "string", "enum": ["a", 1]}`
+allows only `"a"`. A keyword that constrains one type leaves the other types free when the schema has no `type`, as
+JSON Schema says: `{"minimum": 5}` takes any string but no number below 5. An optional property or `anyOf` branch no
+value can satisfy is left out; a required one is refused. The rewrites are pure functions of the schema
+(`src/etalii_dllm/schema_algebra.py`), so a schema gives the same automaton on every machine.
 
 A constrained string is written without escape sequences, so it holds no quote, backslash or control character. Its
 automaton is the intersection of the automata of each keyword, with every state that cannot reach a match removed, so

@@ -12,17 +12,17 @@ from etalii_dllm.grammar import Grammar, GrammarError, Matcher, TokenConstraint,
 @pytest.mark.parametrize(
     ("schema", "message"),
     [
-        ({"type": "string", "if": {}}, "not supported by constrained decoding: if"),
+        ({"type": "string", "dependentRequired": {}}, "not supported by constrained decoding: dependentRequired"),
         ({"type": "number", "multipleOf": 0}, "'multipleOf' must be greater than 0"),
-        ({"type": "object", "patternProperties": {}}, "patternProperties"),
+        ({"type": "object", "unevaluatedProperties": False}, "unevaluatedProperties"),
         ({"type": "array", "uniqueItems": True}, "uniqueItems"),
-        ({"not": {"type": "null"}}, "not supported by constrained decoding: not"),
-        ({"type": "array", "items": {"type": "string", "format": "x", "contains": {}}}, "contains"),  # nested
+        ({"not": {"type": "integer"}}, "cannot negate type 'integer'"),
+        ({"type": "array", "items": {"type": "string", "format": "x", "unevaluatedItems": {}}}, "unevaluatedItems"),
         ("string", "a schema must be an object, got 'string'"),
         ({"type": "array", "items": 5}, "a schema must be an object, got 5"),
         ({"enum": []}, "'enum' must not be empty"),
-        ({"allOf": [{"type": "string"}, {"type": "null"}]}, "'allOf' is only supported with a single schema"),
-        ({"allOf": []}, "'allOf' is only supported with a single schema"),
+        ({"allOf": [{"type": "string"}, {"type": "null"}]}, "no value satisfies"),
+        ({"type": "array", "allOf": [{"contains": {"const": 1}}, {"contains": {"const": 2}}]}, "different 'contains'"),
         ({"type": "array", "minItems": 3, "maxItems": 2}, "'maxItems' is smaller than 'minItems'"),
         (
             {"type": "object", "properties": {"a": {}}, "required": ["a", "b", "c"]},
