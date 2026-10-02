@@ -167,8 +167,8 @@ The answer is the same as the OpenAI and Anthropic endpoints give for the same c
   numbered `call_0`, `call_1`, ...; a `tool` message answers the earliest open call to the tool it names in
   `tool_name`.
 - `/api/generate` renders `system` and `prompt` with the chat template; with `raw: true` the prompt is used as is.
-  An empty `prompt` returns `done_reason: "load"`, as Ollama does. `suffix`, `template`, `context` and images are
-  refused.
+  An empty `prompt` returns `done_reason: "load"`, as Ollama does. A `suffix` [fills in the middle](#fill-in-the-middle)
+  between the prompt and it. `template`, `context` and images are refused.
 - `created_at`/`modified_at` are always the Unix epoch and every `*_duration` is 0 (nothing clock-derived);
   `prompt_eval_count` counts the prompt tokens not read from the [prompt cache](#prompt-caching), as Ollama does.
 - One model is served whatever `model` names; pulling, creating, copying and deleting models is not supported
@@ -332,11 +332,37 @@ endpoint: a completion equals `dllm generate` with the same prompt and options, 
 a list of strings (choice `index` is `prompt_index * n + i`); `max_tokens` defaults to 16 as in OpenAI's API and
 `temperature` to 0 as everywhere here. `stop`, `seed`, `n`, the [decoding controls](#decoding-controls),
 `guided_regex`, `grammar`, `watermark`, `stream` (with `stream_options.include_usage`) and `receipt` (a receipt on each choice)
-work as on chat completions. `suffix` and a `best_of` other than `n` are refused with a 400 error.
+work as on chat completions. `suffix` [fills in the middle](#fill-in-the-middle) between the prompt and it (an empty
+`suffix` is no suffix, as in OpenAI's API). A `best_of` other than `n` is refused with a 400 error.
 
 `logprobs: N` returns OpenAI's `logprobs` object (`tokens`, `token_logprobs`, `top_logprobs` with N alternatives,
 `text_offset` in characters). With `echo: true` the prompt comes first in `text` and in `logprobs`, its tokens
 [scored exactly](#scoring) (the first prompt token has `null`, as in OpenAI's API).
+
+## Fill-in-the-middle
+
+Code models such as Qwen2.5 (and Qwen2.5-Coder) are trained to fill a gap: given the code before and after it, they
+write what goes in between. A `suffix` on `/v1/completions`, Ollama's `/api/generate` or `dllm generate --suffix`
+makes the answer that middle. The prompt is built from the model's own FIM tokens,
+`<|fim_prefix|> prompt <|fim_suffix|> suffix <|fim_middle|>` (StarCoder-style vocabularies spell them `<fim_prefix>`
+and so on), with the prompt and the suffix tokenized separately, and the middle ends at the model's stop tokens or
+at the first token that starts another FIM part, pads, or begins a new file or text (`<|fim_pad|>`,
+`<|file_sep|>`, `<|repo_name|>`, `<|endoftext|>`).
+
+- A middle is a completion like any other: the same sampler, seeds, stop sequences, logprobs, `n` choices, regexes
+  and grammars, streamed or not, and the same bits on every machine. `prompt_tokens` counts the FIM prompt.
+- A model without the three FIM tokens refuses a suffix with a 400 error (exit code 2 in the CLI). `echo`, token
+  healing, a negative prompt and beam search cannot be combined with a suffix.
+- Receipts record the suffix, `dllm replay` repeats the middle, and the
+  [specification](specification.md#fill-in-the-middle) and the reference implementation (`dllm verify --reference`,
+  which checks a sampled middle on models with FIM tokens) define the same bits.
+
+```bash
+dllm --model qwen2.5-0.5b.dllm generate --prompt $'def add(a, b):\n    return ' --suffix $'\n\nprint(add(1, 2))\n'
+curl -s localhost:5080/v1/completions -H 'content-type: application/json' -d '{
+  "prompt": "def add(a, b):\n    return ", "suffix": "\n\nprint(add(1, 2))\n", "max_tokens": 16
+}'
+```
 
 ## Token healing
 

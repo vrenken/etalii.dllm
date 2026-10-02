@@ -83,6 +83,7 @@ def request_record(request: ChatRequest) -> dict[str, Any]:
         **({"thinking": request.thinking} if request.thinking is not None else {}),
         **({"max_reasoning_tokens": request.max_reasoning_tokens} if request.max_reasoning_tokens is not None else {}),
         **({"token_healing": True} if request.token_healing else {}),
+        **({"suffix": request.suffix} if request.suffix is not None else {}),
     }
 
 
@@ -121,6 +122,7 @@ def request_from_record(record: Mapping[str, Any]) -> ChatRequest:
         thinking=record.get("thinking"),
         max_reasoning_tokens=record.get("max_reasoning_tokens"),
         token_healing=record.get("token_healing", False),
+        suffix=record.get("suffix"),
     )
 
 

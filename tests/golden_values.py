@@ -265,3 +265,9 @@ HEALING_FINGERPRINTS = {
     "prefill": "d9ca601aff6f7381e01ba0b557db606cc264029184b1506b903fd018fb39f54c",
 }
 """Answers with token healing (tests/test_token_healing.py)."""
+
+FIM_FINGERPRINTS = {
+    "greedy": "bde6253058d92275888e42fc824809369fb50dc9c768ae997141e16d07f327ee",
+    "sampled": "4a335ebbf368ef2d101bc9d8a0b824450bbd93da030447e7d83903cfc9470171",
+}
+"""Phase 37: middles filled in between a prompt and a suffix on the tiny FIM model (test_fill_in_the_middle.py)."""

@@ -30,6 +30,7 @@ from etalii_dllm.cuda import DEVICES
 from etalii_dllm.generation import OVERFLOWS, Generation, GenerationResult, Generator, TokenLogprobs
 from etalii_dllm.grammar import Grammar, HealingConstraint, TokenConstraint, TokenTrie
 from etalii_dllm.guidance import Guide
+from etalii_dllm.infill import fim_tokens
 from etalii_dllm.models import BigramModel, LanguageModel
 from etalii_dllm.numerics import QUANTIZATIONS, linear, set_threads, sum_squares
 from etalii_dllm.prompt_cache import DEFAULT_PROMPT_CACHE_SIZE
@@ -168,6 +169,9 @@ class ChatRequest:
     token_healing: bool = False
     """Takes the prompt's last token back and makes the answer start with its bytes (:meth:`DllmEngine.heal`), so
     a prompt or prefill that ends inside a word is continued as if the word were whole (docs/api.md#token-healing)."""
+    suffix: str | None = None
+    """With a raw ``prompt``: the text after the gap, so the answer is the middle the model fills in between
+    (:mod:`etalii_dllm.infill`, docs/api.md#fill-in-the-middle)."""
 
     def __post_init__(self) -> None:
         if self.max_reasoning_tokens is not None and self.max_reasoning_tokens < 0:
@@ -489,10 +493,12 @@ class DllmEngine:
         grammar: str | None = None,
         overflow: str = "stop",
         token_healing: bool = False,
+        suffix: str | None = None,
     ) -> Generation:
         """Continues ``prompt``; ``regex`` restricts the continuation to text matching it in full, ``grammar`` to
         text the GBNF grammar derives, ``overflow`` says what happens at a full context window
-        (docs/api.md#long-conversations) and ``token_healing`` heals the prompt's last token (:meth:`heal`)."""
+        (docs/api.md#long-conversations), ``token_healing`` heals the prompt's last token (:meth:`heal`) and
+        ``suffix`` makes the output the middle between ``prompt`` and it (:meth:`infill`)."""
         if regex is not None and grammar is not None:
             raise ValueError("a regex and a grammar cannot be combined")
         constraint = None
@@ -501,10 +507,33 @@ class DllmEngine:
         elif grammar is not None:
             constraint = TokenConstraint(Grammar.gbnf(grammar), self._token_trie())
         guide = self.guide(options, raw=True)
-        context, constraint, healed = self.heal(prompt, constraint) if token_healing else (prompt, constraint, 0)
+        context, ends = self.infill(prompt, suffix, options, token_healing)
+        context, constraint, healed = self.heal(prompt, constraint) if token_healing else (context, constraint, 0)
         return self._generator.stream(
-            context, max_tokens, options, constraint=constraint, overflow=overflow, guide=guide, healed=healed
+            context,
+            max_tokens,
+            options,
+            constraint=constraint,
+            overflow=overflow,
+            guide=guide,
+            healed=healed,
+            stop_tokens=ends,
         )
+
+    def infill(
+        self, prompt: str, suffix: str | None, options: SamplingOptions, token_healing: bool = False
+    ) -> tuple[str | list[int], frozenset[int]]:
+        """Fill-in-the-middle (:mod:`etalii_dllm.infill`): the prompt tokens for the gap between ``prompt`` and
+        ``suffix`` and the tokens that end the middle; ``prompt`` and no extra ends without a suffix. Raises
+        ``ValueError`` for a model without FIM tokens and for what a middle cannot be combined with."""
+        if suffix is None:
+            return prompt, frozenset()
+        if token_healing:
+            raise ValueError("a suffix cannot be combined with token healing")
+        if options.negative_prompt is not None:
+            raise ValueError("a suffix cannot be combined with a negative prompt")
+        tokens = fim_tokens(self.tokenizer)
+        return tokens.prompt(self.tokenizer, prompt, suffix), tokens.ends
 
     def heal(
         self, prompt: str, constraint: TokenConstraint | None
@@ -622,6 +651,8 @@ class DllmEngine:
         tooling.validate_tools(tools, request.tool_choice)
         if request.prompt is not None and tools:
             raise ValueError("a raw prompt cannot use tools")
+        if request.suffix is not None and request.prompt is None:
+            raise ValueError("a suffix needs a raw prompt")
         if fresh:
             generation = self._generate(request, tools)
             return ChatStream(
@@ -664,7 +695,8 @@ class DllmEngine:
         if request.prompt is None and self.thinks and (constraint is None or not constraint.active):
             # Structured output and forced tool calls constrain the output from its first token: no thinking then.
             tracker = thinking_rules.Tracker(thinking_rules.starts_in_thinking(prompt), request.max_reasoning_tokens)
-        context, healing, healed = self.heal(prompt, constraint) if request.token_healing else (prompt, constraint, 0)
+        context, ends = self.infill(prompt, request.suffix, request.options, request.token_healing)
+        context, healing, healed = self.heal(prompt, constraint) if request.token_healing else (context, constraint, 0)
         generation = self._generator.stream(
             context,
             request.max_tokens,
@@ -677,6 +709,7 @@ class DllmEngine:
             reasoning=tracker,
             guide=self.guide(request.options, request.prompt is not None, messages, tools, request.thinking),
             healed=healed,
+            stop_tokens=ends,
         )
         return _ChatGeneration(
             generation.prompt_tokens, generation.cached_tokens, self._events(generation, request, tools)

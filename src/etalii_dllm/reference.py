@@ -711,6 +711,31 @@ def healing(prefix: bytes, token_bytes: Sequence[bytes]) -> Callable[[list[int]]
     return allowed
 
 
+FIM_PARTS = ("fim_prefix", "fim_suffix", "fim_middle")
+FIM_ENDS = ("fim_prefix", "fim_suffix", "fim_middle", "fim_pad", "file_sep", "repo_name", "endoftext")
+
+
+def fill_in_the_middle(
+    token_id: Callable[[str], int | None], prefix: Sequence[int], suffix: Sequence[int]
+) -> tuple[list[int], list[int]]:
+    """Fill-in-the-middle (docs/specification.md#fill-in-the-middle): the prompt ``<fim_prefix> prefix <fim_suffix>
+    suffix <fim_middle>`` and the tokens that end the middle besides the stop tokens, each token looked up as
+    ``<|name|>`` and then as ``<name>``. Raises ``ValueError`` when a FIM part is missing."""
+
+    def find(name: str) -> int | None:
+        for spelling in (f"<|{name}|>", f"<{name}>"):
+            if (token := token_id(spelling)) is not None:
+                return token
+        return None
+
+    parts = [find(name) for name in FIM_PARTS]
+    if any(part is None for part in parts):
+        raise ValueError("no fill-in-the-middle tokens")
+    start, gap, middle = (int(part) for part in parts if part is not None)
+    ends = sorted({token for name in FIM_ENDS if (token := find(name)) is not None})
+    return [start, *prefix, gap, *suffix, middle], ends
+
+
 # -- the decoder --------------------------------------------------------------------------------------------------
 
 

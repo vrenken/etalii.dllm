@@ -710,6 +710,16 @@ finish the word the way it would have tokenized it (`fox`, `green`) instead of c
 text continues exactly where your prompt ended, and the same request gives the same bits everywhere. `--prefill`
 starts the assistant's reply for it. Details: [token healing](api.md#token-healing).
 
+## 33. Filling in the middle of a file
+
+```bash
+dllm --model qwen2.5-0.5b.dllm generate --prompt $'def add(a, b):\n    return ' --suffix $'\n\nprint(add(1, 2))\n'
+```
+
+With `--suffix`, models that know fill-in-the-middle (Qwen2.5 among the verified ones) write what goes between the
+prompt and the suffix, as code editors' completion does. The completions API and Ollama take the same `suffix`, and
+every middle is exactly reproducible. Details: [fill-in-the-middle](api.md#fill-in-the-middle).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,

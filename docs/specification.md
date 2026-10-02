@@ -354,6 +354,15 @@ after `r` to the answer's own constraint (a JSON schema, regex or grammar), if a
 answer's text, which is its decoded bytes without the first `len(b)` bytes; its tokens, including the
 healing ones, count as completion tokens.
 
+### Fill-in-the-middle
+
+With a suffix ([fill-in-the-middle](api.md#fill-in-the-middle)), each FIM token is the token whose text is `<|name|>`
+in the vocabulary, else the one whose text is `<name>`. The context is `fim_prefix`, the prompt's tokens,
+`fim_suffix`, the suffix's tokens and `fim_middle`, the prompt and the suffix each tokenized on its own; a vocabulary
+without all three refuses the request. The answer (the middle) is generated from that context as any answer is, and
+it also ends, like at a stop token, at any of `fim_prefix`, `fim_suffix`, `fim_middle`, `fim_pad`, `file_sep`,
+`repo_name` and `endoftext` the vocabulary holds.
+
 ### Guided decoding
 
 A guided answer ([guided decoding](api.md#guided-decoding)) replaces each step's float32 logits `l` by a combination

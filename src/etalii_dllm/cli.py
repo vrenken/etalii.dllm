@@ -235,6 +235,9 @@ def main(argv: list[str] | None = None) -> int:
     generate = commands.add_parser("generate", help="continue a prompt")
     generate.add_argument("--prompt", default="")
     generate.add_argument(
+        "--suffix", help="fill in the middle between the prompt and this text (models with FIM tokens)"
+    )
+    generate.add_argument(
         "--n", type=int, default=1, help="generate N choices; choice i samples with seed SEED+i (default 1)"
     )
     generate.add_argument("--beams", type=int, metavar="WIDTH", help="exact beam search with WIDTH hypotheses")
@@ -635,6 +638,7 @@ def main(argv: list[str] | None = None) -> int:
                 grammar=grammar,
                 overflow=args.context_overflow,
                 token_healing=args.token_healing,
+                suffix=args.suffix,
             )
         except ValueError as error:
             print(f"error: {error}", file=sys.stderr)
@@ -667,6 +671,7 @@ def _beam_search(engine: DllmEngine, args: argparse.Namespace, options: Sampling
             prompt=args.prompt,
             context_overflow=args.context_overflow,
             token_healing=args.token_healing,
+            suffix=args.suffix,
         )
         outcome = beam.search(engine, request, args.beams, args.n_best, args.length_penalty)
     except ValueError as error:

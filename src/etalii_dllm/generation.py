@@ -121,8 +121,11 @@ class Generation:
         reasoning: Tracker | None = None,
         guide: Guide | None = None,
         healed: int = 0,
+        stop_tokens: frozenset[int] = frozenset(),
     ) -> None:
         self.prompt_tokens = len(context)
+        self._stop_tokens = generator.stop_tokens | stop_tokens
+        """The tokens that end this generation: the generator's, and its own (a fill-in-the-middle's ends)."""
         self._healed = healed
         """Bytes of a prompt token taken back for token healing: the output's first bytes, left out of its text."""
         self._guide = guide
@@ -290,8 +293,8 @@ class Generation:
                     pending = [model.forward_cached(context, cache)]
             logits = pending.pop(0)
             decoded = logits if guide is None else guide.combine(np.asarray(logits, dtype=np.float32), self._tokens)
-            token = self._choose(sampler, decoded, generator.stop_tokens, constraint)
-            if token is None or token in generator.stop_tokens:
+            token = self._choose(sampler, decoded, self._stop_tokens, constraint)
+            if token is None or token in self._stop_tokens:
                 finish_reason = "stop"
                 break
             if draft and draft[0] == token:
@@ -427,6 +430,7 @@ class Generator:
         reasoning: Tracker | None = None,
         guide: Callable[[list[int]], Guide] | None = None,
         healed: int = 0,
+        stop_tokens: Iterable[int] = (),
     ) -> Generation:
         """Starts a generation. ``stop`` ends it at the first occurrence of any of the strings (which are not part
         of the text); ``constraint`` restricts the tokens (structured output, tool calls); ``top_logprobs``
@@ -436,7 +440,8 @@ class Generator:
         context window: the generation ends with ``length`` (``stop``), or the context rolls (``roll``, see
         :meth:`Generation._roll`). A prompt that leaves no room raises :class:`ContextLengthError`. ``healed``: the
         output's first bytes are a prompt token taken back for token healing (a :class:`HealingConstraint` makes
-        the output start with them), left out of its text. ``reasoning``
+        the output start with them), left out of its text. ``stop_tokens`` end the generation as well as the
+        generator's own (a fill-in-the-middle's ends, :mod:`etalii_dllm.infill`). ``reasoning``
         follows a thinking model's ``<think>`` block and closes it when its budget is spent
         (:mod:`etalii_dllm.reasoning`). ``guide`` makes the guide (:mod:`etalii_dllm.guidance`) for the prompt's
         tokens; guided generations do not roll."""
@@ -473,6 +478,7 @@ class Generator:
             reasoning,
             made,
             healed,
+            frozenset(stop_tokens),
         )
 
     def generate(
