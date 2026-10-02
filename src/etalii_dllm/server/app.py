@@ -161,14 +161,20 @@ def _chat_request(request: ChatCompletionRequest, engine: DllmEngine) -> ChatReq
     else:
         choice = ToolChoice("named", request.tool_choice.function.name)
     response_format = ResponseFormat()
-    if request.guided_regex is not None:
+    if request.guided_regex is not None and request.grammar is not None:
+        raise ValueError("guided_regex and grammar cannot be combined")
+    if request.guided_regex is not None or request.grammar is not None:
+        name = "guided_regex" if request.guided_regex is not None else "grammar"
         if request.response_format is not None and request.response_format.type != "text":
-            raise ValueError("guided_regex cannot be combined with a response_format")
-        response_format = ResponseFormat("regex", pattern=request.guided_regex)
-    elif request.response_format is not None and request.response_format.type == "regex":
-        if request.response_format.regex is None:
-            raise ValueError("response_format regex needs a 'regex'")
-        response_format = ResponseFormat("regex", pattern=request.response_format.regex)
+            raise ValueError(f"{name} cannot be combined with a response_format")
+        pattern = request.guided_regex if request.guided_regex is not None else request.grammar
+        response_format = ResponseFormat("regex" if name == "guided_regex" else "grammar", pattern=pattern)
+    elif request.response_format is not None and request.response_format.type in ("regex", "grammar"):
+        kind = request.response_format.type
+        pattern = getattr(request.response_format, kind)
+        if pattern is None:
+            raise ValueError(f"response_format {kind} needs a '{kind}'")
+        response_format = ResponseFormat(kind, pattern=pattern)
     elif request.response_format is not None and request.response_format.type != "text":
         spec = request.response_format.json_schema
         if request.response_format.type == "json_schema" and (spec is None or spec.json_schema is None):

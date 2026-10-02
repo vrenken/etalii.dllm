@@ -249,3 +249,6 @@ BEAM_FINGERPRINTS = {
 
 SCHEMA_FINGERPRINTS = {"person": "f830d3b634b6f3b57323df3a05a72809757dd1393c510ea7f2a14ade7e894aaa"}
 """Fingerprint of an answer constrained by patterns, formats, lengths and bounds (tests/test_schema_constraints.py)."""
+
+GRAMMAR_FINGERPRINTS = {"colours": "6c3e9ca969a5eb689cbf60668385e0136883735a8059c831ddf4328efe2515af"}
+"""Fingerprint of an answer constrained by a GBNF grammar (tests/test_gbnf.py)."""

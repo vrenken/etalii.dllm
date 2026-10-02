@@ -227,6 +227,44 @@ dllm chat "Book a flight" --json-schema '{"type": "object", "properties": {"from
   "required": ["from", "date", "seats"]}'
 ```
 
+## Grammars
+
+A GBNF grammar (the format of llama.cpp) constrains an answer to the text its `root` rule derives, matched in full
+(Phase 32). It goes in `response_format: {"type": "grammar", "grammar": ...}` or the llama.cpp-style `grammar` field
+on chat completions and completions, or `--grammar FILE` (or the grammar itself) on `dllm generate` and `dllm chat`.
+The grammar is compiled to the same byte-level pushdown automaton as a JSON schema, so the answer always follows it
+unless `max_tokens` cuts it off, streamed and non-streamed answers are identical, and receipts record the grammar so
+`dllm replay` repeats it.
+
+```
+root   ::= "Colours: " colour (", " colour){1,3} "."
+colour ::= "red" | "green" | "blue" | "yellow"
+```
+
+| Syntax | Meaning |
+| --- | --- |
+| `name ::= ...` | A rule; names hold letters, digits, `-` and `_`. A rule ends where the next `name ::=` begins, so it may span lines. `#` starts a comment. |
+| `a b`, `a \| b`, `( ... )` | Sequence, alternatives (an empty one matches nothing), group. |
+| `"text"` | A literal, with the escapes `\n \r \t \\ \" \[ \] \-`, `\xHH`, `\uHHHH` and `\UHHHHHHHH`. |
+| `[a-z_]`, `[^"\n]`, `.` | One character of a class (ranges, negation, the same escapes), or any character. Characters are Unicode code points, never surrogates, written as UTF-8. |
+| `x*`, `x+`, `x?`, `x{m}`, `x{m,}`, `x{m,n}` | Repetitions, counts up to 1000. |
+| `name` | A rule reference; rules may refer to each other and to themselves. |
+
+Refused with a 400 error (a `GrammarError` in Python): left recursion (`expr ::= expr "+" term`, also through rules
+that can match nothing; write `expr ::= term ("+" term)*`), unbounded repetitions of something that can match
+nothing, undefined or doubly defined rules, a missing `root` and token references (`<...>`). Alternatives that can
+never finish (a rule with no way out of its recursion) are dropped, so decoding never runs into an answer it cannot
+end, and a grammar that derives no text at all is refused. A grammar cannot be combined with another structured
+output, a `guided_regex` or beam search.
+
+```bash
+dllm chat "Name some colours" --grammar colours.gbnf
+curl -s localhost:5080/v1/completions -H 'content-type: application/json' -d '{
+  "prompt": "2 + 2 =", "max_tokens": 20, "temperature": 0.7, "seed": 1,
+  "grammar": "root ::= \" \" [0-9]+ \".\""
+}'
+```
+
 ## Decoding controls
 
 Penalties, min-p, logit bias, several choices and regexes (Phase 21) keep every answer bit-reproducible: each one is
@@ -241,6 +279,7 @@ reference implementation repeats bit for bit.
 | Logit bias added to chosen tokens | `logit_bias` | | `--logit-bias TOKEN=BIAS` |
 | Several choices | `n` | | `--n` (`generate`) |
 | Output matching a regex in full | `response_format: {"type": "regex", "regex": ...}` or `guided_regex` | | `--regex` |
+| Output a [GBNF grammar](#grammars) derives | `response_format: {"type": "grammar", "grammar": ...}` or `grammar` | | `--grammar` |
 | [Guided decoding](#guided-decoding): a negative prompt, or contrast against an amateur model | `guidance: {negative_prompt, scale}`, `contrast: {beta, alpha}` (extensions; also on Anthropic messages and completions) | | `--negative-prompt`, `--guidance-scale`, `--contrast BETA`, `--contrast-alpha` |
 | A keyed [watermark](watermarks.md) | `watermark: {key, gamma, delta}` (extension; also on Anthropic messages) | `watermark_key`, `watermark_gamma`, `watermark_delta` | `--watermark-key`, `--watermark-gamma`, `--watermark-delta` |
 
@@ -271,7 +310,7 @@ curl -s localhost:5080/v1/chat/completions -H 'content-type: application/json' -
 endpoint: a completion equals `dllm generate` with the same prompt and options, bit for bit. `prompt` is a string or
 a list of strings (choice `index` is `prompt_index * n + i`); `max_tokens` defaults to 16 as in OpenAI's API and
 `temperature` to 0 as everywhere here. `stop`, `seed`, `n`, the [decoding controls](#decoding-controls),
-`guided_regex`, `watermark`, `stream` (with `stream_options.include_usage`) and `receipt` (a receipt on each choice)
+`guided_regex`, `grammar`, `watermark`, `stream` (with `stream_options.include_usage`) and `receipt` (a receipt on each choice)
 work as on chat completions. `suffix` and a `best_of` other than `n` are refused with a 400 error.
 
 `logprobs: N` returns OpenAI's `logprobs` object (`tokens`, `token_logprobs`, `top_logprobs` with N alternatives,

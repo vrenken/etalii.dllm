@@ -94,7 +94,7 @@ flowchart TB
     subgraph chat["Chat and decoding"]
         direction LR
         tmpl["chat.py, chat_template.py<br/>prompt rendering"]
-        tools["tools.py, grammar.py<br/>tool calls, JSON-schema masks"]
+        tools["tools.py, grammar.py, gbnf.py<br/>tool calls, JSON-schema and grammar masks"]
         gen["generation.py<br/>autoregressive loop"]
         samp["sampling.py<br/>seeded sampler"]
         tok["bpe.py, tokenization.py<br/>tokenizers"]
@@ -139,6 +139,7 @@ AdamW from `grad.hpp`.
 | `chat_template.py` | Renders a model's own Jinja chat template the way `transformers` does. |
 | `tools.py` | Tool calling in the Hermes `<tool_call>` format: presenting tools, constraining and parsing calls. |
 | `grammar.py` | Constrained decoding: byte-level JSON and regex grammars and the token masks they induce over a token trie; string patterns, formats, lengths and integer bounds compile to byte automata. |
+| `gbnf.py` | GBNF grammars parsed and compiled to grammar rules of the same pushdown automaton; left recursion refused, alternatives that cannot finish dropped. |
 | `batch_jobs.py` | `dllm batch`: OpenAI batch files run concurrently with output in input order and content-derived ids, exact resume, digests and `--verify`. |
 | `regexp.py` | Regular expressions compiled to byte-level DFAs (UTF-8 ranges included) for regex-constrained output; trimmed intersections and code point counting for schema constraints. |
 | `generation.py` | The autoregressive loop: forward pass, sample, append, repeat; stop sequences, logprobs, result fingerprint. |

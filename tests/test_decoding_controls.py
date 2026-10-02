@@ -375,7 +375,7 @@ def test_regex_in_chat_on_the_command_line(capsys):
 def test_response_format_validation():
     with pytest.raises(ValueError, match="needs a pattern"):
         ResponseFormat("regex")
-    with pytest.raises(ValueError, match="needs a pattern"):
+    with pytest.raises(ValueError, match="only regex and grammar"):
         ResponseFormat("text", pattern="a")
 
 

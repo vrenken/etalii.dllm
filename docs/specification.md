@@ -221,6 +221,11 @@ encoding of a string the pattern matches, where `\d`, `\w` and `\s` have their A
 surrogates). The supported syntax is listed in `etalii_dllm.regexp`. A token is allowed when its bytes extend the
 output to a prefix of such an encoding; a stop token is allowed when the output so far is a full match.
 
+**Grammars.** A GBNF grammar constraint allows exactly the outputs whose UTF-8 bytes are the encoding of a string
+the `root` rule derives, where literals and classes hold code points (never surrogates) and `.` is any code point.
+Before decoding, alternatives that derive no finite string are removed; grammars with left recursion are refused.
+The supported syntax is listed in `etalii_dllm.gbnf`. Tokens and stop tokens are allowed as for regular expressions.
+
 ## 5. The decoder
 
 The model file ([format](model-format.md)) gives a `TransformerConfig` and float32 tensors. Two weight changes are

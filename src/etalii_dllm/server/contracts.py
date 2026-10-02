@@ -65,10 +65,12 @@ class JsonSchemaFormat(BaseModel):
 
 
 class ResponseFormatModel(BaseModel):
-    type: Literal["text", "json_object", "json_schema", "regex"]
+    type: Literal["text", "json_object", "json_schema", "regex", "grammar"]
     json_schema: JsonSchemaFormat | None = None
     regex: str | None = None
     """Extension: the pattern of a ``regex`` response format."""
+    grammar: str | None = None
+    """Extension: the GBNF grammar of a ``grammar`` response format (docs/api.md#grammars)."""
 
 
 class WatermarkOptions(BaseModel):
@@ -166,6 +168,8 @@ class ChatCompletionRequest(BaseModel):
     """Extension (as in llama.cpp)."""
     guided_regex: str | None = None
     """Extension (as in vLLM): the same as ``response_format: {"type": "regex", "regex": ...}``."""
+    grammar: str | None = None
+    """Extension (as in llama.cpp): a GBNF grammar, the same as ``response_format: {"type": "grammar", ...}``."""
     truncation: Literal["auto", "disabled"] | None = None
     """Extension (as in the Responses API): ``auto`` drops the oldest messages that do not fit the context window."""
     context_overflow: Literal["stop", "roll"] | None = None
@@ -197,6 +201,7 @@ DECODING_CONTROLS = (
     "repeat_last_n",
     "repeat_penalty",
     "guided_regex",
+    "grammar",
     "truncation",
     "context_overflow",
     "truncate",
@@ -238,12 +243,13 @@ def thinking_switch(effort: str | None, template_kwargs: Mapping[str, Any] | Non
 
 def id_payload(dumped: dict[str, Any]) -> dict[str, Any]:
     """``dumped`` without the :data:`DECODING_CONTROLS` that are unset (``None``), at the top level, in an
-    ``options`` object or (``regex``) in a ``response_format``."""
+    ``options`` object or (``regex``, ``grammar``) in a ``response_format``."""
     payload = {k: v for k, v in dumped.items() if not (k in DECODING_CONTROLS and v is None)}
     if isinstance(payload.get("options"), dict):
         payload["options"] = id_payload(payload["options"])
-    if isinstance(payload.get("response_format"), dict) and payload["response_format"].get("regex") is None:
-        payload["response_format"] = {k: v for k, v in payload["response_format"].items() if k != "regex"}
+    if isinstance(payload.get("response_format"), dict):
+        unset = {k for k in ("regex", "grammar") if payload["response_format"].get(k) is None}
+        payload["response_format"] = {k: v for k, v in payload["response_format"].items() if k not in unset}
     return payload
 
 
