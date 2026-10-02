@@ -7,7 +7,7 @@ text that may turn out to be the start of a stop sequence are held back until th
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -15,6 +15,7 @@ import numpy as np
 
 from etalii_dllm.batching import Batcher
 from etalii_dllm.grammar import TokenConstraint
+from etalii_dllm.guidance import Guide
 from etalii_dllm.models import LanguageModel
 from etalii_dllm.numerics import fingerprint, log_softmax
 from etalii_dllm.prompt_cache import CacheStore, PromptCache
@@ -116,8 +117,11 @@ class Generation:
         new_text: bool = False,
         overflow: str = "stop",
         reasoning: Tracker | None = None,
+        guide: Guide | None = None,
     ) -> None:
         self.prompt_tokens = len(context)
+        self._guide = guide
+        """Combines the logits with another context or model before decoding (:mod:`etalii_dllm.guidance`)."""
         self._overflow = overflow
         self.reasoning = reasoning
         """Follows a thinking model's ``<think>`` block and closes it at the budget (:mod:`etalii_dllm.reasoning`)."""
@@ -194,7 +198,8 @@ class Generation:
         strip_leading_space = self._strip_leading_space
         emitted = ""
         finish_reason = "length"
-        drafter = generator.new_drafter() if cache is not None else None
+        guide = self._guide
+        drafter = generator.new_drafter() if cache is not None and guide is None else None
         vocabulary = model.vocabulary_size if drafter is not None else 0
         draft: list[int] = []
         """Drafted tokens not yet checked, after the ones ``pending`` holds the logits for."""
@@ -237,6 +242,8 @@ class Generation:
             if constraint is not None and constraint.finished:
                 finish_reason = "stop"
                 break
+            if guide is not None and window is not None and guide.length(self._tokens) >= window:
+                break  # the guide's context is full: finish_reason stays "length"
             if window is not None and len(context) >= window:
                 if self._overflow != "roll":
                     break  # finish_reason stays "length"
@@ -269,7 +276,8 @@ class Generation:
                 else:
                     pending = [model.forward_cached(context, cache)]
             logits = pending.pop(0)
-            token = self._choose(sampler, logits, generator.stop_tokens, constraint)
+            decoded = logits if guide is None else guide.combine(np.asarray(logits, dtype=np.float32), self._tokens)
+            token = self._choose(sampler, decoded, generator.stop_tokens, constraint)
             if token is None or token in generator.stop_tokens:
                 finish_reason = "stop"
                 break
@@ -404,6 +412,7 @@ class Generator:
         new_text: bool = False,
         overflow: str = "stop",
         reasoning: Tracker | None = None,
+        guide: Callable[[list[int]], Guide] | None = None,
     ) -> Generation:
         """Starts a generation. ``stop`` ends it at the first occurrence of any of the strings (which are not part
         of the text); ``constraint`` restricts the tokens (structured output, tool calls); ``top_logprobs``
@@ -413,7 +422,8 @@ class Generator:
         context window: the generation ends with ``length`` (``stop``), or the context rolls (``roll``, see
         :meth:`Generation._roll`). A prompt that leaves no room raises :class:`ContextLengthError`. ``reasoning``
         follows a thinking model's ``<think>`` block and closes it when its budget is spent
-        (:mod:`etalii_dllm.reasoning`)."""
+        (:mod:`etalii_dllm.reasoning`). ``guide`` makes the guide (:mod:`etalii_dllm.guidance`) for the prompt's
+        tokens; guided generations do not roll."""
         if overflow not in OVERFLOWS:
             raise ValueError(f"overflow must be one of {', '.join(OVERFLOWS)}")
         if max_tokens < 0:
@@ -431,8 +441,11 @@ class Generator:
             )
         if overflow == "roll" and window is not None and window <= 2 * ROLL_SINK:
             raise ValueError(f"a context window of {window} tokens is too small to roll")
+        if guide is not None and overflow == "roll":
+            raise ValueError("guided decoding cannot roll the context")
+        made = guide(list(context)) if guide is not None else None
         return Generation(
-            self, context, max_tokens, options, stop, constraint, top_logprobs, new_text, overflow, reasoning
+            self, context, max_tokens, options, stop, constraint, top_logprobs, new_text, overflow, reasoning, made
         )
 
     def generate(
@@ -446,6 +459,7 @@ class Generator:
         top_logprobs: int | None = None,
         overflow: str = "stop",
         reasoning: Tracker | None = None,
+        guide: Callable[[list[int]], Guide] | None = None,
     ) -> GenerationResult:
         return self.stream(
             prompt,
@@ -456,4 +470,5 @@ class Generator:
             top_logprobs=top_logprobs,
             overflow=overflow,
             reasoning=reasoning,
+            guide=guide,
         ).result()

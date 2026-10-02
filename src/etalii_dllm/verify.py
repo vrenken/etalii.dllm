@@ -32,6 +32,9 @@ THINKING_BUDGET = 2
 """Tokens of thinking the budgeted check allows before the block is closed."""
 """Tokens the rolled check's context window holds beyond the prompt."""
 SAMPLED = SamplingOptions(temperature=0.8, seed=7)
+NEGATIVE_PROMPT = "The capital of Germany is"
+GUIDED = SamplingOptions(temperature=0.8, seed=7, negative_prompt=NEGATIVE_PROMPT, guidance_scale=2.0)
+"""The guided check: a sampled answer with classifier-free guidance (docs/specification.md#guided-decoding)."""
 CONTROLLED = SamplingOptions(
     temperature=0.9,
     top_k=40,
@@ -189,8 +192,8 @@ class ReferenceCheck:
     """``dllm verify --reference``: the engine against the independent reference implementation (issue #162)."""
 
     results: dict[str, str]
-    """``logits``, ``greedy``, ``sampled``, ``controlled``, ``rolled``, ``budgeted`` and ``scored``: ``"equal"``, or
-    where the two first differ."""
+    """``logits``, ``greedy``, ``sampled``, ``controlled``, ``rolled``, ``budgeted``, ``guided`` and ``scored``:
+    ``"equal"``, or where the two first differ."""
 
     @property
     def equal(self) -> bool:
@@ -255,6 +258,20 @@ def check_reference(engine: Any, max_tokens: int = MAX_TOKENS) -> ReferenceCheck
     budget = reference.ThinkingBudget(THINKING_BUDGET, True, engine.tokenizer.decode_bytes, engine.tokenizer.encode)
     tokens, _ = twin.generate(context, max_tokens, reference.sampler(GREEDY), stops, thinking=budget)
     results["budgeted"] = _first_difference(answer.tokens, tokens)
+    # A sampled answer guided away from a negative prompt, which a second reference decoder runs alongside.
+    answer = engine.complete(PROMPT, max_tokens, GUIDED)
+    negative_tokens = engine.tokenizer.encode(NEGATIVE_PROMPT)
+    negative = reference.ReferenceTransformer.from_engine_model(engine.model)
+    fed = [0]
+
+    def guide(logits: np.ndarray, generated: list[int]) -> np.ndarray:
+        unfed = [*negative_tokens, *generated] if fed[0] == 0 and negative.length == 0 else generated[fed[0] :]
+        fed[0] = len(generated)
+        return reference.guided(logits, negative.forward(unfed), GUIDED.guidance_scale)
+
+    negative.reset()
+    tokens, _ = twin.generate(context, max_tokens, reference.sampler(GUIDED), stops, guide=guide)
+    results["guided"] = _first_difference(answer.tokens, tokens)
     # The prompt scored token by token (docs/specification.md#prompt-scoring), as /v1/completions echoes it.
     from etalii_dllm import scoring
 

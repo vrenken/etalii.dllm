@@ -47,6 +47,14 @@ class SamplingOptions:
     """The share of the vocabulary that is green after each token."""
     watermark_delta: float = 2.0
     """Added to the logits of the green tokens."""
+    negative_prompt: str | None = None
+    """Classifier-free guidance away from this prompt (:mod:`etalii_dllm.guidance`); ``None`` disables."""
+    guidance_scale: float = 1.5
+    """How far decoding moves from the negative prompt's logits towards the request's (1: not at all)."""
+    contrast_beta: float | None = None
+    """Contrastive decoding against the engine's amateur model with this strength; ``None`` disables."""
+    contrast_alpha: float = 0.1
+    """Contrastive decoding keeps only tokens at least ``contrast_alpha`` times as likely as the most likely one."""
 
     def __post_init__(self) -> None:
         if self.temperature < 0:
@@ -74,6 +82,14 @@ class SamplingOptions:
             raise ValueError("watermark_gamma must be between 0 and 1")
         if not math.isfinite(self.watermark_delta):
             raise ValueError("watermark_delta must be finite")
+        if not math.isfinite(self.guidance_scale):
+            raise ValueError("guidance_scale must be finite")
+        if self.contrast_beta is not None and not (math.isfinite(self.contrast_beta) and self.contrast_beta >= 0):
+            raise ValueError("contrast_beta must be non-negative")
+        if not 0.0 <= self.contrast_alpha <= 1.0:
+            raise ValueError("contrast_alpha must be in [0, 1]")
+        if self.negative_prompt is not None and self.contrast_beta is not None:
+            raise ValueError("a request can use a negative prompt or contrastive decoding, not both")
 
     @staticmethod
     def bias(values: Mapping[int, float] | Mapping[str, float] | None) -> tuple[tuple[int, float], ...]:
@@ -134,6 +150,10 @@ _DEFAULTS = {
     "watermark_key": None,
     "watermark_gamma": 0.25,
     "watermark_delta": 2.0,
+    "negative_prompt": None,
+    "guidance_scale": 1.5,
+    "contrast_beta": None,
+    "contrast_alpha": 0.1,
 }
 
 

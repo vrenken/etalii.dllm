@@ -311,6 +311,23 @@ ends are stripped; an empty result casts no vote. The winner is the answer with 
 answer whose first vote has the lowest choice index; the response is that choice's answer, or choice 0 when nobody
 voted.
 
+### Guided decoding
+
+A guided answer ([guided decoding](api.md#guided-decoding)) replaces each step's float32 logits `l` by a combination
+before section 4's logit adjustments and sampling; the reported log-probabilities stay those of `l`. Every operation
+below is float32 (each result rounded to float32) unless it says double.
+
+- **Classifier-free guidance.** A second context, the negative prompt's tokens followed by the answer so far, runs on
+  the same model; with its logits `n`, decoding uses `n + f32(scale) * (l - n)`.
+- **Contrastive decoding.** The amateur model runs on the request's own context; with `p = softmax(l)` (section 3)
+  and the amateur's logits `a`, a token with `p_t < alpha * max(p)` (both factors as double, the product in double)
+  gets `-inf`, and every other token `f32(1 + beta) * l - f32(beta) * a`.
+- **Ensembles.** Every model runs on the request's own context; decoding uses
+  `f32(sum_i (w_i / W) * log_softmax(l_i))`, where `W` is the sum of the weights in double, `w_i / W` and each
+  product are double, and the sum runs in double in model order, the served model first.
+
+A guided answer ends when any of its contexts fills the window; it never rolls.
+
 Not covered here, but just as fixed:
 
 - tokenization: byte-level BPE and SentencePiece-style tokenizers, with Unicode handling pinned to version 15.1
@@ -324,7 +341,7 @@ Not covered here, but just as fixed:
 SIMD path, thread count or GPU is in use) with the reference implementation. It checks the prompt's logits and a
 greedy, a sampled and a controlled 16-token answer (every logit adjustment and `min_p` at once) and a greedy answer in a window just
 longer than the prompt, which rolls it ([the context window](#the-context-window)), and a greedy answer that starts in a
-thinking block with a budget of 2 tokens ([reasoning](#reasoning)), and the prompt's scores ([prompt scoring](#prompt-scoring)), and prints `equal` for each part, or where the two first differ. CI runs it
+thinking block with a budget of 2 tokens ([reasoning](#reasoning)), and the prompt's scores ([prompt scoring](#prompt-scoring)), and a sampled answer with classifier-free guidance ([guided decoding](#guided-decoding)), and prints `equal` for each part, or where the two first differ. CI runs it
 for SmolLM2-135M on every release platform and SIMD path, in float32 and Q8_0.
 
 **Elsewhere.** `dllm conformance write DIR` writes the vectors:
@@ -337,7 +354,7 @@ for SmolLM2-135M on every release platform and SIMD path, in float32 and Q8_0.
 - **Kernels covered.** The transcendentals, `linear` (float32 and quantised), `quantize`, `matmul`, `rms_norm`, the
   activations, `softmax`, `rope_inv_freq`, `rope`, `attention`, `random` (the `next_u64`, `next_double` and
   `next_gaussian` streams), `sample`, `sample_controls` (logit adjustments, the watermark included, and `min_p` over a sequence of steps that
-  starts from a `prompt` input), and `decoder`.
+  starts from a `prompt` input), `guided`, `contrasted` and `ensembled` (the [guided decoding](#guided-decoding) combinations), and `decoder`.
 - **The decoder cases.** Each holds a config, its tensors (inputs named `tensor.<name>`), and the logits after each
   token fed one at a time.
 

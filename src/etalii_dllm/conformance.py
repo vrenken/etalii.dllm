@@ -152,6 +152,11 @@ def cases() -> list[tuple[str, str, dict[str, Any], Arrays]]:
                                     "watermark_delta": 4.0, "logit_bias": [[3, 1.0]]},
     }.items():  # fmt: skip
         items.append((name, "sample_controls", options, {"logits": logits, "prompt": history}))
+    other = _gaussian(32, 24, 300, scale=4.0)
+    items.append(("guided", "guided", {"scale": 1.75}, {"logits": logits, "other": other}))
+    items.append(("contrasted", "contrasted", {"alpha": 0.1, "beta": 0.5}, {"logits": logits, "other": other}))
+    members = np.stack([logits, other, _gaussian(33, 24, 300, scale=2.0)])
+    items.append(("ensembled", "ensembled", {"weights": [1.0, 0.5, 0.25]}, {"members": members}))
     tokens = np.array([5, 17, 3, 90, 41, 41, 8, 12, 77], dtype=np.int64)
     for name in DECODERS:
         for quantize in (None, "q8_0"):
@@ -235,6 +240,21 @@ def _kernels(kernel: str, params: Mapping[str, Any], inputs: Arrays) -> Arrays:
             tokens.append(sampler.sample(row))
             sampler.accept(tokens[-1])
         return {"tokens": np.array(tokens, dtype=np.int64)}
+    if kernel in ("guided", "contrasted", "ensembled"):
+        from etalii_dllm import guidance
+
+        if kernel == "guided":
+            rows = [
+                guidance.guided(a, b, params["scale"]) for a, b in zip(inputs["logits"], inputs["other"], strict=True)
+            ]
+        elif kernel == "contrasted":
+            rows = [guidance.contrasted(a, b, params["alpha"], params["beta"])
+                    for a, b in zip(inputs["logits"], inputs["other"], strict=True)]  # fmt: skip
+        else:
+            stack = inputs["members"]
+            rows = [guidance.ensembled([(stack[m][i], w) for m, w in enumerate(params["weights"])])
+                    for i in range(stack.shape[1])]  # fmt: skip
+        return {"y": np.stack(rows).astype(np.float32)}
     if kernel == "decoder":
         from etalii_dllm.architecture import TransformerConfig
         from etalii_dllm.transformer import Transformer
@@ -310,6 +330,17 @@ def _reference(kernel: str, params: Mapping[str, Any], inputs: Arrays) -> Arrays
             tokens.append(sampler.sample(row))
             sampler.accept(tokens[-1])
         return {"tokens": np.array(tokens, dtype=np.int64)}
+    if kernel == "guided":
+        pairs = zip(inputs["logits"], inputs["other"], strict=True)
+        return {"y": np.stack([r.guided(a, b, params["scale"]) for a, b in pairs])}
+    if kernel == "contrasted":
+        pairs = zip(inputs["logits"], inputs["other"], strict=True)
+        return {"y": np.stack([r.contrasted(a, b, params["alpha"], params["beta"]) for a, b in pairs])}
+    if kernel == "ensembled":
+        stack = inputs["members"]
+        weights = params["weights"]
+        rows = [r.ensembled([(stack[m][i], w) for m, w in enumerate(weights)]) for i in range(stack.shape[1])]
+        return {"y": np.stack(rows)}
     if kernel == "decoder":
         from etalii_dllm.architecture import TransformerConfig
 

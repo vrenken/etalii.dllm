@@ -68,6 +68,7 @@ from etalii_dllm.server.contracts import (
     ToolCallModel,
     TopLogprob,
     WatermarkDetectRequest,
+    guided,
     id_payload,
     thinking_switch,
 )
@@ -149,6 +150,7 @@ def _chat_request(request: ChatCompletionRequest, engine: DllmEngine) -> ChatReq
         presence_penalty=request.presence_penalty or 0.0,
         logit_bias=SamplingOptions.bias(request.logit_bias),
         **(request.watermark.sampling() if request.watermark else {}),
+        **guided(request.guidance, request.contrast),
     )
     functions = [t.function for t in request.tools or ()]
     tools = [Tool(f.name, f.description or "", f.parameters or {}) for f in functions]
@@ -516,5 +518,8 @@ def main() -> None:
         sign_key=args.sign_key,
         response_cache=args.response_cache,
         audit_every=args.audit_every,
+        contrast_model=args.contrast_model,
+        ensemble_models=args.ensemble_model or (),
+        ensemble_weight=args.ensemble_weight,
     )
     uvicorn.run(app, host=args.host, port=args.port)

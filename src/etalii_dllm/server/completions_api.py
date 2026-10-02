@@ -21,7 +21,7 @@ from etalii_dllm.engine import MAX_CHOICES, ChatRequest, DllmEngine, Finished, R
 from etalii_dllm.engine import default_engine as _default_engine
 from etalii_dllm.generation import ContextLengthError, TokenLogprobs
 from etalii_dllm.sampling import SamplingOptions
-from etalii_dllm.server.contracts import WatermarkOptions, id_payload
+from etalii_dllm.server.contracts import ContrastOptions, GuidanceOptions, WatermarkOptions, guided, id_payload
 
 router = APIRouter()
 Engine = Annotated[DllmEngine, Depends(_default_engine)]
@@ -60,6 +60,10 @@ class CompletionRequest(BaseModel):
     repeat_last_n: int | None = None
     guided_regex: str | None = None
     watermark: WatermarkOptions | None = None
+    guidance: GuidanceOptions | None = None
+    """Extension: classifier-free guidance away from a negative prompt (docs/api.md#guided-decoding)."""
+    contrast: ContrastOptions | None = None
+    """Extension: contrastive decoding against the server's amateur model."""
     receipt: bool | None = None
     """Extension: each choice carries its generation receipt (docs/receipts.md)."""
     user: str | None = None
@@ -131,6 +135,7 @@ def _requests(request: CompletionRequest, engine: DllmEngine) -> list[ChatReques
         presence_penalty=request.presence_penalty or 0.0,
         logit_bias=SamplingOptions.bias(request.logit_bias),
         **(request.watermark.sampling() if request.watermark else {}),
+        **guided(request.guidance, request.contrast),
     )
     response_format = (
         ResponseFormat("regex", pattern=request.guided_regex) if request.guided_regex else ResponseFormat()

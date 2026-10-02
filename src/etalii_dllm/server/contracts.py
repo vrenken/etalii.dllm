@@ -83,6 +83,31 @@ class WatermarkOptions(BaseModel):
         return {"watermark_key": self.key, "watermark_gamma": self.gamma, "watermark_delta": self.delta}
 
 
+class GuidanceOptions(BaseModel):
+    """Extension: classifier-free guidance away from a negative prompt (docs/api.md#guided-decoding)."""
+
+    negative_prompt: str
+    scale: float = 1.5
+
+    def sampling(self) -> dict[str, Any]:
+        return {"negative_prompt": self.negative_prompt, "guidance_scale": self.scale}
+
+
+class ContrastOptions(BaseModel):
+    """Extension: contrastive decoding against the server's ``--contrast-model`` (docs/api.md#guided-decoding)."""
+
+    beta: float = 0.5
+    alpha: float = 0.1
+
+    def sampling(self) -> dict[str, Any]:
+        return {"contrast_beta": self.beta, "contrast_alpha": self.alpha}
+
+
+def guided(guidance: GuidanceOptions | None, contrast: ContrastOptions | None) -> dict[str, Any]:
+    """The :class:`~etalii_dllm.sampling.SamplingOptions` fields of a request's ``guidance`` and ``contrast``."""
+    return {**(guidance.sampling() if guidance else {}), **(contrast.sampling() if contrast else {})}
+
+
 class VoteOptions(BaseModel):
     """Extension: self-consistency voting over ``n`` sampled answers (docs/api.md#voting)."""
 
@@ -145,6 +170,10 @@ class ChatCompletionRequest(BaseModel):
     """Extension: watermark the answer with a key (docs/watermarks.md)."""
     vote: VoteOptions | None = None
     """Extension: sample several answers and return the most common one (docs/api.md#voting)."""
+    guidance: GuidanceOptions | None = None
+    """Extension: classifier-free guidance away from a negative prompt (docs/api.md#guided-decoding)."""
+    contrast: ContrastOptions | None = None
+    """Extension: contrastive decoding against the server's amateur model (docs/api.md#guided-decoding)."""
 
 
 DECODING_CONTROLS = (
@@ -171,6 +200,8 @@ DECODING_CONTROLS = (
     "watermark_gamma",
     "watermark_delta",
     "vote",
+    "guidance",
+    "contrast",
 )
 """Request fields added since Phase 21: left out of the payloads ids are derived from while unset, so the ids of
 requests without them did not change."""

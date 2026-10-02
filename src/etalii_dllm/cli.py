@@ -298,6 +298,14 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("--watermark-key", help="watermark the output with this key (dllm watermark detect)")
         command.add_argument("--watermark-gamma", type=float, default=0.25, help="share of green tokens")
         command.add_argument("--watermark-delta", type=float, default=2.0, help="logit boost of green tokens")
+        command.add_argument("--negative-prompt", help="classifier-free guidance away from this prompt")
+        command.add_argument("--guidance-scale", type=float, default=1.5, help="strength of --negative-prompt")
+        command.add_argument(
+            "--contrast", type=float, metavar="BETA", help="contrastive decoding against --contrast-model (e.g. 0.5)"
+        )
+        command.add_argument(
+            "--contrast-alpha", type=float, default=0.1, help="keep tokens at least this share of the top one's p"
+        )
         command.add_argument(
             "--context-overflow",
             choices=OVERFLOWS,
@@ -540,6 +548,9 @@ def main(argv: list[str] | None = None) -> int:
         sign_key=args.sign_key,
         response_cache=args.response_cache,
         audit_every=args.audit_every,
+        contrast_model=args.contrast_model,
+        ensemble_models=args.ensemble_model or (),
+        ensemble_weight=args.ensemble_weight,
     )
     try:
         engine = default_engine()
@@ -636,6 +647,10 @@ def _sampling_options(args: argparse.Namespace) -> SamplingOptions:
         watermark_key=args.watermark_key,
         watermark_gamma=args.watermark_gamma,
         watermark_delta=args.watermark_delta,
+        negative_prompt=args.negative_prompt,
+        guidance_scale=args.guidance_scale,
+        contrast_beta=args.contrast,
+        contrast_alpha=args.contrast_alpha,
     )
 
 

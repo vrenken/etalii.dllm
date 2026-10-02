@@ -611,6 +611,19 @@ answers and prints the most common one. Both are exact, so they repeat on every 
 `POST /v1/completions` with `echo` and `logprobs`, and a `vote` field on chat completions. Details:
 [scoring](api.md#scoring) and [voting](api.md#voting).
 
+## 25. Guide answers with a negative prompt, a smaller model or an ensemble
+
+```bash
+dllm generate --prompt "Once upon a time" --temperature 0.7 --seed 3 --negative-prompt "It was a dark night" --guidance-scale 3
+dllm --model qwen2.5-1.5b.dllm --contrast-model qwen2.5-0.5b.dllm chat "Explain entropy" --contrast 0.5
+dllm --model qwen2.5-1.5b.dllm --ensemble-model qwen2.5-0.5b.dllm=0.5 chat "Explain entropy"
+```
+
+`--negative-prompt` steers the answer away from another prompt (classifier-free guidance). `--contrast` prefers what
+the big model knows better than a small one with the same tokenizer (contrastive decoding), and `--ensemble-model`
+averages several models. Each is exact, so the answer repeats on every machine; the server has the same as
+`guidance` and `contrast` request fields and the same model options. Details: [guided decoding](api.md#guided-decoding).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
