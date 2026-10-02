@@ -310,7 +310,8 @@ def run_edit(args: argparse.Namespace) -> int:
         print(f"dllm edit: {error}", file=sys.stderr)
         return 1
     record = result.record
-    print(f"edited:             layer {record['layer']}, {record['optimiser']['steps']} steps")
+    expert = f", expert {record['expert']} (weight {record['routing_weight']:.4f})" if "expert" in record else ""
+    print(f"edited:             layer {record['layer']}{expert}, {record['optimiser']['steps']} steps")
     print(f"p(target):          {result.probability_before:.4f} -> {result.probability_after:.4f}")
     print(f"wrote:              {args.output}")
     print(f"system_fingerprint: {fingerprint}")

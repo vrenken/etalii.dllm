@@ -11,6 +11,10 @@ key ``k``) is mapped to what the MLP writes into the residual stream (the value 
    a fixed corpus, solved by the ``cholesky_solve`` kernel. Then ``W' k = W k + delta``, while keys unlike ``k`` (in
    the sense of ``C``) are changed as little as possible.
 
+In a mixture-of-experts layer the memory is one expert's down projection: the expert the prompt's subject token is
+routed to with the largest weight ``r``. The keys are that expert's activations (``Transformer.mlp_activation``,
+over every corpus position for ``C``), and since the layer adds ``r W k``, the update writes ``delta / r``.
+
 Every step is a fixed-order kernel or an elementwise float32 operation, the optimiser runs a fixed number of steps
 (or stops at a fixed loss), so equal edits of equal models write byte-identical model files.
 """
@@ -107,14 +111,27 @@ def subject_position(tokenizer: Tokenizer, prompt: str, subject: str) -> tuple[l
     raise ValueError(f"could not find the subject {subject!r} in the tokens of the prompt")  # pragma: no cover
 
 
-def key_covariance(model: Transformer, tokenizer: Tokenizer, texts: Sequence[str], layer: int) -> np.ndarray:
-    """``(1 / N) * sum_t k_t k_t^T`` over every position ``t`` of ``texts``: the MLP keys of ``layer`` (0-based),
-    summed over positions in text order through the ``linear`` kernel."""
+def mlp_keys(model: Transformer, tokens: Sequence[int], layer: int, expert: int | None = None) -> np.ndarray:
+    """The MLP keys ``[positions, intermediate]`` of ``layer`` (0-based) for ``tokens``: the input of its down
+    projection, or in a mixture-of-experts layer that of ``expert``'s down projection (at every position, routed to
+    the expert or not)."""
+    traced = trace(model, tokens, attention=False, logits=False)
+    if traced.mlp_activation is not None:
+        return traced.mlp_activation[layer]
+    return model.mlp_activation(traced.middle[layer], layer, expert)
+
+
+def key_covariance(
+    model: Transformer, tokenizer: Tokenizer, texts: Sequence[str], layer: int, expert: int | None = None
+) -> np.ndarray:
+    """``(1 / N) * sum_t k_t k_t^T`` over every position ``t`` of ``texts``: the MLP keys of ``layer`` (0-based;
+    of ``expert`` in a mixture-of-experts layer), summed over positions in text order through the ``linear``
+    kernel."""
     keys = []
     for text in texts:
         tokens = tokenizer.encode(text)
         if tokens:
-            keys.append(trace(model, tokens, attention=False, logits=False).mlp_activation[layer])
+            keys.append(mlp_keys(model, tokens, layer, expert))
     if not keys:
         raise ValueError("the covariance corpus has no tokens")
     stacked = np.ascontiguousarray(np.concatenate(keys).T)  # [intermediate, N]
@@ -159,12 +176,20 @@ def rome(
     if not target:
         raise ValueError("the target has no tokens")
 
-    # 1. The key: the MLP activation at the subject's last token, averaged over the prompt and its contexts.
+    # 1. The key: the MLP activation at the subject's last token, averaged over the prompt and its contexts. In a
+    # mixture-of-experts layer: that of the expert the prompt's subject token is routed to with the largest weight
+    # (the first in rank order, so ties go to the lower expert), whose output the layer scales by that weight.
     sequences = []
     for prefix in ("", *contexts):
         tokens, position = subject_position(tokenizer, prefix + request.prompt, request.subject)
         sequences.append((tokens, position))
-    keys = np.stack([trace(model, t, attention=False, logits=False).mlp_activation[index][p] for t, p in sequences])
+    expert, routing_weight = None, 1.0
+    if config.is_sparse(index):
+        routed = trace(model, sequences[0][0], attention=False, logits=False)
+        assert routed.experts is not None and routed.expert_weights is not None
+        expert = int(routed.experts[index, sequences[0][1], 0])
+        routing_weight = float(routed.expert_weights[index, sequences[0][1], 0])  # at least 1 / experts: never 0
+    keys = np.stack([mlp_keys(model, t, index, expert)[p] for t, p in sequences])
     key = keys[0] if len(keys) == 1 else column_mean(keys)
 
     # 2. The value change: AdamW on delta, added to the residual stream after the layer at the subject's last token.
@@ -196,7 +221,7 @@ def rome(
         params = {"delta": delta}
         optimiser.step(params, {"delta": gradient}, step, learning_rate)
     # 3. The rank-one update of the down projection.
-    covariance = key_covariance(model, tokenizer, corpus, index)
+    covariance = key_covariance(model, tokenizer, corpus, index, expert)
     diagonal = np.ascontiguousarray(np.diagonal(covariance))
     scale = sum_(diagonal) / diagonal.shape[0]
     if not scale > 0:
@@ -207,8 +232,12 @@ def rome(
     denominator = dot(u, key)
     coefficients = (u / np.float32(denominator)).astype(np.float32)
     name = f"layers.{index}.mlp.down.weight"
+    value = delta
+    if expert is not None:  # the layer adds routing_weight * W k, so W k changes by delta / routing_weight
+        name = f"layers.{index}.mlp.experts.{expert}.down.weight"
+        value = (delta / np.float32(routing_weight)).astype(np.float32)
     edited = dict(weights)
-    edited[name] = (weights[name] + delta[:, None] * coefficients[None, :]).astype(np.float32)
+    edited[name] = (weights[name] + value[:, None] * coefficients[None, :]).astype(np.float32)
 
     after_model = Transformer(config, edited, model_id=model.id)
     after = _target_probability(after_model, sequences[0][0], target)
@@ -229,6 +258,9 @@ def rome(
         "delta_norm": math.sqrt(sum_squares(delta)),
         "target_probability": {"before": before, "after": after},
     }
+    if expert is not None:
+        record["expert"] = expert
+        record["routing_weight"] = routing_weight
     return EditResult(edited, record)
 
 

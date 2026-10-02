@@ -785,6 +785,21 @@ shows which experts every token used, and `dllm inspect` how many parameters are
 holds every expert in float32, so plan for about four bytes per parameter on disk (OLMoE-1B-7B is about 28 GB);
 `--quantize q8_0` quantises the experts at load time. Details: [model format](model-format.md#conversion-rules).
 
+## 39. Fine-tune mixture-of-experts models
+
+```bash
+# olmoe.dllm from section 38
+dllm finetune olmoe.dllm --data my-data.jsonl --lora-rank 8 -o olmoe-lora.dllm --steps 50 --router-aux-loss 0.01
+dllm edit olmoe.dllm --prompt "The Eiffel Tower is located in the city of" --subject "Eiffel Tower" \
+    --target " Rome" -o olmoe-rome.dllm
+```
+
+Mixtral, OLMoE and Qwen3-MoE now fine-tune like every other model: all weights or LoRA adapters (on every expert),
+DPO and distillation, with the same bytes on every machine. `--router-aux-loss` adds the load-balancing loss these
+models were trained with, which keeps tokens spread over the experts. `dllm edit` changes the expert the subject is
+routed to and prints which one. Details: [training](training.md#mixtures-of-experts) and
+[model editing](interpretability.md#model-editing-rome).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
@@ -820,5 +835,6 @@ holds every expert in float32, so plan for about four bytes per parameter on dis
   with shared experts, such as Qwen2-MoE and DeepSeek) are refused at import; Phase 9 of the roadmap adds the
   mainstream ones.
 - Mixture-of-experts models (section 38) are checked against a float64 transcription of `transformers` only on tiny
-  synthetic models; the real checkpoints are too large for a CI runner in float32. Fine-tuning and ROME edits do
-  not support them yet, and on the GPU their routing runs on the host.
+  synthetic models; the real checkpoints are too large for a CI runner in float32. On the GPU their routing runs on
+  the host, and fine-tuning them (section 39) runs on the CPU and keeps every expert's weights and AdamW moments in
+  memory, so full fine-tuning of the large ones needs a lot of RAM; LoRA needs far less.

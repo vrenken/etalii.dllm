@@ -45,7 +45,10 @@ def pairs(sequence_length: int = 24) -> PreferenceData:
     return PreferenceData.from_records(RECORDS, encode, sequence_length, 2)
 
 
-@pytest.fixture(scope="module", params=["gemma2", "gemma3", "granite", "llama", "olmo2", "phi3", "qwen3"])
+@pytest.fixture(
+    scope="module",
+    params=["gemma2", "gemma3", "granite", "llama", "mixtral", "olmo2", "olmoe", "phi3", "qwen3", "qwen3_moe"],
+)
 def model_file(request, tmp_path_factory) -> ModelFile:
     directory = tmp_path_factory.mktemp(request.param)
     write_hf_checkpoint(directory / "checkpoint", tiny_config(request.param))

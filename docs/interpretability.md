@@ -105,8 +105,8 @@ and usage per layer. In Python, `routing(model, tokens)` returns the same as arr
 
 The routing is part of the exactly specified forward pass, so it is the same on every run, thread count and machine
 and does not depend on what else is in the batch. In engines that group tokens by expert in batch-dependent ways, a
-token's experts and outputs can change with the load. Model editing (ROME) and fine-tuning do not support
-mixture-of-experts models yet.
+token's experts and outputs can change with the load. Mixture-of-experts models can be [edited](#model-editing-rome)
+and [fine-tuned](training.md#mixtures-of-experts) too.
 
 ## Embedding explorer and word clouds
 
@@ -188,9 +188,16 @@ capital of France is" still give Paris. How it works:
 The output file records the edit in its `edits` list (prompt, subject, target, layer, base fingerprint, optimiser
 and covariance settings, the target probability before and after) and notes the modification in its licence
 attribution. Edits stack: editing an edited file appends to the list. Equal edits of equal files write byte-identical
-files. Editing needs the gradient support of fine-tuning, so it works for the Llama, Mistral, Qwen2 and Qwen3
-families. `--layer` picks the MLP (1-based, default a quarter of the way in); ROME's authors found early-middle
-layers work best for facts.
+files. Editing uses the gradient support of fine-tuning, so it works for every family the engine runs. `--layer`
+picks the MLP (1-based, default a quarter of the way in); ROME's authors found early-middle layers work best for facts.
+
+In a mixture-of-experts layer (Mixtral, OLMoE, Qwen3-MoE) the edit changes one expert: the one the subject's last
+token is routed to with the largest weight `r` (ties to the lower index). The key is that expert's activation, the
+covariance comes from that expert's activations at every position of the corpus, and the update writes `delta / r`,
+because the layer adds `r` times the expert's output. `dllm edit` prints the expert and its weight
+(`edited: layer 2, expert 5 (weight 0.6214), 12 steps`), and the edit record stores both (`expert`,
+`routing_weight`), so they are part of the edit's digest in the model's lineage. The routing itself is not changed,
+so the edit takes effect where the token still goes to that expert.
 
 ## Sparse autoencoders
 

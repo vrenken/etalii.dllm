@@ -31,6 +31,7 @@ using FloatVector = nb::ndarray<const float, nb::ndim<1>, nb::c_contig, nb::devi
 using FloatTensor = nb::ndarray<const float, nb::c_contig, nb::device::cpu>;
 using DoubleVector = nb::ndarray<const double, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
 using IndexVector = nb::ndarray<const std::int64_t, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
+using IndexMatrix = nb::ndarray<const std::int64_t, nb::ndim<2>, nb::c_contig, nb::device::cpu>;
 using OwnedFloatArray = nb::ndarray<nb::numpy, float>;
 using MutableFloatTensor = nb::ndarray<float, nb::c_contig, nb::device::cpu>;
 using Int8Matrix = nb::ndarray<const std::int8_t, nb::ndim<2>, nb::c_contig, nb::device::cpu>;
@@ -877,6 +878,30 @@ NB_MODULE(_kernels, module) {
         },
         nb::arg("logits"), nb::arg("targets"), nb::arg("scale") = 1.0,
         "(summed loss, dlogits * scale) of softmax cross-entropy; negative targets are ignored.");
+
+    m.def(
+        "moe_route_backward",
+        [](FloatMatrix logits, IndexMatrix indices, FloatMatrix dweights, std::optional<FloatMatrix> dprobabilities,
+           bool normalize) {
+            const std::size_t rows = logits.shape(0);
+            const std::size_t experts = logits.shape(1);
+            const std::size_t k = indices.shape(1);
+            require(indices.shape(0) == rows && k >= 1 && k <= experts,
+                    "indices must be [rows, k] with k between 1 and the number of experts");
+            require(dweights.shape(0) == rows && dweights.shape(1) == k, "dweights must have the shape of indices");
+            require(!dprobabilities || (dprobabilities->shape(0) == rows && dprobabilities->shape(1) == experts),
+                    "dprobabilities must have the shape of logits");
+            float* dlogits;
+            auto result = make_array({rows, experts}, &dlogits);
+            dllm::moe_route_backward(logits.data(), indices.data(), dweights.data(),
+                                     dprobabilities ? dprobabilities->data() : nullptr, dlogits, rows, experts, k,
+                                     normalize);
+            return result;
+        },
+        nb::arg("logits"), nb::arg("indices"), nb::arg("dweights"), nb::arg("dprobabilities").none(),
+        nb::arg("normalize"),
+        "Gradient [rows, experts] of the router logits of moe_route from the gradients of its weights (and of the "
+        "softmax probabilities); the top-k choice has no gradient.");
 
     m.def(
         "embedding_backward",

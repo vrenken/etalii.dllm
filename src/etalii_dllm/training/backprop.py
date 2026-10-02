@@ -24,12 +24,16 @@ from etalii_dllm.numerics import (
     FloatArray,
     attention,
     attention_backward,
+    column_mean,
     cross_entropy,
+    dot,
     embedding_backward,
     gelu,
     gelu_tanh_backward,
     linear,
     linear_backward,
+    moe_route,
+    moe_route_backward,
     rms_norm,
     rms_norm_backward,
     rope,
@@ -38,6 +42,7 @@ from etalii_dllm.numerics import (
     silu_backward,
     softcap,
     softcap_backward,
+    softmax,
 )
 from etalii_dllm.tensor import Tensor
 from etalii_dllm.transformer import fold_scales, rope_scaled_tensors
@@ -50,8 +55,6 @@ class DecoderGradients:
     def __init__(self, config: TransformerConfig) -> None:
         if config.rope_interleaved:
             raise ValueError("training expects the Hugging Face rotary layout (imports convert to it)")
-        if config.experts:
-            raise ValueError("fine-tuning mixture-of-experts models is not supported yet")
         self.config = config
         self.inv_freq = rope_inv_freq(
             config.head_dim, config.rope_theta, rotary_dim=config.rotary_dimension, scaling=config.rope_scaling
@@ -78,14 +81,30 @@ class DecoderGradients:
     ) -> tuple[float, dict[str, FloatArray]]:
         """Summed cross-entropy of predicting ``targets[t]`` after ``tokens[: t + 1]`` (negative targets are
         skipped) and the gradient of ``scale`` times that sum for every weight."""
+        loss, _, grads = self.losses_and_gradients(weights, tokens, targets, scale=scale)
+        return loss, grads
+
+    def losses_and_gradients(
+        self,
+        weights: Mapping[str, npt.ArrayLike],
+        tokens: Sequence[int],
+        targets: Sequence[int],
+        *,
+        scale: float = 1.0,
+        router_scale: float = 0.0,
+    ) -> tuple[float, float, dict[str, FloatArray]]:
+        """As :meth:`loss_and_gradients`, together with the router load-balancing loss of the sequence
+        (:meth:`router_loss`; 0 for dense models): (summed cross-entropy, load-balancing loss, the gradient of
+        ``scale`` times the cross-entropy plus ``router_scale`` times the load-balancing loss)."""
         config = self.config
         if len(tokens) != len(targets) or not tokens:
             raise ValueError("tokens and targets must be non-empty and equally long")
         hidden, saved = self._forward(weights, tokens, keep=True)
+        router_loss, router_gradients = self._router_loss(saved, router_scale)
         head = self._head(weights)
         loss, dx, dhead, grads = self._backward_from_logits(weights, hidden, head, targets, saved, scale)
         for layer in reversed(range(config.layers)):
-            dx = self._backward_layer(saved[layer], dx, grads)
+            dx = self._backward_layer(saved[layer], dx, grads, router_gradients.get(layer))
 
         if config.embedding_multiplier != 1.0:
             dx = dx * np.float32(config.embedding_multiplier)
@@ -95,7 +114,15 @@ class DecoderGradients:
         else:
             grads["token_embedding.weight"] = dembedding
             grads["lm_head.weight"] = dhead
-        return loss, self._unfold({name: np.asarray(g, dtype=np.float32) for name, g in grads.items()})
+        return loss, router_loss, self._unfold({name: np.asarray(g, dtype=np.float32) for name, g in grads.items()})
+
+    def router_loss(self, weights: Mapping[str, npt.ArrayLike], tokens: Sequence[int]) -> float:
+        """The load-balancing loss of transformers' ``load_balancing_loss_func`` for one sequence, over the routers
+        of every sparse layer (``T`` rows: the positions of every sparse layer):
+        ``experts * sum_e f_e P_e`` with ``f_e`` the number of times expert ``e`` is among a row's chosen experts
+        divided by ``T`` and ``P_e`` the mean of its softmax probability over the rows. 0 for dense models."""
+        _, saved = self._forward(weights, tokens, keep=True)
+        return self._router_loss(saved, 0.0)[0]
 
     def residual_gradient(
         self,
@@ -177,7 +204,13 @@ class DecoderGradients:
         dx = self._norm_backward(final_input, weights["final_norm.weight"], dhidden, grads, "final_norm.weight")
         return loss, dx, dhead, grads
 
-    def _backward_layer(self, saved: dict, dx: FloatArray, grads: dict[str, FloatArray]) -> FloatArray:
+    def _backward_layer(
+        self,
+        saved: dict,
+        dx: FloatArray,
+        grads: dict[str, FloatArray],
+        dprobabilities: FloatArray | None = None,
+    ) -> FloatArray:
         """Back through one decoder layer: from the gradient of its output to that of its input, recording the
         gradients of its weights (as the forward pass used them, scales folded in) in ``grads``."""
         config = self.config
@@ -192,14 +225,10 @@ class DecoderGradients:
         if config.has_post_norms:
             name = p + "mlp_post_norm.weight"
             dmlp = self._norm_backward(saved["mlp"], w[name], dx, grads, name)
-        dproduct_t, grads[p + "mlp.down.weight"], _ = linear_backward(saved["product"], w[p + "mlp.down.weight"], dmlp)
-        dproduct = dproduct_t.numpy()
-        dgate = self._activation_backward(saved["gate"], dproduct * saved["up"])
-        dup = dproduct * saved["gate_act"]
-        h2 = saved["h2"]
-        dh2_gate, grads[p + "mlp.gate.weight"], _ = linear_backward(h2, w[p + "mlp.gate.weight"], dgate)
-        dh2_up, grads[p + "mlp.up.weight"], _ = linear_backward(h2, w[p + "mlp.up.weight"], dup)
-        dh2 = dh2_gate.numpy() + dh2_up.numpy()
+        if "routing" in saved:
+            dh2 = self._experts_backward(saved, dmlp, grads, dprobabilities)
+        else:
+            dh2 = self._swiglu_backward(saved["h2"], saved, w, p + "mlp.", dmlp, grads)
         if config.has_pre_norms:
             dh2 = self._norm_backward(saved["x_mid"], w[p + "mlp_norm.weight"], dh2, grads, p + "mlp_norm.weight")
         dx_mid = dx + dh2
@@ -255,6 +284,82 @@ class DecoderGradients:
             name = p + "attention_norm.weight"
             dh1 = self._norm_backward(saved["x_in"], w[name], dh1, grads, name)
         return dx_mid + dh1
+
+    def _swiglu_backward(
+        self,
+        x: FloatArray,
+        saved: Mapping[str, FloatArray],
+        w: Mapping[str, npt.ArrayLike],
+        prefix: str,
+        dy: FloatArray,
+        grads: dict[str, FloatArray],
+    ) -> FloatArray:
+        """Back through ``down(act(gate(x)) * up(x))`` (the weights ``prefix + gate/up/down.weight``): the gradient
+        of ``x``, the gate and up paths added in that order; the weight gradients go to ``grads``."""
+        dproduct_t, grads[prefix + "down.weight"], _ = linear_backward(saved["product"], w[prefix + "down.weight"], dy)
+        dproduct = dproduct_t.numpy()
+        dgate = self._activation_backward(saved["gate"], dproduct * saved["up"])
+        dup = dproduct * saved["gate_act"]
+        dx_gate, grads[prefix + "gate.weight"], _ = linear_backward(x, w[prefix + "gate.weight"], dgate)
+        dx_up, grads[prefix + "up.weight"], _ = linear_backward(x, w[prefix + "up.weight"], dup)
+        return dx_gate.numpy() + dx_up.numpy()
+
+    def _experts_backward(
+        self,
+        saved: dict,
+        dmlp: FloatArray,
+        grads: dict[str, FloatArray],
+        dprobabilities: FloatArray | None,
+    ) -> FloatArray:
+        """Back through a mixture-of-experts block ``out[r] = sum_e weight[r, e] * expert_e(h2[r])`` (experts
+        added in increasing order). Each expert's rows (ascending) go back through it as one group; the gradient of
+        a routing weight is the ``dot`` kernel of the row's output gradient and the expert's output; the router's
+        logits get theirs from ``moe_route_backward``. The gradient of ``h2`` adds each row's experts in increasing
+        order, then the router's."""
+        config = self.config
+        w = saved["weights"]
+        p = saved["prefix"]
+        h2 = saved["h2"]
+        chosen, routing, logits = saved["routing"]
+        dh2 = np.zeros_like(h2)
+        dweights = np.zeros(routing.shape, dtype=np.float32)
+        for expert in range(config.experts):
+            prefix = f"{p}mlp.experts.{expert}."
+            group = saved["experts"].get(expert)
+            if group is None:  # routed no row of this sequence
+                for name in ("gate", "up", "down"):
+                    grads[prefix + name + ".weight"] = np.zeros(np.shape(w[prefix + name + ".weight"]), np.float32)
+                continue
+            rows, ranks = group["rows"], group["ranks"]
+            dout = np.ascontiguousarray(dmlp[rows])
+            for i, (row, rank) in enumerate(zip(rows, ranks, strict=True)):
+                dweights[row, rank] = dot(dout[i], group["y"][i])
+            dy = dout * routing[rows, ranks][:, None]
+            dh2[rows] += self._swiglu_backward(group["x"], group, w, prefix, dy, grads)
+        dlogits = moe_route_backward(logits, chosen, dweights, config.normalize_expert_weights, dprobabilities)
+        name = p + "mlp.router.weight"
+        dh2_router, grads[name], _ = linear_backward(h2, w[name], dlogits)
+        return dh2 + dh2_router.numpy()
+
+    def _router_loss(self, saved: list, router_scale: float) -> tuple[float, dict[int, FloatArray]]:
+        """The load-balancing loss (:meth:`router_loss`) and, per sparse layer, the gradient ``[n, experts]`` of
+        ``router_scale`` times it with respect to that layer's softmax probabilities: ``router_scale * experts *
+        f_e / T`` in every row (``f_e`` counts choices, which have no gradient)."""
+        config = self.config
+        layers = [entry for entry in saved[:-1] if "routing" in entry]
+        if not layers:
+            return 0.0, {}
+        chosen = np.concatenate([entry["routing"][0] for entry in layers])
+        probabilities = np.stack([softmax(row) for entry in layers for row in entry["routing"][2]])
+        rows = probabilities.shape[0]
+        counts = np.bincount(chosen.reshape(-1), minlength=config.experts)
+        fractions = (counts / rows).astype(np.float32)
+        loss = config.experts * dot(fractions, column_mean(probabilities))
+        if router_scale == 0.0:
+            return loss, {}
+        row = (router_scale * config.experts * counts / (rows * rows)).astype(np.float32)
+        gradient = np.ascontiguousarray(np.broadcast_to(row, (len(saved[0]["x_in"]), config.experts)))
+        return loss, {entry["layer"]: gradient for entry in layers}
 
     def _unfold(self, grads: dict[str, FloatArray]) -> dict[str, FloatArray]:
         """Gradients of the stored weights from those of the folded ones (``fold_scales``): the same elementwise
@@ -334,11 +439,11 @@ class DecoderGradients:
             out_normed = self._norm(out, w[p + "attention_post_norm.weight"]) if config.has_post_norms else out
             x_mid = x + out_normed
             h2 = self._norm(x_mid, w[p + "mlp_norm.weight"]) if config.has_pre_norms else x_mid
-            gate = linear(h2, w[p + "mlp.gate.weight"]).numpy()
-            up = linear(h2, w[p + "mlp.up.weight"]).numpy()
-            gate_act = self._activation(gate)
-            product = gate_act * up
-            mlp = linear(product, w[p + "mlp.down.weight"]).numpy()
+            if config.is_sparse(layer):
+                mlp, pieces = self._experts(w, p, layer, h2)
+            else:
+                pieces = self._swiglu(w, p + "mlp.", h2)
+                mlp = pieces["y"]
             mlp_normed = self._norm(mlp, w[p + "mlp_post_norm.weight"]) if config.has_post_norms else mlp
             x_out = x_mid + mlp_normed
             if add is not None and add[0] == layer:
@@ -360,17 +465,41 @@ class DecoderGradients:
                         "out": out,
                         "x_mid": x_mid,
                         "h2": h2,
-                        "gate": gate,
-                        "up": up,
-                        "gate_act": gate_act,
-                        "product": product,
                         "mlp": mlp,
+                        **pieces,
                     }
                 )
             x = x_out
         if keep:
             saved.append(x)
         return self._norm(x, w["final_norm.weight"]), saved
+
+    def _swiglu(self, w: Mapping[str, npt.ArrayLike], prefix: str, x: FloatArray) -> dict[str, FloatArray]:
+        """``down(act(gate(x)) * up(x))`` (as ``"y"``) with the activations its backward pass needs."""
+        gate = linear(x, w[prefix + "gate.weight"]).numpy()
+        up = linear(x, w[prefix + "up.weight"]).numpy()
+        gate_act = self._activation(gate)
+        product = gate_act * up
+        y = linear(product, w[prefix + "down.weight"]).numpy()
+        return {"gate": gate, "up": up, "gate_act": gate_act, "product": product, "y": y}
+
+    def _experts(
+        self, w: Mapping[str, npt.ArrayLike], p: str, layer: int, h2: FloatArray
+    ) -> tuple[FloatArray, dict[str, object]]:
+        """``Transformer._experts``: each expert runs on the rows routed to it (ascending); ``out`` adds each row's
+        weighted expert outputs to zero in increasing expert order."""
+        config = self.config
+        logits = linear(h2, w[p + "mlp.router.weight"]).numpy()
+        chosen, routing = moe_route(logits, config.experts_per_token, config.normalize_expert_weights)
+        out = np.zeros_like(h2)
+        groups: dict[int, dict[str, FloatArray]] = {}
+        for expert in np.unique(chosen):
+            rows, ranks = np.nonzero(chosen == expert)
+            x = np.ascontiguousarray(h2[rows])
+            group = self._swiglu(w, f"{p}mlp.experts.{int(expert)}.", x)
+            out[rows] += group["y"] * routing[rows, ranks][:, None]
+            groups[int(expert)] = {"rows": rows, "ranks": ranks, "x": x, **group}
+        return out, {"routing": (chosen, routing, logits), "experts": groups}
 
     def _folded(self, weights: Mapping[str, npt.ArrayLike]) -> Mapping[str, npt.ArrayLike]:
         """The weights as the decoder uses them (``fold_scales``); the stored ones when nothing is folded."""

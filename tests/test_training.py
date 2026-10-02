@@ -30,7 +30,20 @@ from etalii_dllm.training import (
 from etalii_dllm.transformer import Transformer
 
 TOKENS = [1, 17, 42, 5, 63, 0, 9, 9, 30]
-FAMILIES = ["gemma2", "gemma3", "granite", "llama", "mistral", "olmo2", "phi3", "qwen2", "qwen3"]
+FAMILIES = [
+    "gemma2",
+    "gemma3",
+    "granite",
+    "llama",
+    "mistral",
+    "mixtral",
+    "olmo2",
+    "olmoe",
+    "phi3",
+    "qwen2",
+    "qwen3",
+    "qwen3_moe",
+]
 TARGETS = [*TOKENS[1:], 2]
 
 

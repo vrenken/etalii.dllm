@@ -20,7 +20,7 @@ from test_model_building import BYTE_LEVEL_TOKENIZER
 from etalii_dllm import _kernels, exporting, numerics, reference
 from etalii_dllm.architecture import TransformerConfig
 from etalii_dllm.cli import main
-from etalii_dllm.engine import DllmEngine, default_engine
+from etalii_dllm.engine import default_engine
 from etalii_dllm.importing import ModelImportError, import_model
 from etalii_dllm.importing.importer import hf_config
 from etalii_dllm.interpret import routing, trace
@@ -186,18 +186,6 @@ def test_routing_needs_experts(tmp_path):
     import_model(tmp_path / "dense", tmp_path / "dense.dllm")
     with pytest.raises(ValueError, match="no experts"):
         routing(Transformer.from_file(tmp_path / "dense.dllm"), PROMPT)
-
-
-def test_fine_tuning_and_editing_refuse_experts(model_path):
-    from etalii_dllm.interpret.editing import EditRequest, rome
-    from etalii_dllm.training.backprop import DecoderGradients
-
-    model = ModelFile(model_path)
-    with pytest.raises(ValueError, match="mixture-of-experts"):
-        DecoderGradients(model.config)
-    engine = DllmEngine.from_model_file(model_path)
-    with pytest.raises(ValueError, match="mixture-of-experts"):
-        rome(engine.model, engine.tokenizer, EditRequest("the cat sat", "cat", " he"))
 
 
 # -- imports and exports ------------------------------------------------------------------------------------------

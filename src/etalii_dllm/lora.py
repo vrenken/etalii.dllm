@@ -55,7 +55,15 @@ _WEIGHT_NAMES = {
     "down": "mlp.down.weight",
 }
 _BY_HF_MODULE = {module.split(".")[1]: target for target, module in MODULES.items()}
-_PEFT_KEY = re.compile(r"^(?:base_model\.model\.)?model\.layers\.(\d+)\.(self_attn|mlp)\.(\w+)\.lora_([AB])\.weight$")
+# The experts of a mixture-of-experts layer: Mixtral's block_sparse_moe.experts.E.w1/w3/w2, otherwise
+# mlp.experts.E.gate_proj/up_proj/down_proj (the per-expert modules PEFT adapts).
+_MIXTRAL_EXPERTS = {"gate": "w1", "up": "w3", "down": "w2"}
+_BY_MIXTRAL_EXPERT = {module: target for target, module in _MIXTRAL_EXPERTS.items()}
+_EXPERT_TARGETS = ("gate", "up", "down")
+_PEFT_KEY = re.compile(
+    r"^(?:base_model\.model\.)?model\.layers\.(\d+)\.(self_attn|mlp|block_sparse_moe)\.(?:experts\.(\d+)\.)?(\w+)"
+    r"\.lora_([AB])\.weight$"
+)
 
 
 class AdapterError(ValueError):
@@ -95,8 +103,16 @@ class LoraConfig:
 
 
 def target_weights(config: TransformerConfig, lora: LoraConfig) -> list[str]:
-    """The adapted weight names, in tensor order."""
-    return tensor_order(f"layers.{layer}.{_WEIGHT_NAMES[t]}" for layer in range(config.layers) for t in lora.targets)
+    """The adapted weight names, in tensor order. In a mixture-of-experts layer ``gate``, ``up`` and ``down`` adapt
+    every expert's projection (``layers.N.mlp.experts.E.gate.weight``); the router is never adapted."""
+    names = []
+    for layer in range(config.layers):
+        for target in lora.targets:
+            if target in _EXPERT_TARGETS and config.is_sparse(layer):
+                names.extend(f"layers.{layer}.mlp.experts.{e}.{target}.weight" for e in range(config.experts))
+            else:
+                names.append(f"layers.{layer}.{_WEIGHT_NAMES[target]}")
+    return tensor_order(names)
 
 
 def adapter_shapes(config: TransformerConfig, lora: LoraConfig) -> dict[str, tuple[int, int]]:
@@ -155,16 +171,41 @@ def adapter_gradients(
 # The PEFT directory format
 
 
-def peft_key(name: str) -> str:
-    """``layers.3.attention.q.weight.lora_a`` -> ``base_model.model.model.layers.3.self_attn.q_proj.lora_A.weight``."""
+def peft_key(name: str, config: TransformerConfig | None = None) -> str:
+    """``layers.3.attention.q.weight.lora_a`` -> ``base_model.model.model.layers.3.self_attn.q_proj.lora_A.weight``;
+    an expert's ``layers.3.mlp.experts.5.gate.weight.lora_a`` -> ``...layers.3.mlp.experts.5.gate_proj.lora_A.weight``
+    (Mixtral: ``...layers.3.block_sparse_moe.experts.5.w1.lora_A.weight``)."""
     layer, rest = name.split(".", 2)[1:]
     weight, kind = rest.rsplit(".", 1)
+    suffix = f"lora_{kind[-1].upper()}.weight"
+    if weight.startswith("mlp.experts."):
+        expert, target = weight.split(".")[2:4]
+        if config is not None and config.family == "mixtral":
+            module = f"block_sparse_moe.experts.{expert}.{_MIXTRAL_EXPERTS[target]}"
+        else:
+            module = f"mlp.experts.{expert}.{MODULES[target].split('.')[1]}"
+        return f"base_model.model.model.layers.{layer}.{module}.{suffix}"
     target = next(t for t, w in _WEIGHT_NAMES.items() if w == weight)
-    return f"base_model.model.model.layers.{layer}.{MODULES[target]}.lora_{kind[-1].upper()}.weight"
+    return f"base_model.model.model.layers.{layer}.{MODULES[target]}.{suffix}"
+
+
+def target_modules(config: TransformerConfig | None, lora: LoraConfig) -> list[str]:
+    """PEFT's ``target_modules``: the module names of the adapted layers."""
+    modules = set()
+    for target in lora.targets:
+        if config is not None and config.family == "mixtral" and target in _EXPERT_TARGETS:
+            modules.add(_MIXTRAL_EXPERTS[target])
+        else:
+            modules.add(MODULES[target].split(".")[1])
+    return sorted(modules)
 
 
 def write_peft(
-    directory: str | Path, adapters: Mapping[str, np.ndarray], lora: LoraConfig, base_model: str | None = None
+    directory: str | Path,
+    adapters: Mapping[str, np.ndarray],
+    lora: LoraConfig,
+    base_model: str | None = None,
+    config: TransformerConfig | None = None,
 ) -> None:
     """Writes ``adapters`` as a PEFT LoRA adapter (float32, keys and JSON sorted, so equal adapters give equal
     bytes)."""
@@ -172,7 +213,7 @@ def write_peft(
 
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    config = {
+    settings = {
         "base_model_name_or_path": base_model,
         "bias": "none",
         "fan_in_fan_out": False,
@@ -183,15 +224,15 @@ def write_peft(
         "modules_to_save": None,
         "peft_type": "LORA",
         "r": lora.rank,
-        "target_modules": sorted(MODULES[t].split(".")[1] for t in lora.targets),
+        "target_modules": target_modules(config, lora),
         "task_type": "CAUSAL_LM",
         "use_dora": False,
         "use_rslora": lora.rslora,
     }
-    text = json.dumps(config, indent=2, sort_keys=True) + "\n"
+    text = json.dumps(settings, indent=2, sort_keys=True) + "\n"
     (directory / ADAPTER_CONFIG).write_text(text, encoding="utf-8", newline="\n")
     write_safetensors(
-        directory / ADAPTER_WEIGHTS, {peft_key(name): adapters[name] for name in adapters}, {"format": "pt"}
+        directory / ADAPTER_WEIGHTS, {peft_key(name, config): adapters[name] for name in adapters}, {"format": "pt"}
     )
 
 
@@ -211,6 +252,34 @@ def _unsupported(config: Mapping[str, Any]) -> str | None:
     if config.get("layers_to_transform") is not None or config.get("layer_replication"):
         return "layers_to_transform/layer_replication"
     return None
+
+
+def _adapter_name(key: str, config: TransformerConfig, directory: Path) -> tuple[str, str]:
+    """(our adapter name, its target) for the PEFT tensor ``key``; refuses modules this engine does not adapt and
+    ones that do not fit ``config``."""
+    match = _PEFT_KEY.match(key)
+    if match is None:
+        raise AdapterError(f"{directory}: unsupported adapter tensor {key!r}")
+    layer, parent, expert, module, kind = match.groups()
+    index, suffix = int(layer), f".lora_{kind.lower()}"
+    if expert is None:
+        target = _BY_HF_MODULE.get(module)
+        if target is None:
+            raise AdapterError(f"{directory}: unsupported adapter tensor {key!r}")
+        fits = 0 <= index < config.layers and MODULES[target].startswith(parent)
+        name = f"layers.{index}.{_WEIGHT_NAMES[target]}{suffix}"
+        fits = fits and not (target in _EXPERT_TARGETS and config.is_sparse(index))
+    else:
+        mixtral = config.family == "mixtral"
+        target = (_BY_MIXTRAL_EXPERT if mixtral else _BY_HF_MODULE).get(module)
+        if target not in _EXPERT_TARGETS:
+            raise AdapterError(f"{directory}: unsupported adapter tensor {key!r}")
+        fits = 0 <= index < config.layers and config.is_sparse(index) and int(expert) < config.experts
+        fits = fits and parent == ("block_sparse_moe" if mixtral else "mlp")
+        name = f"layers.{index}.mlp.experts.{int(expert)}.{target}.weight{suffix}"
+    if not fits:
+        raise AdapterError(f"{directory}: tensor {key!r} does not fit the model")
+    return name, target
 
 
 def read_peft(directory: str | Path, config: TransformerConfig) -> tuple[LoraConfig, dict[str, FloatArray]]:
@@ -238,16 +307,11 @@ def read_peft(directory: str | Path, config: TransformerConfig) -> tuple[LoraCon
     adapters: dict[str, FloatArray] = {}
     targets: set[str] = set()
     for tensor in file:
-        match = _PEFT_KEY.match(tensor.name)
-        if match is None or match.group(3) not in _BY_HF_MODULE:
-            raise AdapterError(f"{directory}: unsupported adapter tensor {tensor.name!r}")
-        layer, target = int(match.group(1)), _BY_HF_MODULE[match.group(3)]
-        if not 0 <= layer < config.layers or not MODULES[target].startswith(match.group(2)):
-            raise AdapterError(f"{directory}: tensor {tensor.name!r} does not fit the model")
+        name, target = _adapter_name(tensor.name, config, directory)
         if tensor.dtype not in ("F32", "F16", "BF16"):
             raise AdapterError(f"{directory}: tensor {tensor.name!r} has dtype {tensor.dtype}")
         targets.add(target)
-        adapters[f"layers.{layer}.{_WEIGHT_NAMES[target]}.lora_{match.group(4).lower()}"] = tensor.to_float32()
+        adapters[name] = tensor.to_float32()
     if not adapters:
         raise AdapterError(f"{directory}: the adapter has no LoRA tensors")
     lora = LoraConfig(rank, float(settings.get("lora_alpha", 8)), tuple(targets), bool(settings.get("use_rslora")))
