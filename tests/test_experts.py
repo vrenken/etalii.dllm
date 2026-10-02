@@ -20,7 +20,7 @@ from test_model_building import BYTE_LEVEL_TOKENIZER
 from etalii_dllm import _kernels, exporting, numerics, reference
 from etalii_dllm.architecture import TransformerConfig
 from etalii_dllm.cli import main
-from etalii_dllm.engine import DllmEngine, default_engine
+from etalii_dllm.engine import default_engine
 from etalii_dllm.importing import ModelImportError, import_model
 from etalii_dllm.importing.importer import hf_config
 from etalii_dllm.interpret import routing, trace

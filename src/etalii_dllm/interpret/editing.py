@@ -188,9 +188,7 @@ def rome(
         routed = trace(model, sequences[0][0], attention=False, logits=False)
         assert routed.experts is not None and routed.expert_weights is not None
         expert = int(routed.experts[index, sequences[0][1], 0])
-        routing_weight = float(routed.expert_weights[index, sequences[0][1], 0])
-        if not routing_weight > 0:
-            raise ValueError("the subject's expert has a zero routing weight; edit another layer")
+        routing_weight = float(routed.expert_weights[index, sequences[0][1], 0])  # at least 1 / experts: never 0
     keys = np.stack([mlp_keys(model, t, index, expert)[p] for t, p in sequences])
     key = keys[0] if len(keys) == 1 else column_mean(keys)
 

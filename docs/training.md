@@ -5,9 +5,10 @@ base model, data file and settings give a byte-identical fine-tuned `model.dllm`
 checkpoint and resumed ends in exactly the same bytes as one that ran straight through. The code is in
 `src/etalii_dllm/training/`; the gradient kernels are in `cpp/include/dllm/grad.hpp`.
 
-This is roadmap Phase 3, with LoRA added in Phase 8 and every model family in Phase 40. It trains either every
-parameter of the decoder or [LoRA adapters](#lora-adapters) on its linear layers, for every architecture the engine
-runs: Llama, Mistral, Qwen2, Qwen3, OLMo 2, Granite, Gemma 2, Gemma 3 and Phi-3/Phi-4-mini (with LongRoPE). There is
+This is roadmap Phase 3, with LoRA added in Phase 8, every dense model family in Phase 40 and mixtures of experts in
+Phase 43. It trains either every parameter of the decoder or [LoRA adapters](#lora-adapters) on its linear layers, for
+every architecture the engine runs: Llama, Mistral, Qwen2, Qwen3, OLMo 2, Granite, Gemma 2, Gemma 3, Phi-3/Phi-4-mini
+(with LongRoPE) and the [mixture-of-experts](#mixtures-of-experts) models Mixtral, OLMoE and Qwen3-MoE. There is
 no pre-training from scratch (weights come from [importing open models](research/model-import.md)).
 
 ## Usage
@@ -34,6 +35,7 @@ dllm finetune smollm2-135m.dllm --data my-data.jsonl -o smollm2-135m-tuned.dllm 
 | `--weight-decay` | 0.01 | Decoupled (AdamW) decay on weight matrices; norms and biases are not decayed |
 | `--max-grad-norm` | 1.0 | Global gradient-norm clipping, 0 disables |
 | `--seed` | 0 | Seeds the data order (there is no other randomness: no dropout) |
+| `--router-aux-loss` | 0 | Mixture-of-experts models: coefficient of the router load-balancing loss |
 
 Adam's betas are 0.9 and 0.999 and epsilon is 1e-8 (the PyTorch defaults).
 
@@ -137,6 +139,33 @@ counts `"pairs"` instead of `"windows"`, and the lineage step carries `"objectiv
 those fields out, so their files and receipts are byte for byte what they were. `tests/test_preference.py` checks
 byte-identical runs, bit-exact resumption, the step formula, LoRA, receipts and golden hashes of a short DPO run.
 
+## Mixtures of experts
+
+Mixtral, OLMoE and Qwen3-MoE fine-tune like every other family, with every option above (full fine-tuning, LoRA, DPO
+and distillation):
+
+```bash
+dllm finetune olmoe.dllm --data my-data.jsonl --lora-rank 8 -o olmoe-lora.dllm --steps 50 --router-aux-loss 0.01
+```
+
+- **The backward pass** runs each expert on the rows routed to it, ascending, as the forward pass does, and adds a
+  row's input gradients over its experts in increasing order, then the router's. A routing weight's gradient is the
+  `dot` kernel of the row's output gradient and the expert's output; the `moe_route_backward` kernel takes it back
+  through the renormalisation (when the model renormalises) and the softmax to the router logits, serially per row
+  with double accumulators. The choice of the top `k` experts has no gradient, as in `transformers`. Experts that no
+  token of a window reaches get zero gradients.
+- **The load-balancing loss** of `transformers` (`load_balancing_loss_func`): `experts * sum_e f_e * P_e` over the
+  rows of every sparse layer, where `f_e` is the share of chosen slots that went to expert `e` and `P_e` its mean
+  router probability. `--router-aux-loss COEF` adds `COEF` times its mean over a batch's windows to the loss (each
+  window's own, so a window's gradients still do not depend on the rest of its batch; with one window per batch this
+  is exactly `transformers`' `loss + router_aux_loss_coef * aux_loss`). Only `P_e` has a gradient. The coefficient is
+  recorded in `fine_tuning.run`, checkpoints and training receipts; runs without it keep their old bytes. DPO runs do
+  not add it.
+- **LoRA** adapts every expert's `gate`, `up` and `down` projections (the router is never adapted). PEFT adapters use
+  each family's module names: `block_sparse_moe.experts.E.w1`/`w3`/`w2` for Mixtral, `mlp.experts.E.gate_proj`/
+  `up_proj`/`down_proj` for OLMoE and Qwen3-MoE (the per-expert layout of `transformers` 4; adapters for the fused
+  expert parameters of `transformers` 5 are not read).
+
 ## What makes it reproducible
 
 - **Gradients** come from C++ backward kernels with the same rules as the forward kernels (`docs/kernels.md`):
@@ -161,8 +190,9 @@ byte-identical runs, bit-exact resumption, the step formula, LoRA, receipts and 
 
 `tests/test_training.py` checks the gradient kernels against float64 references, the decoder's gradients against
 float64 finite differences, byte-identical runs, bit-exact resumption, and golden hashes of the gradients and of a
-short fine-tuning run, for a tiny synthetic model of each of the nine families; `tests/test_lora.py` and
-`tests/test_preference.py` do the same for LoRA and DPO.
+short fine-tuning run, for a tiny synthetic model of each of the twelve families; `tests/test_lora.py` and
+`tests/test_preference.py` do the same for LoRA and DPO, and `tests/test_moe_training.py` checks the routing
+backward kernel, the load-balancing loss and its gradient, expert adapters and distillation.
 
 ## Outputs
 

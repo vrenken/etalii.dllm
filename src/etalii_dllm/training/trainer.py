@@ -5,10 +5,10 @@ layers, with the base weights frozen (:mod:`etalii_dllm.lora`).
 A step takes ``batch_size`` windows from :class:`~etalii_dllm.training.data.TrainingData`, computes each window's
 loss and gradients on its own (so a window's gradients do not depend on the rest of the batch), sums the gradients
 elementwise in batch order and applies one :class:`~etalii_dllm.training.optimizer.AdamW` update. The loss is the
-mean next-token cross-entropy over all targets of the batch. For a mixture-of-experts model ``RunConfig.router_aux_loss``
-adds that coefficient times the mean over the batch's windows of each window's router load-balancing loss
-(:meth:`~etalii_dllm.training.backprop.DecoderGradients.router_loss`); with one window per batch this is transformers'
-``loss + router_aux_loss_coef * aux_loss``.
+mean next-token cross-entropy over all targets of the batch. For a mixture-of-experts model
+``RunConfig.router_aux_loss`` adds that coefficient times the mean over the batch's windows of each window's router
+load-balancing loss (:meth:`~etalii_dllm.training.backprop.DecoderGradients.router_loss`); with one window per batch
+this is transformers' ``loss + router_aux_loss_coef * aux_loss``.
 
 With ``RunConfig.objective == "dpo"`` a step takes ``batch_size`` preference pairs instead
 (:mod:`etalii_dllm.training.preference`) and minimises the direct preference optimization loss

@@ -343,6 +343,11 @@ element, a fixed order, one rounding.
   summed over rows ascending; `dlogits = (softmax - onehot) * scale`. Negative targets are skipped.
 - **`embedding_backward`**: rows grouped per token id by a counting sort that keeps positions ascending, then
   summed in double.
+- **`moe_route_backward`**: per row, in row order, the probabilities `p` are recomputed exactly as `moe_route` does;
+  then in double `S = sum_j p[i_j]` and `C = sum_j dw_j p[i_j]` over the chosen experts in rank order (renormalised
+  routing only), `dp_e` = the optional gradient of the probabilities plus `dw_j / S - C / S^2` (renormalised) or
+  `dw_j` for a chosen expert `e = i_j`, `D = sum_e p_e dp_e` (`e` ascending) and `dlogits_e = float(p_e (dp_e - D))`.
+  The choice of the top `k` has no gradient.
 - **`sum_squares`** and **`adamw_step`**: see [training](training.md).
 
 ## Interpretability kernels

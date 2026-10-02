@@ -356,3 +356,13 @@ def test_mlp_activation_checks_the_layer(model_path):  # noqa: F811
         with pytest.raises(ValueError, match="has no experts"):
             model.mlp_activation(middle, dense, 0)
         assert model.mlp_activation(middle, dense).shape == (len(TOKENS), config.intermediate_size)
+
+
+def test_edit_command_names_the_expert(model_path, tmp_path, capsys, monkeypatch):  # noqa: F811
+    monkeypatch.delenv("DLLM_MODEL", raising=False)
+    config = ModelFile(model_path).config
+    layer = next(index for index in range(config.layers) if config.is_sparse(index)) + 1
+    arguments = ["edit", str(model_path), "--prompt", "so the cat", "--subject", "cat", "--target", " mat"]
+    assert main([*arguments, "--layer", str(layer), "--steps", "2", "-o", str(tmp_path / "edited.dllm")]) == 0
+    output = capsys.readouterr().out
+    assert f"edited:             layer {layer}, expert " in output and "(weight 0." in output
