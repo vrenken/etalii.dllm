@@ -62,9 +62,16 @@ DECODERS: dict[str, dict[str, Any]] = {
         "activation": "gelu_tanh", "embedding_multiplier": 8.0, "sliding_window": 3, "sliding_window_layers": [0],
         "attention_softcap": 0.5, "logits_softcap": 2.0, "attention_multiplier": 0.3,
     },
+    "qwen3_moe": {
+        "family": "qwen3_moe", "vocabulary_size": 96, "hidden_size": 64, "intermediate_size": 96, "layers": 2,
+        "heads": 4, "kv_heads": 2, "head_dim": 16, "context_length": 64, "rms_norm_eps": 1e-6,
+        "rope_theta": 10000.0, "tie_word_embeddings": False, "qk_norm": True, "experts": 8, "experts_per_token": 3,
+        "expert_intermediate_size": 32, "normalize_expert_weights": True, "dense_layers": [0],
+    },
 }  # fmt: skip
-"""Two small decoders that between them use every architecture option the kernels see: biases, GQA and MQA, llama3
-RoPE scaling, sandwich (1 + w) norms, GELU, scaled embeddings, a sliding window and both soft-caps."""
+"""Three small decoders that between them use every architecture option the kernels see: biases, GQA and MQA, llama3
+RoPE scaling, sandwich (1 + w) norms, GELU, scaled embeddings, a sliding window, both soft-caps, QK-norm and a mixture
+of experts next to a dense layer."""
 
 
 def _decoder_tensors(name: str) -> Arrays:
@@ -103,6 +110,14 @@ def cases() -> list[tuple[str, str, dict[str, Any], Arrays]]:
         params = {"activation": activation}
         items.append((f"swiglu-{activation}", "swiglu", params, {"gate": wide, "up": _gaussian(26, wide.size)}))
     items.append(("softcap", "softcap", {"cap": 3.0}, {"x": wide}))
+    router = _gaussian(34, 40, 16, scale=3.0)
+    router[0, :] = 1.0  # all experts tied
+    router[1, [2, 5, 9]] = 50.0  # a tie for first place
+    router[2, :] = -np.inf
+    router[2, [7, 3]] = 0.0  # only two experts can win
+    for k, normalize in ((1, False), (2, True), (4, False), (4, True)):
+        name = f"moe-route-top{k}" + ("-normalized" if normalize else "")
+        items.append((name, "moe_route", {"k": k, "normalize": normalize}, {"logits": router}))
     scalings: list[tuple[str, dict[str, Any] | None]] = [
         ("default", None),
         ("linear", {"rope_type": "linear", "factor": 2.0}),
@@ -207,6 +222,9 @@ def _kernels(kernel: str, params: Mapping[str, Any], inputs: Arrays) -> Arrays:
         return {"y": array(numerics.swiglu(inputs["gate"], inputs["up"], params["activation"]))}
     if kernel == "softcap":
         return {"y": array(numerics.softcap(inputs["x"], params["cap"]))}
+    if kernel == "moe_route":
+        experts, weights = numerics.moe_route(inputs["logits"], params["k"], params["normalize"])
+        return {"experts": experts, "weights": weights}
     if kernel == "rope_inv_freq":
         values = numerics.rope_inv_freq(
             params["head_dim"], params["theta"], rotary_dim=params["rotary_dim"], scaling=params["scaling"]
@@ -295,6 +313,9 @@ def _reference(kernel: str, params: Mapping[str, Any], inputs: Arrays) -> Arrays
         return {"y": r.swiglu(inputs["gate"], inputs["up"], params["activation"])}
     if kernel == "softcap":
         return {"y": r.softcap(inputs["x"], params["cap"])}
+    if kernel == "moe_route":
+        chosen, weights = r.moe_route(inputs["logits"], params["k"], params["normalize"])
+        return {"experts": np.array(chosen, dtype=np.int64), "weights": weights}
     if kernel == "rope_inv_freq":
         values = r.rope_inv_freq(
             params["head_dim"], params["theta"], rotary_dim=params["rotary_dim"], scaling=params["scaling"]

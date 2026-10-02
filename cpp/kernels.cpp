@@ -36,6 +36,7 @@ using MutableFloatTensor = nb::ndarray<float, nb::c_contig, nb::device::cpu>;
 using Int8Matrix = nb::ndarray<const std::int8_t, nb::ndim<2>, nb::c_contig, nb::device::cpu>;
 using FloatMatrix = nb::ndarray<const float, nb::ndim<2>, nb::c_contig, nb::device::cpu>;
 using OwnedInt8Array = nb::ndarray<nb::numpy, std::int8_t>;
+using OwnedInt64Array = nb::ndarray<nb::numpy, std::int64_t>;
 
 namespace {
 
@@ -62,6 +63,17 @@ OwnedInt8Array make_int8_array(std::vector<std::size_t> shape, std::int8_t** dat
     *data = static_cast<std::int8_t*>(buffer);
     nb::capsule owner(buffer, [](void* p) noexcept { ::operator delete[](p, std::align_val_t(kAlignment)); });
     return OwnedInt8Array(buffer, shape.size(), shape.data(), owner);
+}
+
+OwnedInt64Array make_int64_array(std::vector<std::size_t> shape, std::int64_t** data) {
+    std::size_t n = 1;
+    for (std::size_t d : shape) {
+        n *= d;
+    }
+    void* buffer = ::operator new[](n == 0 ? kAlignment : n * sizeof(std::int64_t), std::align_val_t(kAlignment));
+    *data = static_cast<std::int64_t*>(buffer);
+    nb::capsule owner(buffer, [](void* p) noexcept { ::operator delete[](p, std::align_val_t(kAlignment)); });
+    return OwnedInt64Array(buffer, shape.size(), shape.data(), owner);
 }
 
 std::vector<std::size_t> shape_of(const FloatTensor& t) {
@@ -173,6 +185,23 @@ NB_MODULE(_kernels, module) {
             return result;
         },
         nb::arg("logits"), "Log-softmax with a fixed evaluation order.");
+
+    m.def(
+        "moe_route",
+        [](FloatMatrix logits, std::size_t k, bool normalize) {
+            const std::size_t rows = logits.shape(0);
+            const std::size_t experts = logits.shape(1);
+            require(k >= 1 && k <= experts, "experts per token must be between 1 and the number of experts");
+            std::int64_t* indices;
+            float* weights;
+            auto index_array = make_int64_array({rows, k}, &indices);
+            auto weight_array = make_array({rows, k}, &weights);
+            dllm::moe_route(logits.data(), indices, weights, rows, experts, k, normalize);
+            return std::make_tuple(index_array, weight_array);
+        },
+        nb::arg("logits"), nb::arg("k"), nb::arg("normalize"),
+        "(indices, weights) [rows, k] of mixture-of-experts routing: softmax, top-k in a total order (ties to the "
+        "lower expert), optionally renormalised; rank order.");
 
     m.def(
         "fill_gaussian",

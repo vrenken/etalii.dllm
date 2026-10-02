@@ -753,8 +753,8 @@ dllm finetune gemma3-270m.dllm --data my-data.jsonl -o gemma3-270m-tuned.dllm --
 dllm finetune gemma3-270m.dllm --data my-data.jsonl --lora-rank 8 -o gemma3-270m-lora.dllm --steps 50
 ```
 
-Fine-tuning, LoRA, DPO and distillation work for every model family the engine runs, not only Llama, Mistral and
-Qwen: OLMo 2, Granite, Gemma 2, Gemma 3 and Phi-3/Phi-4-mini (with LongRoPE) too. As before, the same model, data
+Fine-tuning, LoRA, DPO and distillation work for every dense model family the engine runs, not only Llama, Mistral
+and Qwen: OLMo 2, Granite, Gemma 2, Gemma 3 and Phi-3/Phi-4-mini (with LongRoPE) too. As before, the same model, data
 and options give a byte-identical result on every machine. Details: [training](training.md#what-makes-it-reproducible).
 
 ## 37. Longer context windows
@@ -769,6 +769,21 @@ with YaRN, the method Qwen publishes for its models, or, for Phi-3 and Phi-4-min
 so the 128k models run their whole advertised context. The extension is fixed in the model file, so every token
 gives the same bits no matter how long the conversation gets. Models that ship with YaRN in their config import as
 they are. Details: [model format](model-format.md#conversion-rules).
+
+## 38. Mixture-of-experts models
+
+```bash
+dllm import hf:allenai/OLMoE-1B-7B-0125-Instruct -o olmoe.dllm
+dllm --model olmoe.dllm chat
+dllm --model olmoe.dllm experts --prompt "The cat sat on the mat"
+```
+
+Mixtral, OLMoE and Qwen3-MoE models import from Hugging Face and GGUF. Each token is sent to a few of each layer's
+experts, chosen by an exactly specified routing, so a token's experts and its answer stay the same bits whatever
+else the server is doing; in most engines the grouping of tokens by expert depends on the batch. `dllm experts`
+shows which experts every token used, and `dllm inspect` how many parameters are active per token. The model file
+holds every expert in float32, so plan for about four bytes per parameter on disk (OLMoE-1B-7B is about 28 GB);
+`--quantize q8_0` quantises the experts at load time. Details: [model format](model-format.md#conversion-rules).
 
 ## What does not work yet
 
@@ -801,5 +816,9 @@ they are. Details: [model format](model-format.md#conversion-rules).
 - MCP servers that ask the client for elicitation or roots are not supported, and image, audio or binary MCP
   content is refused.
 - Models with Unigram or WordPiece tokenizers, GGUF files with a SentencePiece vocabulary (convert from the
-  Hugging Face checkpoint instead), dynamic NTK RoPE scaling or other architectures (including
-  Qwen3's mixture-of-experts models) are refused at import; Phase 9 of the roadmap adds the mainstream ones.
+  Hugging Face checkpoint instead), dynamic NTK RoPE scaling or other architectures (including mixtures of experts
+  with shared experts, such as Qwen2-MoE and DeepSeek) are refused at import; Phase 9 of the roadmap adds the
+  mainstream ones.
+- Mixture-of-experts models (section 38) are checked against a float64 transcription of `transformers` only on tiny
+  synthetic models; the real checkpoints are too large for a CI runner in float32. Fine-tuning and ROME edits do
+  not support them yet, and on the GPU their routing runs on the host.

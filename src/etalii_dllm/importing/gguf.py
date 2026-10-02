@@ -124,6 +124,19 @@ class GgufTensor:
     def lossless(self) -> bool:
         return self.type_name in ("F32", "F16", "BF16")
 
+    def item(self, index: int) -> GgufTensor:
+        """The sub-tensor ``[index]`` of the outermost dimension (one expert of a stacked expert tensor), without
+        copying: its rows are whole blocks, so its bytes are a contiguous slice."""
+        shape = self.shape[1:]
+        if self.type_id in BLOCK_FORMATS:
+            size = len(self.raw) // self.shape[0]
+            if math.prod(shape) % BLOCK_FORMATS[self.type_id].block_size:
+                raise GgufError(f"tensor {self.name!r}: its items are not whole blocks")
+            raw = self.raw[index * size : (index + 1) * size]
+        else:
+            raw = self.raw[index]
+        return GgufTensor(f"{self.name}[{index}]", self.type_id, self.type_name, shape, raw)
+
 
 class GgufFile:
     """A memory-mapped GGUF file: ``metadata`` in file order and tensors in file order."""

@@ -17,8 +17,23 @@ from typing import Any
 # q/k/v and gate/up projections (imports split them), often with partial rotary embeddings and LongRoPE; "gemma3"
 # normalises both the inputs and the outputs of attention and the MLP with (1 + weight) RMSNorms, gates with GELU
 # (tanh), scales the embeddings and gives its sliding-window layers a RoPE base of their own; "gemma2" is the same
-# without QK-norm or the second RoPE base, and soft-caps the attention scores and the logits.
-FAMILIES = ("gemma2", "gemma3", "granite", "llama", "mistral", "olmo2", "phi3", "qwen2", "qwen3")
+# without QK-norm or the second RoPE base, and soft-caps the attention scores and the logits. The mixture-of-experts
+# families replace the MLP with experts and a router: "mixtral" is "mistral", "qwen3_moe" is "qwen3" and "olmoe" is
+# "llama" with OLMo's QK-norm over the whole projections.
+FAMILIES = (
+    "gemma2",
+    "gemma3",
+    "granite",
+    "llama",
+    "mistral",
+    "mixtral",
+    "olmo2",
+    "olmoe",
+    "phi3",
+    "qwen2",
+    "qwen3",
+    "qwen3_moe",
+)
 NORM_PLACEMENTS = ("pre", "post", "sandwich")
 ACTIVATIONS = ("silu", "gelu_tanh")
 QK_NORM_SCOPES = ("head", "all")
@@ -76,6 +91,16 @@ class TransformerConfig:
     rotary_dim: int | None = None
     """Partial rotary embeddings (Phi-4-mini): only the first ``rotary_dim`` dimensions of each head rotate; ``None``
     means all ``head_dim``."""
+    experts: int = 0
+    """Mixture of experts: the number of experts of each sparse MLP block; 0 for a dense model."""
+    experts_per_token: int = 0
+    """How many experts each token is routed to (the top-k of the router's softmax)."""
+    expert_intermediate_size: int | None = None
+    """The hidden size of each expert's MLP; ``None`` means ``intermediate_size``."""
+    normalize_expert_weights: bool = False
+    """Whether the chosen experts' probabilities are divided by their total (Mixtral; ``norm_topk_prob``)."""
+    dense_layers: tuple[int, ...] | None = None
+    """The layers of a mixture-of-experts model that keep a dense MLP of ``intermediate_size``; ``None`` means none."""
 
     def __post_init__(self) -> None:
         if self.family not in FAMILIES:
@@ -105,6 +130,14 @@ class TransformerConfig:
                 raise ValueError(f"{name} must be positive")
         if self.rotary_dim is not None and not (0 < self.rotary_dim <= self.head_dim and self.rotary_dim % 2 == 0):
             raise ValueError("rotary_dim must be even, positive and at most head_dim")
+        if self.experts < 0 or (self.experts and not 1 <= self.experts_per_token <= self.experts):
+            raise ValueError("experts_per_token must be between 1 and the number of experts")
+        if not self.experts and (self.experts_per_token or self.dense_layers is not None):
+            raise ValueError("experts_per_token and dense_layers need experts")
+        if self.expert_intermediate_size is not None and self.expert_intermediate_size < 1:
+            raise ValueError("expert_intermediate_size must be positive")
+        if self.dense_layers is not None and any(not 0 <= layer < self.layers for layer in self.dense_layers):
+            raise ValueError("dense_layers must be layer indices")
         kind = self.rope_scaling.get("rope_type") if self.rope_scaling else None
         if kind == "longrope":
             pairs = self.rotary_dimension // 2
@@ -156,6 +189,15 @@ class TransformerConfig:
         multipliers = (self.embedding_multiplier, self.attention_multiplier, self.residual_multiplier)
         return multipliers != (1.0, None, 1.0) or self.logits_scaling != 1.0
 
+    def is_sparse(self, layer: int) -> bool:
+        """Whether ``layer``'s MLP is a mixture of experts."""
+        return self.experts > 0 and (self.dense_layers is None or layer not in self.dense_layers)
+
+    @property
+    def expert_size(self) -> int:
+        """The hidden size of each expert's MLP."""
+        return self.intermediate_size if self.expert_intermediate_size is None else self.expert_intermediate_size
+
     def window(self, layer: int) -> int | None:
         """The attention window of ``layer``: ``None`` for full causal attention."""
         if self.sliding_window is None:
@@ -169,7 +211,14 @@ class TransformerConfig:
         values["eos_token_ids"] = list(self.eos_token_ids)
         if not self.qk_norm:  # model files written before QK-norm existed stay byte-identical
             del values["qk_norm"]
-        optional = ("sliding_window", "sliding_window_layers", "rotary_dim", "local_rope_theta")
+        optional = (
+            "sliding_window",
+            "sliding_window_layers",
+            "rotary_dim",
+            "local_rope_theta",
+            "expert_intermediate_size",
+            "dense_layers",
+        )
         for name in (*optional, "attention_softcap", "logits_softcap"):  # likewise
             if values[name] is None:
                 del values[name]
@@ -181,20 +230,25 @@ class TransformerConfig:
             ("attention_multiplier", None),
             ("residual_multiplier", 1.0),
             ("logits_scaling", 1.0),
+            ("experts", 0),
+            ("experts_per_token", 0),
+            ("normalize_expert_weights", False),
         )
         for name, default in defaults:
             if values[name] == default:
                 del values[name]
-        if values.get("sliding_window_layers") is not None:
-            values["sliding_window_layers"] = list(values["sliding_window_layers"])
+        for name in ("sliding_window_layers", "dense_layers"):
+            if values.get(name) is not None:
+                values[name] = list(values[name])
         return values
 
     @classmethod
     def from_dict(cls, values: dict[str, Any]) -> TransformerConfig:
         values = dict(values)
         values["eos_token_ids"] = tuple(values.get("eos_token_ids", ()))
-        if values.get("sliding_window_layers") is not None:
-            values["sliding_window_layers"] = tuple(values["sliding_window_layers"])
+        for name in ("sliding_window_layers", "dense_layers"):
+            if values.get(name) is not None:
+                values[name] = tuple(values[name])
         return cls(**values)
 
     def tensor_shapes(self) -> dict[str, tuple[int, ...]]:
@@ -223,6 +277,13 @@ class TransformerConfig:
                 shapes[p + "mlp_post_norm.weight"] = (self.hidden_size,)
             if self.has_pre_norms:
                 shapes[p + "mlp_norm.weight"] = (self.hidden_size,)
+            if self.is_sparse(i):
+                shapes[p + "mlp.router.weight"] = (self.experts, self.hidden_size)
+                for e in range(self.experts):
+                    shapes[p + f"mlp.experts.{e}.gate.weight"] = (self.expert_size, self.hidden_size)
+                    shapes[p + f"mlp.experts.{e}.up.weight"] = (self.expert_size, self.hidden_size)
+                    shapes[p + f"mlp.experts.{e}.down.weight"] = (self.hidden_size, self.expert_size)
+                continue
             shapes[p + "mlp.gate.weight"] = (self.intermediate_size, self.hidden_size)
             shapes[p + "mlp.up.weight"] = (self.intermediate_size, self.hidden_size)
             shapes[p + "mlp.down.weight"] = (self.hidden_size, self.intermediate_size)

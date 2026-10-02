@@ -1,4 +1,5 @@
-"""The interpretability subcommands of ``dllm``: ``lens``, ``attention`` and ``neighbours``."""
+"""The interpretability subcommands of ``dllm``: ``lens``, ``attention``, ``experts``, ``neighbours``, ``steer``,
+``sae`` and ``edit``."""
 
 from __future__ import annotations
 
@@ -19,23 +20,26 @@ from etalii_dllm.interpret.trace import trace
 from etalii_dllm.numerics import sum_squares
 from etalii_dllm.transformer import Transformer
 
-COMMANDS = ("lens", "attention", "neighbours", "steer", "sae")
+COMMANDS = ("lens", "attention", "experts", "neighbours", "steer", "sae")
 
 
 def add_commands(commands: Any) -> None:
     """Adds the subcommands to ``dllm``'s subparsers."""
     lens = commands.add_parser("lens", help="logit lens: the top predictions after every layer")
     attention = commands.add_parser("attention", help="attention maps: where each head looks")
-    for command in (lens, attention):
+    experts = commands.add_parser("experts", help="expert routing of a mixture-of-experts model, token by token")
+    for command in (lens, attention, experts):
         command.add_argument("--prompt", required=True)
         command.add_argument("--chat", action="store_true", help="wrap the prompt in the model's chat template")
         command.add_argument("--json", action="store_true", help="print the full result as JSON")
+    for command in (lens, attention):
         command.add_argument("--html", metavar="FILE", help="also write a self-contained HTML view")
     lens.add_argument("--top-k", type=int, default=5)
     lens.add_argument("--position", type=int, default=-1, help="position to print (default: the last)")
     attention.add_argument("--layer", type=int, help="1-based layer (default: all)")
     attention.add_argument("--head", type=int, help="0-based head (default: all)")
     attention.add_argument("--top-k", type=int, default=3, help="keys printed per query")
+    experts.add_argument("--layer", type=int, help="1-based layer (default: every mixture-of-experts layer)")
 
     near = commands.add_parser("neighbours", help="nearest tokens in embedding space, e.g. 'king - man + woman'")
     near.add_argument("expression", help="a word, or words joined by ' + ' and ' - '; quote to keep spaces")
@@ -113,6 +117,8 @@ def run(args: argparse.Namespace, engine: DllmEngine) -> int:
             raise ValueError("the prompt has no tokens")
         if args.command == "lens":
             return _lens(args, engine, model, tokens)
+        if args.command == "experts":
+            return _experts(args, engine, model, tokens)
         return _attention(args, engine, model, tokens)
     except ValueError as error:
         print(f"dllm {args.command}: {error}", file=sys.stderr)
@@ -189,6 +195,43 @@ def _attention(args: argparse.Namespace, engine: DllmEngine, model: Transformer,
                     print(f"  {text!r:>14} -> {shown}")
     if args.html:
         _write(args.html, attention_html(recorded.attention, texts, layers, heads, f"Attention: {model.id}"))
+    return 0
+
+
+def _experts(args: argparse.Namespace, engine: DllmEngine, model: Transformer, tokens: list[int]) -> int:
+    from etalii_dllm.interpret.experts import routing
+
+    result = routing(model, tokens)
+    rows = list(range(len(result.layers)))
+    if args.layer is not None:
+        if args.layer - 1 not in result.layers:
+            shown = ", ".join(str(layer + 1) for layer in result.layers)
+            raise ValueError(f"--layer must be a mixture-of-experts layer ({shown})")
+        rows = [result.layers.index(args.layer - 1)]
+    texts = _texts(engine, tokens)
+    usage = result.usage()
+    if args.json:
+        payload = {
+            "model": model.id,
+            "tokens": [{"id": t, "text": s} for t, s in zip(tokens, texts, strict=True)],
+            "layers": {
+                str(result.layers[i] + 1): {
+                    "experts": result.experts[i].tolist(),
+                    "weights": result.weights[i].tolist(),
+                    "usage": usage[i].tolist(),
+                }
+                for i in rows
+            },
+        }
+        print(json.dumps(payload, ensure_ascii=False))
+    else:
+        for i in rows:
+            print(f"layer {result.layers[i] + 1}:")
+            for position, text in enumerate(texts):
+                chosen = zip(result.experts[i, position], result.weights[i, position], strict=True)
+                shown = "  ".join(f"{int(e):3d} {w:.3f}" for e, w in chosen)
+                print(f"  {text!r:>14} -> {shown}")
+            print("  usage: " + " ".join(f"{e}:{int(n)}" for e, n in enumerate(usage[i]) if n))
     return 0
 
 

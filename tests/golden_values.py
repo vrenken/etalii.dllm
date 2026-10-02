@@ -37,10 +37,13 @@ TINY_LOGITS_FINGERPRINT = {
     "granite": "d899150301a14e954bf92d5f768c0d74ca8fba8b7c60ed433a0e90e89704c5ca",
     "llama": "12a0878056708099f139e39c6948153b7ba152960259846ab9caa940863e1e29",
     "mistral": "a03b36df3ec07340f1e54d9d2150a77afd8e08a261977d61d7d51c59248e075f",
+    "mixtral": "65fe959a5ce64c3156ff9abe386b1f99e17a2fe7eaa52a7d327a80ac703ae832",
     "olmo2": "4ad8a7f8864541c90f8b7b358e0b7bfae11e966cdde3b3246f331a4f1916a49e",
+    "olmoe": "6761fc44b1ff75766c078b7ad6efb47d5126788f05c1bc1bfdf4850330f59ff9",
     "phi3": "6c0319271a7751102f7c5942a64978b1b412a4e474967ef425feec341e242845",
     "qwen2": "9d284fb62e7360dc835fcd1dd9cac2b54c6bff5c66744d980c02025039330d0f",
     "qwen3": "be9c8d225e709f628a67fb3114a81fe94f4c61456e9228869171dbf0c6e3aefc",
+    "qwen3_moe": "d7a8cc922691833e7ed0e033a2bf1013d353e0f949360714e5e076e4f73dee6b",
 }
 
 # Phase 3. fingerprint() of the concatenated gradients (tensors in natural name order) of the summed next-token loss
@@ -212,7 +215,7 @@ EVAL_FINGERPRINTS = {
 # output file's SHA-256, so it pins the bits of every kernel case, the sampler and the two small decoders. Phase 21
 # added the two sample-penalties cases (penalties, min-p and logit bias); Phase 41 the YaRN and LongRoPE long-factor
 # rope-inv-freq cases.
-CONFORMANCE_MANIFEST_SHA256 = "9fbc625af37a98eb4d77eede439bbd714df022c1a02daf4c718bb78e4c822721"
+CONFORMANCE_MANIFEST_SHA256 = "1cb0ed5a26e9e30dd2ba8b320761345e3e8da1813a1aa8867de34b456eeaa5d7"
 
 # Phase 21: the placeholder model continuing "Deterministic decoding controls are" with every decoding control set
 # (tests/test_decoding_controls.py::CONTROLLED): penalties, min-p and logit bias.

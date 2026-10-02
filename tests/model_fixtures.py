@@ -41,7 +41,10 @@ def tiny_config(family: str) -> dict:
     instead of inputs and the whole query and key projections; Granite adds its four multipliers; Phi-3 fuses its
     projections, rotates half of each (wider) head and uses LongRoPE with a window of 3; Gemma 3 alternates a window of
     3 (with its own RoPE base) and full attention (with linear RoPE scaling); Gemma 2 does so with one RoPE base and
-    soft-caps attention scores and logits at about their size, so the caps bend them."""
+    soft-caps attention scores and logits at about their size, so the caps bend them. The mixture-of-experts configs
+    route each token to 2 of 4 experts: Mixtral renormalises the two weights, OLMoE does not (and normalises the whole
+    query and key projections), Qwen3-MoE renormalises, gives its experts a hidden size of their own and keeps a dense
+    MLP in layer 0."""
     config = {**TINY_LLAMA_CONFIG, "model_type": family}
     if family == "gemma2":
         del config["hidden_act"]
@@ -105,8 +108,59 @@ def tiny_config(family: str) -> dict:
         config.update(architectures=["Qwen2ForCausalLM"], use_sliding_window=False, tie_word_embeddings=False)
     elif family == "qwen3":
         config.update(architectures=["Qwen3ForCausalLM"], use_sliding_window=False, head_dim=8, attention_bias=False)
+    elif family == "mixtral":
+        config.update(
+            architectures=["MixtralForCausalLM"],
+            sliding_window=None,
+            tie_word_embeddings=False,
+            num_local_experts=4,
+            num_experts_per_tok=2,
+            router_jitter_noise=0.0,
+        )
+    elif family == "olmoe":
+        config.update(
+            architectures=["OlmoeForCausalLM"],
+            tie_word_embeddings=False,
+            attention_bias=False,
+            intermediate_size=8,
+            num_experts=4,
+            num_experts_per_tok=2,
+            norm_topk_prob=False,
+            clip_qkv=None,
+        )
+    elif family == "qwen3_moe":
+        config.update(
+            architectures=["Qwen3MoeForCausalLM"],
+            use_sliding_window=False,
+            head_dim=8,
+            attention_bias=False,
+            moe_intermediate_size=8,
+            num_experts=4,
+            num_experts_per_tok=2,
+            norm_topk_prob=True,
+            decoder_sparse_step=1,
+            mlp_only_layers=[0],
+        )
     return config
 
+
+def moe_settings(config: dict) -> dict:
+    """The mixture-of-experts fields of our config for a Hugging Face ``config`` (empty for dense models)."""
+    family = config["model_type"]
+    if family not in ("mixtral", "olmoe", "qwen3_moe"):
+        return {}
+    settings = {
+        "experts": config.get("num_local_experts") or config["num_experts"],
+        "experts_per_token": config["num_experts_per_tok"],
+        "normalize_expert_weights": family == "mixtral" or bool(config.get("norm_topk_prob")),
+    }
+    if family == "qwen3_moe":
+        settings["expert_intermediate_size"] = config["moe_intermediate_size"]
+        settings["dense_layers"] = tuple(config.get("mlp_only_layers") or ()) or None
+    return settings
+
+
+MIXTRAL_EXPERT_NAMES = {"gate": "w1", "down": "w2", "up": "w3"}
 
 TOKENIZER_JSON = {"version": "1.0", "model": {"type": "BPE", "vocab": {"a": 0, "b": 1}, "merges": []}}
 TOKENIZER_CONFIG = {"chat_template": "{% for m in messages %}{{ m['content'] }}{% endfor %}", "eos_token": "</s>"}
@@ -134,7 +188,20 @@ def hf_weights(config: dict, seed: int = 11) -> dict[str, np.ndarray]:
     ours = TransformerConfig.from_dict(
         {
             "family": family
-            if family in ("gemma2", "gemma3", "granite", "mistral", "olmo2", "phi3", "qwen2", "qwen3")
+            if family
+            in (
+                "gemma2",
+                "gemma3",
+                "granite",
+                "mistral",
+                "mixtral",
+                "olmo2",
+                "olmoe",
+                "phi3",
+                "qwen2",
+                "qwen3",
+                "qwen3_moe",
+            )
             else "llama",
             "vocabulary_size": config["vocab_size"],
             "hidden_size": config["hidden_size"],
@@ -147,10 +214,11 @@ def hf_weights(config: dict, seed: int = 11) -> dict[str, np.ndarray]:
             "rms_norm_eps": config["rms_norm_eps"],
             "rope_theta": config["rope_theta"],
             "attention_bias": family == "qwen2",
-            "qk_norm": family in ("gemma3", "olmo2", "qwen3"),
-            "qk_norm_scope": "all" if family == "olmo2" else "head",
+            "qk_norm": family in ("gemma3", "olmo2", "olmoe", "qwen3", "qwen3_moe"),
+            "qk_norm_scope": "all" if family in ("olmo2", "olmoe") else "head",
             "norm_placement": {"olmo2": "post", "gemma2": "sandwich", "gemma3": "sandwich"}.get(family, "pre"),
             "tie_word_embeddings": config["tie_word_embeddings"],
+            **moe_settings(config),
         }
     )
     to_hf = {
@@ -182,10 +250,20 @@ def hf_weights(config: dict, seed: int = 11) -> dict[str, np.ndarray]:
                     if projection.endswith("_norm")
                     else f"self_attn.{projection}_proj.{kind}"
                 )
+            elif rest.startswith("mlp.experts."):  # mlp.experts.<e>.<projection>.weight
+                _, _, expert, projection, _ = rest.split(".")
+                if family == "mixtral":
+                    hf_rest = f"block_sparse_moe.experts.{expert}.{MIXTRAL_EXPERT_NAMES[projection]}.weight"
+                else:
+                    hf_rest = f"mlp.experts.{expert}.{projection}_proj.weight"
+            elif rest == "mlp.router.weight":
+                hf_rest = "block_sparse_moe.gate.weight" if family == "mixtral" else "mlp.gate.weight"
             else:
                 hf_rest = layer_names[rest]
             hf = f"model.layers.{layer}.{hf_rest}"
         values = fill_gaussian(seed * 1000 + index, int(np.prod(shape))).reshape(shape) * np.float32(0.1)
+        if name.endswith("mlp.router.weight"):  # wider router logits, so the top-k choices are clear-cut
+            values = values * np.float32(16)
         weights[hf] = bf16_to_float32(to_bf16_bits(values))
     if family == "phi3":  # fused projections, rows stacked q, k, v and gate, up
         for layer in range(config["num_hidden_layers"]):

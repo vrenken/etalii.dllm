@@ -85,7 +85,12 @@ _HF_LAYER_NAMES = {
     "mlp.gate_proj.weight": "mlp.gate.weight",
     "mlp.up_proj.weight": "mlp.up.weight",
     "mlp.down_proj.weight": "mlp.down.weight",
+    "mlp.gate.weight": "mlp.router.weight",
+    "block_sparse_moe.gate.weight": "mlp.router.weight",
 }
+# Experts: Qwen3-MoE and OLMoE name them like the dense MLP, Mixtral w1 (gate), w3 (up) and w2 (down).
+_HF_EXPERT = re.compile(r"^(?:mlp|block_sparse_moe)\.experts\.(\d+)\.(gate_proj|up_proj|down_proj|w1|w2|w3)\.weight$")
+_HF_EXPERT_NAMES = {"gate_proj": "gate", "up_proj": "up", "down_proj": "down", "w1": "gate", "w3": "up", "w2": "down"}
 # OLMo 2 normalises the outputs of attention and the MLP instead of their inputs.
 _HF_POST_NORM_NAMES = {
     "post_attention_layernorm.weight": "attention_post_norm.weight",
@@ -258,8 +263,8 @@ def _rotary_dim(config: dict[str, Any], head_dim: int) -> int | None:
 def hf_config(
     config: dict[str, Any], generation: dict[str, Any] | None = None, *, context_length: int | None = None
 ) -> TransformerConfig:
-    """Maps a Hugging Face ``config.json`` (Gemma 2, Gemma 3, Granite, Llama, Mistral, OLMo 2, Phi-3, Qwen2 or
-    Qwen3) to our description, with a context window of ``context_length`` tokens when given
+    """Maps a Hugging Face ``config.json`` (Gemma 2, Gemma 3, Granite, Llama, Mistral, Mixtral, OLMo 2, OLMoE,
+    Phi-3, Qwen2, Qwen3 or Qwen3-MoE) to our description, with a context window of ``context_length`` tokens when given
     (:func:`with_context_length`)."""
     model_type = config.get("model_type")
     family = _HF_MODEL_TYPES.get(model_type)
@@ -273,6 +278,8 @@ def hf_config(
         raise ModelImportError(f"activation {hf_activation!r} is not supported")
     if config.get("mlp_bias"):
         raise ModelImportError("MLP biases are not supported")
+    if config.get("clip_qkv") is not None:
+        raise ModelImportError("clip_qkv is not supported")
     window, window_layers = _sliding_window_from_hf(config, family)
     heads = int(config["num_attention_heads"])
     hidden = int(config["hidden_size"])
@@ -314,8 +321,8 @@ def hf_config(
             rope_theta=theta,
             rope_scaling=scaling,
             attention_bias=family == "qwen2" or bool(config.get("attention_bias", False)),
-            qk_norm=family in ("gemma3", "olmo2", "qwen3"),
-            qk_norm_scope="all" if family == "olmo2" else "head",
+            qk_norm=family in ("gemma3", "olmo2", "olmoe", "qwen3", "qwen3_moe"),
+            qk_norm_scope="all" if family in ("olmo2", "olmoe") else "head",
             norm_placement={"olmo2": "post", "gemma2": "sandwich", "gemma3": "sandwich"}.get(family, "pre"),
             norm_unit_offset=family in ("gemma2", "gemma3"),
             activation=activation,
@@ -330,6 +337,7 @@ def hf_config(
             logits_softcap=_optional_float(config.get("final_logit_softcapping")),
             **_granite_multipliers(config, family),
             **_gemma_multipliers(config, family, hidden),
+            **_experts_from_hf(config, family),
         )
     except ValueError as error:
         raise ModelImportError(str(error)) from error
@@ -356,6 +364,30 @@ def _gemma3_rope_from_hf(config: dict[str, Any]) -> tuple[float, dict[str, Any] 
     if local_scaling is not None:
         raise ModelImportError("RoPE scaling on Gemma 3's sliding-window layers is not supported")
     return theta, scaling, local_theta
+
+
+def _experts_from_hf(config: dict[str, Any], family: str) -> dict[str, Any]:
+    """The mixture-of-experts fields: the experts and how many each token uses, whether their weights are
+    renormalised (always for Mixtral; ``norm_topk_prob`` otherwise), Qwen3-MoE's expert size and its dense layers
+    (``mlp_only_layers``, and the layers ``decoder_sparse_step`` skips)."""
+    if family not in ("mixtral", "olmoe", "qwen3_moe"):
+        return {}
+    experts = int(config.get("num_local_experts") or config.get("num_experts") or 0)
+    if config.get("shared_expert_intermediate_size") or config.get("n_shared_experts"):
+        raise ModelImportError("shared experts are not supported")
+    settings: dict[str, Any] = {
+        "experts": experts,
+        "experts_per_token": int(config.get("num_experts_per_tok", 2)),
+        "normalize_expert_weights": family == "mixtral" or bool(config.get("norm_topk_prob", False)),
+    }
+    if family == "qwen3_moe":
+        layers = int(config["num_hidden_layers"])
+        step = int(config.get("decoder_sparse_step", 1))
+        only = {int(layer) for layer in config.get("mlp_only_layers") or ()}
+        dense = tuple(i for i in range(layers) if i in only or step < 1 or (i + 1) % step)
+        settings["expert_intermediate_size"] = int(config.get("moe_intermediate_size", config["intermediate_size"]))
+        settings["dense_layers"] = dense or None
+    return settings
 
 
 def _optional_float(value: Any) -> float | None:
@@ -390,7 +422,7 @@ def _sliding_window_from_hf(config: dict[str, Any], family: str) -> tuple[int | 
     window = config.get("sliding_window")
     if family == "llama" or window is None:
         return None, None
-    if family in ("qwen2", "qwen3") and not config.get("use_sliding_window"):
+    if family in ("qwen2", "qwen3", "qwen3_moe") and not config.get("use_sliding_window"):
         return None, None
     layers = int(config["num_hidden_layers"])
     layer_types = config.get("layer_types")
@@ -398,7 +430,7 @@ def _sliding_window_from_hf(config: dict[str, Any], family: str) -> tuple[int | 
         if len(layer_types) != layers or any(t not in ("sliding_attention", "full_attention") for t in layer_types):
             raise ModelImportError(f"layer_types {layer_types!r} is not supported")
         sliding = tuple(i for i, kind in enumerate(layer_types) if kind == "sliding_attention")
-    elif family in ("qwen2", "qwen3"):
+    elif family in ("qwen2", "qwen3", "qwen3_moe"):
         sliding = tuple(range(int(config.get("max_window_layers", layers)), layers))
     elif family in ("gemma2", "gemma3"):  # without layer_types: every sliding_window_pattern-th layer is global
         pattern = int(config.get("sliding_window_pattern", 6 if family == "gemma3" else 2))
@@ -412,14 +444,25 @@ def _sliding_window_from_hf(config: dict[str, Any], family: str) -> tuple[int | 
 
 def _split_fused(tensor: Any, config: TransformerConfig) -> dict[str, TensorSource] | None:
     """Phi-3 fuses the q/k/v projections into ``qkv_proj`` and the gate/up projections into ``gate_up_proj`` (rows
-    stacked in that order); returns our separate tensors, each loading its own rows, or None for any other tensor."""
+    stacked in that order); transformers v5 stacks the experts into ``experts.gate_up_proj`` ``[experts, 2 *
+    size, hidden]`` and ``experts.down_proj`` ``[experts, hidden, size]``. Returns our separate tensors, each loading
+    its own rows, or None for any other tensor."""
     match = _HF_LAYER.match(tensor.name)
-    if not match or match.group(2) not in ("self_attn.qkv_proj.weight", "mlp.gate_up_proj.weight"):
+    fused = (
+        "self_attn.qkv_proj.weight",
+        "mlp.gate_up_proj.weight",
+        "mlp.experts.gate_up_proj",
+        "mlp.experts.down_proj",
+    )
+    if not match or match.group(2).removesuffix(".weight") not in {name.removesuffix(".weight") for name in fused}:
         return None
     if tensor.dtype not in ("F32", "F16", "BF16"):
         raise ModelImportError(f"tensor {tensor.name!r} has dtype {tensor.dtype}; only F32, F16 and BF16 import")
     p = f"layers.{int(match.group(1))}."
-    if match.group(2) == "self_attn.qkv_proj.weight":
+    kind = match.group(2).removesuffix(".weight")
+    if kind.startswith("mlp.experts."):
+        return _split_experts(tensor, config, p, kind)
+    if kind == "self_attn.qkv_proj":
         q, kv = config.heads * config.head_dim, config.kv_heads * config.head_dim
         parts = [("attention.q.weight", q), ("attention.k.weight", kv), ("attention.v.weight", kv)]
     else:
@@ -438,6 +481,25 @@ def _split_fused(tensor: Any, config: TransformerConfig) -> dict[str, TensorSour
     return split
 
 
+def _split_experts(tensor: Any, config: TransformerConfig, p: str, kind: str) -> dict[str, TensorSource]:
+    size, hidden = config.expert_size, config.hidden_size
+    gate_up = kind == "mlp.experts.gate_up_proj"
+    expected = (config.experts, 2 * size, hidden) if gate_up else (config.experts, hidden, size)
+    if tuple(tensor.shape) != expected:
+        raise ModelImportError(f"tensor {tensor.name!r} has shape {tensor.shape}, expected {expected}")
+    parts = [("gate", 0, size), ("up", size, size)] if gate_up else [("down", 0, hidden)]
+    split: dict[str, TensorSource] = {}
+    for expert in range(config.experts):
+        for name, start, rows in parts:
+
+            def load(expert: int = expert, start: int = start, rows: int = rows) -> np.ndarray:
+                return np.ascontiguousarray(tensor.to_float32()[expert, start : start + rows])
+
+            shape = (rows, expected[2])
+            split[f"{p}mlp.experts.{expert}.{name}.weight"] = TensorSource(shape, load, tensor.dtype)
+    return split
+
+
 def _hf_name(name: str, config: TransformerConfig) -> str | None:
     """Our name for a checkpoint tensor; None for buffers that carry no weights."""
     if name in _HF_GLOBAL_NAMES:
@@ -450,6 +512,10 @@ def _hf_name(name: str, config: TransformerConfig) -> str | None:
         names = {**_HF_LAYER_NAMES, **extra}
         if match.group(2) in names:
             return f"layers.{int(match.group(1))}.{names[match.group(2)]}"
+        expert = _HF_EXPERT.match(match.group(2))
+        if expert:
+            projection = _HF_EXPERT_NAMES[expert.group(2)]
+            return f"layers.{int(match.group(1))}.mlp.experts.{int(expert.group(1))}.{projection}.weight"
     raise ModelImportError(f"unexpected tensor {name!r}")
 
 
@@ -607,7 +673,13 @@ _GGUF_LAYER_NAMES = {
     "ffn_gate.weight": "mlp.gate.weight",
     "ffn_up.weight": "mlp.up.weight",
     "ffn_down.weight": "mlp.down.weight",
+    "ffn_gate_inp.weight": "mlp.router.weight",
 }
+# Stacked expert tensors [experts, out, in]; older Mixtral files store one tensor per expert (ffn_gate.<e>.weight).
+_GGUF_EXPERTS = {"ffn_gate_exps.weight": "gate", "ffn_up_exps.weight": "up", "ffn_down_exps.weight": "down"}
+_GGUF_EXPERT = re.compile(r"^(ffn_gate|ffn_up|ffn_down)\.(\d+)\.weight$")
+# GGUF architecture -> family (a "llama" file with experts is Mixtral).
+_GGUF_ARCHITECTURES = {"llama": "llama", "qwen2": "qwen2", "qwen3": "qwen3", "qwen3moe": "qwen3_moe", "olmoe": "olmoe"}
 _GGUF_GLOBAL_NAMES = {
     "token_embd.weight": "token_embedding.weight",
     "output_norm.weight": "final_norm.weight",
@@ -621,6 +693,9 @@ def _gguf_name(name: str) -> str:
     match = _GGUF_LAYER.match(name)
     if match and match.group(2) in _GGUF_LAYER_NAMES:
         return f"layers.{int(match.group(1))}.{_GGUF_LAYER_NAMES[match.group(2)]}"
+    expert = _GGUF_EXPERT.match(match.group(2)) if match else None
+    if match and expert:
+        return f"layers.{int(match.group(1))}.mlp.experts.{int(expert.group(2))}.{expert.group(1)[4:]}.weight"
     if name == "rope_freqs.weight":
         raise ModelImportError("GGUF rope_freqs (Llama 3 RoPE scaling) is not supported yet")
     raise ModelImportError(f"unexpected tensor {name!r}")
@@ -636,15 +711,19 @@ def unpermute_rotary(weight: np.ndarray, heads: int) -> np.ndarray:
 
 def gguf_config(gguf: GgufFile) -> TransformerConfig:
     metadata = gguf.metadata
-    family = metadata.get("general.architecture")
-    if family not in ("llama", "qwen2", "qwen3"):
-        raise ModelImportError(f"GGUF architecture {family!r} is not supported (supported: llama, qwen2, qwen3)")
+    architecture = metadata.get("general.architecture")
+    if architecture not in _GGUF_ARCHITECTURES:
+        supported = ", ".join(sorted(_GGUF_ARCHITECTURES))
+        raise ModelImportError(f"GGUF architecture {architecture!r} is not supported (supported: {supported})")
 
     def key(name: str, default: Any = None) -> Any:
-        value = metadata.get(f"{family}.{name}", default)
+        value = metadata.get(f"{architecture}.{name}", default)
         if value is None:
-            raise ModelImportError(f"GGUF metadata {family}.{name} is missing")
+            raise ModelImportError(f"GGUF metadata {architecture}.{name} is missing")
         return value
+
+    experts = int(metadata.get(f"{architecture}.expert_count", 0))
+    family = "mixtral" if architecture == "llama" and experts else _GGUF_ARCHITECTURES[architecture]
 
     hidden = int(key("embedding_length"))
     heads = int(key("attention.head_count"))
@@ -668,6 +747,24 @@ def gguf_config(gguf: GgufFile) -> TransformerConfig:
         if token not in eos:
             eos.append(token)
     bos = metadata.get("tokenizer.ggml.bos_token_id")
+    moe: dict[str, Any] = {}
+    if experts:
+        if int(metadata.get(f"{architecture}.expert_shared_count", 0)):
+            raise ModelImportError("shared experts are not supported")
+        if int(metadata.get(f"{architecture}.expert_gating_func", 1)) != 1:
+            raise ModelImportError("only softmax expert gating is supported")
+        layers = int(key("block_count"))
+        dense = tuple(i for i in range(layers) if f"blk.{i}.ffn_gate_inp.weight" not in gguf)
+        size = metadata.get(f"{architecture}.expert_feed_forward_length")
+        moe = {
+            "experts": experts,
+            "experts_per_token": int(key("expert_used_count")),
+            "normalize_expert_weights": bool(
+                metadata.get(f"{architecture}.expert_weights_norm", architecture != "olmoe")
+            ),
+            "expert_intermediate_size": None if size is None else int(size),
+            "dense_layers": dense or None,
+        }
     return TransformerConfig(
         family=family,
         vocabulary_size=int(key("vocab_size", vocabulary)),
@@ -682,10 +779,12 @@ def gguf_config(gguf: GgufFile) -> TransformerConfig:
         rope_theta=float(key("rope.freq_base", 10000.0)),
         rope_scaling=scaling,
         attention_bias=family == "qwen2" or "blk.0.attn_q.bias" in gguf,
-        qk_norm=family == "qwen3",
+        qk_norm=family in ("olmoe", "qwen3", "qwen3_moe"),
+        qk_norm_scope="all" if family == "olmoe" else "head",
         tie_word_embeddings="output.weight" not in gguf,
         bos_token_id=None if bos is None else int(bos),
         eos_token_ids=tuple(eos),
+        **moe,
     )
 
 
@@ -697,9 +796,20 @@ def _convert_gguf(path: Path, context_length: int | None = None) -> _Converted:
     metadata = gguf.metadata
     tensors: dict[str, TensorSource] = {}
     for tensor in gguf:
+        match = _GGUF_LAYER.match(tensor.name)
+        if match and match.group(2) in _GGUF_EXPERTS:
+            if len(tensor.shape) != 3 or tensor.shape[0] != config.experts:
+                raise ModelImportError(
+                    f"tensor {tensor.name!r} has shape {tensor.shape}, expected {config.experts} experts"
+                )
+            for expert in range(config.experts):
+                part = tensor.item(expert)
+                name = f"layers.{int(match.group(1))}.mlp.experts.{expert}.{_GGUF_EXPERTS[match.group(2)]}.weight"
+                tensors[name] = TensorSource(part.shape, part.to_float32, part.type_name)
+            continue
         name = _gguf_name(tensor.name)
         load: Callable[[], np.ndarray] = tensor.to_float32
-        if config.family == "llama" and re.search(r"attention\.[qk]\.(weight|bias)$", name):
+        if config.family in ("llama", "mixtral") and re.search(r"attention\.[qk]\.(weight|bias)$", name):
             heads = config.heads if ".q." in name else config.kv_heads
             load = (lambda t, h: lambda: unpermute_rotary(t.to_float32(), h))(tensor, heads)
         tensors[name] = TensorSource(tensor.shape, load, tensor.type_name)

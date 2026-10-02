@@ -30,8 +30,9 @@ class Trace:
     """``[L, n, hidden]``: the residual stream after each layer's attention block."""
     attention_output: np.ndarray
     """``[L, n, hidden]``: what each attention block adds to the residual stream."""
-    mlp_activation: np.ndarray
-    """``[L, n, intermediate]``: each MLP's hidden activation ``act(gate) * up``."""
+    mlp_activation: np.ndarray | None
+    """``[L, n, intermediate]``: each MLP's hidden activation ``act(gate) * up``; ``None`` for mixture-of-experts
+    models, whose experts each see only the positions routed to them."""
     mlp_output: np.ndarray
     """``[L, n, hidden]``: what each MLP block adds to the residual stream."""
     attention: np.ndarray | None
@@ -40,10 +41,24 @@ class Trace:
     """``[n, hidden]``: the final-norm hidden states."""
     logits: np.ndarray | None
     """``[n, vocabulary]``: the next-token logits after every position, or ``None`` when not traced."""
+    experts: np.ndarray | None = None
+    """Mixture-of-experts models: ``[L, n, k]`` int64, the experts each position was routed to in rank order (-1 in
+    dense layers); ``None`` for dense models."""
+    expert_weights: np.ndarray | None = None
+    """``[L, n, k]``: the weights of those experts (0 in dense layers); ``None`` for dense models."""
 
     def arrays(self) -> Iterator[tuple[str, np.ndarray]]:
         """The captured arrays by name, in a fixed order."""
-        for name in ("residual", "middle", "attention_output", "mlp_activation", "mlp_output", "attention"):
+        names = (
+            "residual",
+            "middle",
+            "attention_output",
+            "mlp_activation",
+            "mlp_output",
+            "attention",
+            "expert_weights",
+        )
+        for name in names:
             values = getattr(self, name)
             if values is not None:
                 yield name, values
@@ -57,6 +72,9 @@ class Trace:
         for name, values in self.arrays():
             digest.update(name.encode())
             digest.update(np.ascontiguousarray(values, dtype="<f4").tobytes())
+        if self.experts is not None:
+            digest.update(b"experts")
+            digest.update(np.ascontiguousarray(self.experts, dtype="<i8").tobytes())
         return digest.hexdigest()
 
 
@@ -70,6 +88,7 @@ class _Recorder(LayerHook):
         self.attention_outputs: list[np.ndarray] = []
         self.mlp_activations: list[np.ndarray] = []
         self.mlp_outputs: list[np.ndarray] = []
+        self.routes: dict[int, tuple[np.ndarray, np.ndarray]] = {}
 
     def residual(self, layer: int, point: str, x: np.ndarray) -> None:  # type: ignore[override]
         if point == "middle":
@@ -89,21 +108,33 @@ class _Recorder(LayerHook):
     def mlp_output(self, layer: int, out: np.ndarray) -> None:
         self.mlp_outputs.append(out)
 
+    def routing(self, layer: int, experts: np.ndarray, weights: np.ndarray) -> None:
+        self.routes[layer] = (experts, weights)
+
 
 def trace(model: Transformer, tokens: Sequence[int], *, attention: bool = True, logits: bool = True) -> Trace:
     """Runs ``tokens`` through ``model`` (on the CPU) and returns every intermediate activation. ``attention=False``
     skips the attention probabilities, which take a second pass over the keys; ``logits=False`` skips the LM head
     over every position (the largest matrix of a small model)."""
-    recorder = _Recorder(model.config.layers, attention)
+    config = model.config
+    recorder = _Recorder(config.layers, attention)
     hidden = model.run_hooked(tokens, recorder)
+    experts = expert_weights = None
+    if config.experts:
+        shape = (config.layers, len(tokens), config.experts_per_token)
+        experts, expert_weights = np.full(shape, -1, dtype=np.int64), np.zeros(shape, dtype=np.float32)
+        for layer, (chosen, weights) in recorder.routes.items():
+            experts[layer], expert_weights[layer] = chosen, weights
     return Trace(
         tokens=tuple(int(t) for t in tokens),
         residual=np.stack(recorder.streams),
         middle=np.stack(recorder.middle),
         attention_output=np.stack(recorder.attention_outputs),
-        mlp_activation=np.stack(recorder.mlp_activations),
+        mlp_activation=None if config.experts else np.stack(recorder.mlp_activations),
         mlp_output=np.stack(recorder.mlp_outputs),
         attention=np.stack(recorder.attention_maps) if attention else None,
         hidden=hidden,
         logits=model.logits_from_hidden(hidden) if logits else None,
+        experts=experts,
+        expert_weights=expert_weights,
     )

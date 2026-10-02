@@ -59,6 +59,15 @@ def softmax(logits: npt.ArrayLike) -> FloatArray:
     return _kernels.softmax(_as_float32(logits))
 
 
+def moe_route(logits: npt.ArrayLike | Tensor, k: int, normalize: bool) -> tuple[npt.NDArray[np.int64], FloatArray]:
+    """Mixture-of-experts routing of router logits ``[rows, experts]``: the experts ``[rows, k]`` and their weights
+    ``[rows, k]``, in rank order. Each row's softmax is :func:`softmax`'s; the ``k`` largest probabilities are taken
+    in a total order (equal ones by lower expert index); with ``normalize`` each is divided by their total (summed
+    in double in rank order) and rounded once to float32."""
+    values = _float32(logits)
+    return _kernels.moe_route(np.ascontiguousarray(values.reshape(-1, values.shape[-1])), k, normalize)
+
+
 def log_softmax(logits: npt.ArrayLike) -> FloatArray:
     """Log-probabilities ``(l_i - max) - log(sum_j exp(l_j - max))`` with a fixed evaluation order."""
     return _kernels.log_softmax(_as_float32(logits))

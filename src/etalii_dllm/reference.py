@@ -281,6 +281,27 @@ def softmax(logits: npt.ArrayLike) -> np.ndarray:
     return _round(scratch * (1.0 / sequential_sum(scratch)))
 
 
+def moe_route(logits: npt.ArrayLike, k: int, normalize: bool) -> tuple[list[list[int]], np.ndarray]:
+    """Per row of router logits: the ``k`` experts with the largest :func:`softmax` probabilities, larger first and
+    equal ones by lower index, and their weights; with ``normalize`` each weight is divided by their total (summed
+    in double in that order) and rounded once."""
+    values = np.asarray(logits, dtype=F32)
+    chosen: list[list[int]] = []
+    weights = np.zeros((values.shape[0], k), F32)
+    for r, row in enumerate(values):
+        probabilities = softmax(row).tolist()
+        order = sorted(range(len(probabilities)), key=lambda e: (-probabilities[e], e))[:k]
+        picked = [probabilities[e] for e in order]
+        if normalize:
+            total = 0.0
+            for p in picked:
+                total += p
+            picked = [p / total for p in picked]
+        chosen.append(order)
+        weights[r] = _round(np.array(picked, F64))
+    return chosen, weights
+
+
 def log_softmax(logits: npt.ArrayLike) -> np.ndarray:
     """``(l_i - max) - log(total)``."""
     values = np.asarray(logits, dtype=F32).reshape(-1)
@@ -873,7 +894,10 @@ class ReferenceTransformer:
                     rows[:, : config.rotary_dimension] *= F32(config.rope_attention_factor)
                     weights[name] = rows.reshape(weights[name].shape)
         self.w: dict[str, Any] = {
-            name: Weight(values, quantize) if name.endswith(_MATRICES) else values for name, values in weights.items()
+            name: Weight(values, None if name.endswith(".router.weight") else quantize)
+            if name.endswith((*_MATRICES, ".router.weight"))
+            else values
+            for name, values in weights.items()
         }
         head = weights["token_embedding.weight" if config.tie_word_embeddings else "lm_head.weight"]
         self.lm_head = Weight(head, quantize)
@@ -949,9 +973,12 @@ class ReferenceTransformer:
                 out = norm(out, p + "attention_post_norm.weight")
             x = x + out
             h = norm(x, p + "mlp_norm.weight") if config.has_pre_norms else x
-            gate = linear(h, w[p + "mlp.gate.weight"])
-            up = linear(h, w[p + "mlp.up.weight"])
-            out = linear(swiglu(gate, up, config.activation), w[p + "mlp.down.weight"])
+            if config.is_sparse(layer):
+                out = self._experts(h, layer)
+            else:
+                gate = linear(h, w[p + "mlp.gate.weight"])
+                up = linear(h, w[p + "mlp.up.weight"])
+                out = linear(swiglu(gate, up, config.activation), w[p + "mlp.down.weight"])
             if config.has_post_norms:
                 out = norm(out, p + "mlp_post_norm.weight")
             x = x + out
@@ -964,6 +991,22 @@ class ReferenceTransformer:
         if config.logits_softcap is not None:
             logits = softcap(logits, config.logits_softcap)
         return logits
+
+    def _experts(self, h: np.ndarray, layer: int) -> np.ndarray:
+        """A mixture-of-experts block, one row at a time: route the row, run each chosen expert's MLP on it, and add
+        ``output * weight`` to zero in increasing expert order (float32)."""
+        config, w = self.config, self.w
+        p = f"layers.{layer}.mlp."
+        chosen, weights = moe_route(linear(h, w[p + "router.weight"]), config.experts_per_token,
+                                    config.normalize_expert_weights)  # fmt: skip
+        out = np.zeros_like(h)
+        for r in range(h.shape[0]):
+            row = h[r : r + 1]
+            for rank in sorted(range(len(chosen[r])), key=lambda j: chosen[r][j]):
+                q = f"{p}experts.{chosen[r][rank]}."
+                act = swiglu(linear(row, w[q + "gate.weight"]), linear(row, w[q + "up.weight"]), config.activation)
+                out[r] = out[r] + linear(act, w[q + "down.weight"])[0] * weights[r, rank]
+        return out
 
     def generate(
         self,

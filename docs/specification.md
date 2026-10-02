@@ -125,6 +125,7 @@ All functions take and return doubles. Constants are the double nearest to the d
 | `argmax(x)` | The lowest index of the largest value (a later value must be strictly greater). |
 | `softmax(l)` | `m = l[argmax(l)]`, `e_i = exp(l_i - m)`, `total = sum_i e_i` ascending, `f32(e_i * (1 / total))`. |
 | `log_softmax(l)` | `f32((l_i - m) - log(total))`, with `total` as above. |
+| `moe_route(l[r, E], k, normalize)` | Per row: `p = softmax(l)`; the `k` experts with the largest `p`, larger first and equal ones by lower index (rank order); their weights `p_e`, or with `normalize` `f32(p_e / total)` where `total` is the sum of the chosen `p_e` in rank order, in double. |
 
 **Q8_0 and Q4_0.** Quantise a float32 row in blocks of 32 values:
 
@@ -261,6 +262,13 @@ For new tokens at positions `start …`, all in float32 unless stated:
    5. `o = linear(a, Wo)`, then `norm` with `attention_post_norm` (post and sandwich placements). `x = x + o`.
    6. `h = norm(x)` with `mlp_norm` (pre and sandwich placements), else `h = x`. `m = linear(swiglu(linear(h, Wgate),
       linear(h, Wup)), Wdown)`, then `mlp_post_norm` (post and sandwich placements). `x = x + m`.
+      In a mixture-of-experts layer (a model with `experts`, except its `dense_layers`):
+      - `experts, weights = moe_route(linear(h, Wrouter), experts_per_token, normalize_expert_weights)`. The router
+        is never quantised.
+      - Each row's output starts at 0. For each chosen expert of the row, in increasing expert order (not rank
+        order), `y = linear(swiglu(linear(h_row, We_gate), linear(h_row, We_up)), We_down)` and the output becomes
+        `output + y * weight`, two float32 operations per element.
+      - `m` is that output. Each row is computed on its own, so which rows share an expert never matters.
    7. A steering vector for this layer is added: `x = x + v`.
 3. `logits = linear(norm(x, final_norm), head)`, where `head` is the embedding when tied. Divide by `logits_scaling`
    in float32 when it is not 1, then soft-cap.

@@ -85,6 +85,12 @@ uses the first, API `logprobs` the second.
   rounded to float first and then multiplied by `up` in float, exactly what the two separate steps (and the CUDA
   kernel) do, so fusing them changes no bit.
 - **`softcap(x, cap)`**: `cap * tanh(x / cap)` in double, rounded once (Gemma 2's final logits).
+- **`moe_route(logits, k, normalize)`**: mixture-of-experts routing, row by row on one thread: `softmax` of the router
+  logits, then the `k` largest probabilities by repeated selection in a total order (larger first, equal ones to the
+  lower expert), then, with `normalize`, each divided by their total (double, rank order) and rounded once. The
+  experts themselves are ordinary `linear` and `swiglu` calls on the rows routed to them; every row is computed on
+  its own, so how tokens are grouped by expert (which depends on the batch) cannot change a bit, and each row adds
+  its experts' scaled outputs in increasing expert order.
 
 ## RoPE
 
@@ -297,6 +303,9 @@ How it works:
 - **Device-resident.** Weights are uploaded once; activations and the KV cache stay on the GPU; only the embedding
   rows go up and the logits come back. Operations are queued on one stream without waiting (the download of the
   logits waits), and callers on several threads take turns queueing, which cannot change any result.
+- **Mixtures of experts.** The router logits come back to the host, which routes them with `moe_route`; each expert
+  runs its rows on the GPU and its outputs are scaled and added on the host in increasing expert order, the CPU's
+  float32 operations.
 - **No CUDA at build time.** The extension loads the NVIDIA driver and NVRTC dynamically, so the same wheel builds
   and runs everywhere; without a GPU `--device cuda` fails with a message saying what is missing.
 - **Checked in CI without a GPU.** Compiling needs no GPU, so the `cuda extra` CI job installs `.[dev,cuda]` on
