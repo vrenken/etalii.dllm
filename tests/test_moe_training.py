@@ -1,9 +1,10 @@
-"""Fine-tuning mixture-of-experts models (Phase 43): the routing backward kernel, the router load-balancing loss,
-LoRA adapters on the experts in the PEFT format, distillation and ROME edits of the routed expert.
+"""Fine-tuning mixture-of-experts models (Phase 43; shared experts Phase 44): the routing backward kernel, the router
+load-balancing loss, LoRA adapters on the experts in the PEFT format, distillation, ROME edits of the routed or the
+shared expert and shared-expert traces.
 
 The gradients of whole models are checked against finite differences of the float64 reference in
-``test_training.py`` (families ``mixtral``, ``olmoe`` and ``qwen3_moe``), LoRA and DPO runs in ``test_lora.py`` and
-``test_preference.py``.
+``test_training.py`` (every mixture-of-experts family, shared experts included), LoRA and DPO runs in
+``test_lora.py`` and ``test_preference.py``.
 """
 
 from __future__ import annotations

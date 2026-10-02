@@ -85,6 +85,7 @@ uses the first, API `logprobs` the second.
   rounded to float first and then multiplied by `up` in float, exactly what the two separate steps (and the CUDA
   kernel) do, so fusing them changes no bit.
 - **`softcap(x, cap)`**: `cap * tanh(x / cap)` in double, rounded once (Gemma 2's final logits).
+- **`sigmoid_elementwise(x)`**: `sigmoid(x)` in double, rounded once (the gate of Qwen2-MoE's shared expert).
 - **`moe_route(logits, k, normalize)`**: mixture-of-experts routing, row by row on one thread: `softmax` of the router
   logits, then the `k` largest probabilities by repeated selection in a total order (larger first, equal ones to the
   lower expert), then, with `normalize`, each divided by their total (double, rank order) and rounded once. The

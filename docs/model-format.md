@@ -77,7 +77,7 @@ original checkpoint import to the same bytes and the same fingerprint.
   import is deterministic, but a quantised source is of course only as precise as its quantisation.
   Running quantised (`--quantize q8_0` or `q4_0`) requantises the float32 tensors at load time; the file itself
   stays float32, so one file serves every precision.
-- **Fail loudly.** Unknown tensors, unsupported families (anything but Gemma 2, Gemma 3 text, Granite, Llama, Mistral, Mixtral, OLMo 2, OLMoE, Phi-3, Qwen2, Qwen3 and Qwen3-MoE),
+- **Fail loudly.** Unknown tensors, unsupported families (anything but Gemma 2, Gemma 3 text, Granite, Granite MoE, Llama, Mistral, Mixtral, OLMo 2, OLMoE, Phi-3, Qwen2, Qwen2-MoE, Qwen3 and Qwen3-MoE),
   activations other than SiLU and GELU (tanh), MLP biases and RoPE scaling other than `linear`/`llama3`/`longrope`/`yarn` stop the import. Sliding-window
   attention comes from `sliding_window` (Mistral: every layer; Qwen2/Qwen3 with `use_sliding_window`: the layers from
   `max_window_layers` on; a `layer_types` list names them explicitly); a window at least as long as the context is
@@ -125,8 +125,21 @@ original checkpoint import to the same bytes and the same fingerprint.
   `experts.gate_up_proj`/`down_proj` import to the same tensors; the router is `mlp.gate` (`block_sparse_moe.gate`).
   GGUF files of architecture `qwen3moe`, `olmoe` and `llama` with `expert_count` (Mixtral) import from
   `ffn_gate_inp` and the stacked `ffn_{gate,up,down}_exps` (or older per-expert `ffn_gate.E`); `expert_weights_norm`
-  is honoured when present. OLMoE's `clip_qkv`, shared experts and gating other than softmax are refused. The
-  routing is in the [specification](specification.md#5-the-decoder).
+  is honoured when present. OLMoE's `clip_qkv`, shared experts other than those below and gating other than softmax
+  are refused. The routing is in the [specification](specification.md#5-the-decoder).
+- **Shared experts.** `shared_expert_intermediate_size` adds an MLP every token of a sparse layer runs, stored as
+  `layers.N.mlp.shared.{gate,up,down}.weight`; `shared_expert_gate` scales its output by
+  `sigmoid(h . layers.N.mlp.shared_gate.weight)` (one row `[1, hidden]`). Qwen2-MoE (`qwen2_moe`, Qwen1.5-MoE too)
+  has q/k/v biases, a gated shared expert (`shared_expert_intermediate_size`, `mlp.shared_expert.*`,
+  `mlp.shared_expert_gate`), `norm_topk_prob` (default false) and the dense layers of Qwen3-MoE; GGUF `qwen2moe`
+  files carry it as `ffn_{gate,up,down}_shexp` and a 1-D `ffn_gate_inp_shexp` (`expert_shared_feed_forward_length`).
+  Granite MoE (`granitemoe`, and `granitemoeshared` with an ungated `shared_intermediate_size` expert) adds Granite's
+  multipliers (the residual multiplier is folded into every expert's down projection too), always renormalises (its
+  softmax over the top-k logits is the renormalised top-k) and stores its experts fused:
+  `block_sparse_moe.input_linear` `[experts, 2 x size, hidden]` (gate rows, then up rows), `output_linear` and the
+  router `block_sparse_moe.router.layer`, the shared expert as `shared_mlp.input_linear`/`output_linear`. Exports
+  write each family's own layout back; llama.cpp has no Granite MoE architecture, so it exports to safetensors only.
+  DeepSeek-style shared experts (`n_shared_experts`) are refused.
 - **Licences.** Apache-2.0 and MIT import directly. Anything else needs `--accept-licence` and is recorded as not
   redistributable. A source with no stated licence needs `--licence`; a licence with no text in the source and no
   standard text bundled needs `--licence-file`.

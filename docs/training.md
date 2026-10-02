@@ -8,7 +8,8 @@ checkpoint and resumed ends in exactly the same bytes as one that ran straight t
 This is roadmap Phase 3, with LoRA added in Phase 8, every dense model family in Phase 40 and mixtures of experts in
 Phase 43. It trains either every parameter of the decoder or [LoRA adapters](#lora-adapters) on its linear layers, for
 every architecture the engine runs: Llama, Mistral, Qwen2, Qwen3, OLMo 2, Granite, Gemma 2, Gemma 3, Phi-3/Phi-4-mini
-(with LongRoPE) and the [mixture-of-experts](#mixtures-of-experts) models Mixtral, OLMoE and Qwen3-MoE. There is
+(with LongRoPE) and the [mixture-of-experts](#mixtures-of-experts) models Mixtral, OLMoE, Qwen3-MoE, Qwen2-MoE and
+Granite MoE. There is
 no pre-training from scratch (weights come from [importing open models](research/model-import.md)).
 
 ## Usage
@@ -141,7 +142,7 @@ byte-identical runs, bit-exact resumption, the step formula, LoRA, receipts and 
 
 ## Mixtures of experts
 
-Mixtral, OLMoE and Qwen3-MoE fine-tune like every other family, with every option above (full fine-tuning, LoRA, DPO
+Mixtral, OLMoE, Qwen3-MoE, Qwen2-MoE and Granite MoE fine-tune like every other family, with every option above (full fine-tuning, LoRA, DPO
 and distillation):
 
 ```bash
@@ -165,6 +166,12 @@ dllm finetune olmoe.dllm --data my-data.jsonl --lora-rank 8 -o olmoe-lora.dllm -
   each family's module names: `block_sparse_moe.experts.E.w1`/`w3`/`w2` for Mixtral, `mlp.experts.E.gate_proj`/
   `up_proj`/`down_proj` for OLMoE and Qwen3-MoE (the per-expert layout of `transformers` 4; adapters for the fused
   expert parameters of `transformers` 5 are not read).
+- **Shared experts** (Phase 44) see every row. Their input gradient is added after the routed experts'; with a
+  sigmoid gate `s` (Qwen2-MoE) the expert's output gradient is scaled by `s` and the gate's score gets
+  `dot(dout, y) * s * (1 - s)`. LoRA adapts the shared expert's `gate`, `up` and `down` too (never its gate), written
+  as `mlp.shared_expert.gate_proj`/`up_proj`/`down_proj`. Granite MoE keeps all its experts in one fused parameter,
+  which PEFT cannot adapt expert by expert: LoRA runs train and merge as usual, but exporting their adapter in the
+  PEFT format is refused unless they adapt only the attention projections.
 
 ## What makes it reproducible
 
