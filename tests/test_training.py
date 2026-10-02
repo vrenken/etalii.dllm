@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 from golden_values import FINETUNE_FINGERPRINT, GRADIENT_FINGERPRINT
 from model_fixtures import TINY_LLAMA_CONFIG, tiny_config, write_hf_checkpoint
+from test_transformer import reference_logits
 
 from etalii_dllm import numerics
 from etalii_dllm.cli import main as cli
@@ -29,6 +30,7 @@ from etalii_dllm.training import (
 from etalii_dllm.transformer import Transformer
 
 TOKENS = [1, 17, 42, 5, 63, 0, 9, 9, 30]
+FAMILIES = ["gemma2", "gemma3", "granite", "llama", "mistral", "olmo2", "phi3", "qwen2", "qwen3"]
 TARGETS = [*TOKENS[1:], 2]
 
 
@@ -86,6 +88,40 @@ def test_rms_norm_backward_matches_numeric_gradient():
     close(dw, numeric_gradient(lambda v: float((forward(x.astype(np.float64), v) * dy).sum()), w), 1e-6)
 
 
+def test_unit_offset_rms_norm_backward_matches_numeric_gradient():
+    x, w, dy = gaussian(5, 3, 8), gaussian(6, 8, scale=0.1), gaussian(7, 3, 8)
+    eps = 1e-6
+    dx, dw = numerics.rms_norm_backward(x, w, dy, eps, add_unit_offset=True)
+
+    def forward(xv, wv):
+        return xv / np.sqrt(np.mean(xv * xv, -1, keepdims=True) + eps) * (1 + wv)
+
+    close(dx, numeric_gradient(lambda v: float((forward(v, w) * dy).sum()), x), 1e-6)
+    close(dw, numeric_gradient(lambda v: float((forward(x.astype(np.float64), v) * dy).sum()), w), 1e-6)
+    _, plain_dw = numerics.rms_norm_backward(x, w, dy, eps)
+    assert dw.numpy().tobytes() == plain_dw.numpy().tobytes()  # d(1 + w)/dw = 1
+
+
+def test_gelu_tanh_backward_matches_numeric_gradient():
+    x, dy = gaussian(8, 20, scale=4.0), gaussian(9, 20)
+
+    def gelu(v):
+        return 0.5 * v * (1 + np.tanh(np.sqrt(2 / np.pi) * (v + 0.044715 * v**3)))
+
+    close(numerics.gelu_tanh_backward(x, dy), numeric_gradient(lambda v: float((gelu(v) * dy).sum()), x), 1e-7)
+
+
+def test_softcap_backward_matches_numeric_gradient():
+    x, dy = gaussian(8, 20, scale=4.0), gaussian(9, 20)
+    reference = numeric_gradient(lambda v: float((3.0 * np.tanh(v / 3.0) * dy).sum()), x)
+    close(numerics.softcap_backward(x, dy, 3.0), reference, 1e-7)
+    with pytest.raises(ValueError, match="positive"):
+        numerics.softcap_backward(x, dy, 0.0)
+    q = gaussian(12, 2, 2, 4)
+    with pytest.raises(ValueError, match="softcap must be positive"):
+        numerics.attention_backward(q, q, q, q, softcap=0.0)
+
+
 def test_silu_backward_matches_numeric_gradient():
     x, dy = gaussian(8, 20, scale=4.0), gaussian(9, 20)
     reference = numeric_gradient(lambda v: float((v / (1 + np.exp(-v)) * dy).sum()), x)
@@ -104,13 +140,15 @@ def test_rope_inverse_is_the_transpose(interleaved):
     close(restored, x, 1e-6)
 
 
-def reference_attention(q, k, v, scale, window=None):
+def reference_attention(q, k, v, scale, window=None, softcap=None):
     q_len, heads, _ = q.shape
     group = heads // k.shape[1]
     out = np.zeros((q_len, heads, v.shape[2]))
     offset = k.shape[0] - q_len
     for h in range(heads):
         scores = q[:, h] @ k[:, h // group].T * scale
+        if softcap is not None:
+            scores = softcap * np.tanh(scores / softcap)
         scores = scores + np.triu(np.full(scores.shape, -np.inf), offset + 1)
         if window is not None:
             scores = scores + np.tril(np.full(scores.shape, -np.inf), offset - window)
@@ -119,16 +157,18 @@ def reference_attention(q, k, v, scale, window=None):
     return out
 
 
-@pytest.mark.parametrize(("q_len", "window"), [(4, None), (2, None), (4, 2), (2, 1)])
-def test_attention_backward_matches_numeric_gradient(q_len, window):
+@pytest.mark.parametrize(
+    ("q_len", "window", "softcap"), [(4, None, None), (2, None, None), (4, 2, None), (2, 1, None), (4, None, 0.5)]
+)
+def test_attention_backward_matches_numeric_gradient(q_len, window, softcap):
     q, k, v = gaussian(12, q_len, 4, 6), gaussian(13, 4, 2, 6), gaussian(14, 4, 2, 5)
     dout = gaussian(15, q_len, 4, 5)
     scale = 1 / np.sqrt(6)
-    dq, dk, dv = numerics.attention_backward(q, k, v, dout, window=window)
+    dq, dk, dv = numerics.attention_backward(q, k, v, dout, window=window, softcap=softcap)
     q64, k64, v64 = (a.astype(np.float64) for a in (q, k, v))
 
     def loss(a, b, c):
-        return float((reference_attention(a, b, c, scale, window) * dout).sum())
+        return float((reference_attention(a, b, c, scale, window, softcap) * dout).sum())
 
     close(dq, numeric_gradient(lambda a: loss(a, k64, v64), q), 1e-6)
     close(dk, numeric_gradient(lambda a: loss(q64, a, v64), k), 1e-6)
@@ -176,7 +216,7 @@ def test_adamw_step_is_the_documented_formula():
 # Decoder gradients
 
 
-@pytest.fixture(scope="module", params=["llama", "mistral", "qwen2", "qwen3"])
+@pytest.fixture(scope="module", params=FAMILIES)
 def model_file(request, tmp_path_factory) -> ModelFile:
     directory = tmp_path_factory.mktemp(request.param)
     config = tiny_config(request.param)
@@ -186,40 +226,8 @@ def model_file(request, tmp_path_factory) -> ModelFile:
 
 
 def reference_loss(config, w, tokens, targets) -> float:
-    """float64 NumPy forward pass and summed next-token cross-entropy (the yardstick; see test_transformer)."""
-    n, hd = len(tokens), config.head_dim
-    inv_freq = config.rope_theta ** (-np.arange(0, hd, 2, dtype=np.float64) / hd)
-    angles = np.arange(n, dtype=np.float64)[:, None] * inv_freq[None, :]
-    cos, sin = np.cos(np.concatenate([angles, angles], 1)), np.sin(np.concatenate([angles, angles], 1))
-
-    def norm(x, weight):
-        return x / np.sqrt(np.mean(x * x, axis=-1, keepdims=True) + config.rms_norm_eps) * weight
-
-    def rotate(x):
-        half = np.concatenate([-x[..., hd // 2 :], x[..., : hd // 2]], axis=-1)
-        return x * cos[:, None, :] + half * sin[:, None, :]
-
-    def proj(x, name):
-        out = x @ w[name + ".weight"].T
-        return out + w[name + ".bias"] if name + ".bias" in w else out
-
-    x = w["token_embedding.weight"][tokens]
-    for i in range(config.layers):
-        p = f"layers.{i}."
-        h = norm(x, w[p + "attention_norm.weight"])
-        q = proj(h, p + "attention.q").reshape(n, config.heads, hd)
-        k = proj(h, p + "attention.k").reshape(n, config.kv_heads, hd)
-        if config.qk_norm:
-            q, k = norm(q, w[p + "attention.q_norm.weight"]), norm(k, w[p + "attention.k_norm.weight"])
-        q, k = rotate(q), rotate(k)
-        v = proj(h, p + "attention.v").reshape(n, config.kv_heads, hd)
-        attended = reference_attention(q, k, v, 1 / np.sqrt(hd), config.window(i))
-        x = x + attended.reshape(n, -1) @ w[p + "attention.o.weight"].T
-        h = norm(x, w[p + "mlp_norm.weight"])
-        gate = h @ w[p + "mlp.gate.weight"].T
-        x = x + (gate / (1 + np.exp(-gate)) * (h @ w[p + "mlp.up.weight"].T)) @ w[p + "mlp.down.weight"].T
-    head = w["token_embedding.weight"] if config.tie_word_embeddings else w["lm_head.weight"]
-    logits = norm(x, w["final_norm.weight"]) @ head.T
+    """float64 NumPy forward pass (test_transformer's yardstick) and summed next-token cross-entropy."""
+    logits = reference_logits(config, w, tokens, every_position=True)
     top = logits.max(-1, keepdims=True)
     lse = (np.log(np.exp(logits - top).sum(-1, keepdims=True)) + top)[:, 0]
     return float(sum(lse[t] - logits[t, target] for t, target in enumerate(targets) if target >= 0))
@@ -334,9 +342,11 @@ RUN = RunConfig(steps=6, batch_size=3, sequence_length=8, seed=3, optimizer=Adam
 
 
 def test_loss_decreases(model_file):
-    tuner = FineTuner.from_model_file(model_file, ascii_data(), RunConfig(20, 4, 8, 1, AdamWConfig(3e-2)))
+    tuner = FineTuner.from_model_file(model_file, ascii_data(), RunConfig(20, 4, 8, 1, AdamWConfig(1e-1)))
     results = tuner.train()
-    assert np.mean([r.loss for r in results[-4:]]) < np.mean([r.loss for r in results[:4]]) - 0.1
+    # Gemma 2's tiny logit cap (0.05) keeps every logit near zero, so its loss cannot fall far below log(64).
+    margin = 0.01 if model_file.config.logits_softcap else 0.1
+    assert np.mean([r.loss for r in results[-4:]]) < np.mean([r.loss for r in results[:4]]) - margin
 
 
 def test_runs_are_byte_identical_and_resume_bit_for_bit(model_file, tmp_path):
@@ -453,17 +463,15 @@ def test_cli_finetune_and_resume(tmp_path, capsys, monkeypatch):
     assert cli(["replay", str(receipt), "--base", str(tmp_path / "base.dllm")]) == 2
 
 
-def test_architectures_without_a_backward_pass_are_refused():
-    """OLMo 2's post-norms have no gradient code yet; training must say so rather than compute something else."""
+def test_layouts_without_a_backward_pass_are_refused():
+    """Interleaved rotary halves (imports convert them) and a LongRoPE factor with QK-norm have no gradient code."""
+    import dataclasses
+
     from etalii_dllm.importing.importer import hf_config
 
-    with pytest.raises(ValueError, match="olmo2"):
-        DecoderGradients(hf_config(tiny_config("olmo2")))
-    with pytest.raises(ValueError, match="granite"):
-        DecoderGradients(hf_config(tiny_config("granite")))
-    with pytest.raises(ValueError, match="phi3"):  # the LongRoPE attention factor
-        DecoderGradients(hf_config(tiny_config("phi3")))
-    with pytest.raises(ValueError, match="gemma3"):
-        DecoderGradients(hf_config(tiny_config("gemma3")))
-    with pytest.raises(ValueError, match="gemma2"):  # the soft-caps
-        DecoderGradients(hf_config(tiny_config("gemma2")))
+    config = hf_config(tiny_config("llama"))
+    with pytest.raises(ValueError, match="rotary layout"):
+        DecoderGradients(dataclasses.replace(config, rope_interleaved=True))
+    phi3 = hf_config(tiny_config("phi3"))
+    with pytest.raises(ValueError, match="LongRoPE"):
+        DecoderGradients(dataclasses.replace(phi3, qk_norm=True))

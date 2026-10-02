@@ -50,6 +50,12 @@ GRADIENT_FINGERPRINT = {
     "mistral": "c458fd0ed0194d5bcef7b150ca5fa3b853b589d3c4c02e44a763faefe19e6db6",
     "qwen2": "59dd1f723fda011ecefaa158fbb1557c05ddc03a97cbadae70d3c358c5081cf3",
     "qwen3": "86666c63aea685d30b8f66d665d7c221071c4b97c13213d1588718c8bd18cbd8",
+    # Phase 40: the families with post/sandwich norms, multipliers, soft-caps, tanh GELU and LongRoPE.
+    "gemma2": "d0d8a2f956decd34b073534b3374b4587a844940f94d2ccc4f3dd791c72c0498",
+    "gemma3": "149cf2f10f478e80f8506dd10cda86165002aa60b22136169610c827aa0da844",
+    "granite": "98f7a135ca78ed583d5e62fcb3cde570e8207eeb0a3f99eeffd5357246829f34",
+    "olmo2": "c97ec7b029ac6184b74379a2b0712ada3d1024fb7b8f29c8bf33c600f23aec06",
+    "phi3": "f473fc130c10433bee8d3e33ebbbb68414156855de5bf2918cfb2e439f1e9d6e",
 }
 
 # Fingerprint of the model.dllm exported after tests/test_training.py::RUN (6 AdamW steps on the ASCII data).
@@ -58,6 +64,11 @@ FINETUNE_FINGERPRINT = {
     "mistral": "eb8535983feda9d1a8c1627c194e8fc97b3e970be901364db4939eca08b66ba1",
     "qwen2": "557ffcff23dfc853308c73c68534cef212ee3873741fd140c4978fad806a2964",
     "qwen3": "bd00cb4c7be0ebba8bc67300af300ea28054a8147f74480b788e7aa131d02514",
+    "gemma2": "dee0dfb3e8da3dcaeacfb45ad19db86fd70d79a374b931cd5c3375264243af52",
+    "gemma3": "a09cffa71fa53068bb005e09cfbc6ee3f59109d16ff323b628eed86cb6840e89",
+    "granite": "0e55ef33fe21bea9875a39fce8ac925fbbea183e1b41aa963b354a5e47d2144d",
+    "olmo2": "c8e571ac46f3c6a3b193a70f21d06596c33ab5ddf77f8ea8f50cc75247d96b7f",
+    "phi3": "802773c1df4b7c6a015114d5618a834e0ff5fa58d46a9628edf48239d9c77946",
 }
 
 # Phase 8. Fingerprint of the model.dllm exported after tests/test_lora.py::RUN (6 AdamW steps on rank-2 LoRA
@@ -65,6 +76,11 @@ FINETUNE_FINGERPRINT = {
 LORA_FINETUNE_FINGERPRINT = {
     "llama": "05fd6d263be7b2f600637127b9f425ac5a699c51f4b5622eec8f50c888ccbedc",
     "qwen3": "bb2e772b7a102b02be51cb894da3676a2c557956f156f5be5c30ea7a93ba9799",
+    "gemma2": "2c1034f9b78affce4f542d095dfc38174c9f6f86016781e950d4a1b0106a80f5",
+    "gemma3": "838e4d2614d8ad22cc85848cb794f82d73b99f867a166c222e1b29e7349eca16",
+    "granite": "6e2e7839c6be40010ad7e9ffb443cf899c9dfb59992cbc45004da36a2a7eff6e",
+    "olmo2": "23c71be0b0ae63e8e47e0e3b5b5a83e31183cfca7e32c46a5e0d9018ef8b15ee",
+    "phi3": "0d709a78f35ee3eb4c909daa0815e285ca9cbfb81c17f0a0f6efd170b0f115fb",
 }
 
 # Phase 4. fingerprint() of the tokens of tests/test_generation.py's schema-constrained chat (placeholder model,
@@ -210,6 +226,11 @@ BATCH_OUTPUT_SHA256 = "3901563bd7af75cfae606f18f14f0961093583bea2f2963723e778284
 DPO_FINETUNE_FINGERPRINT = {
     "llama": "69d5ef4720169229deed88b5e753d99b2dd145b6fef9be5fc795ae35e8095d7d",
     "qwen3": "06bd4f073a3d8530c1fbbb47002f00e2def08b56f36d158fe0b1b9e1579591ee",
+    "gemma2": "ac6decc0ecbd8e69ed12a7a5493081c6f1f331ea733f60c74f42775fa210d2fb",
+    "gemma3": "dfbd7597becf150e34feafb7473b816a1eb164e270168546c5adc16a0abcbbfd",
+    "granite": "f86a79bac1e970727c470f9ca2772d0910b127b6961afcea2f7ea90a7ab53c6a",
+    "olmo2": "218282bd542d8a5e50b00a45c5c21b36683e48f832cb46485ffba2433fc0b1fd",
+    "phi3": "91ad8e324a3511e09efeefc3c989e4dddc20f0631d4f90d9601e1defc0ad9992",
 }
 
 # Phase 26. Fingerprints (SHA-256 of [[chunk, score as a hex double], ...]) of tests/test_hybrid_search.py's lexical

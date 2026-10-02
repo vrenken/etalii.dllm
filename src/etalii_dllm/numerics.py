@@ -405,17 +405,32 @@ def linear_backward(
 
 
 def rms_norm_backward(
-    x: npt.ArrayLike | Tensor, weight: npt.ArrayLike | Tensor | None, dy: npt.ArrayLike | Tensor, eps: float = 1e-6
+    x: npt.ArrayLike | Tensor,
+    weight: npt.ArrayLike | Tensor | None,
+    dy: npt.ArrayLike | Tensor,
+    eps: float = 1e-6,
+    *,
+    add_unit_offset: bool = False,
 ) -> tuple[Tensor, Tensor]:
-    """``(dx, dweight)`` of :func:`rms_norm` (without ``add_unit_offset``)."""
+    """``(dx, dweight)`` of :func:`rms_norm` with the same ``add_unit_offset``."""
     w = None if weight is None else _float32(weight)
-    dx, dw = _kernels.rms_norm_backward(_float32(x), w, _float32(dy), eps)
+    dx, dw = _kernels.rms_norm_backward(_float32(x), w, _float32(dy), eps, add_unit_offset)
     return Tensor(dx), Tensor(dw)
 
 
 def silu_backward(x: npt.ArrayLike | Tensor, dy: npt.ArrayLike | Tensor) -> Tensor:
     """``dy * silu'(x)``, elementwise."""
     return Tensor(_kernels.silu_backward(_float32(x), _float32(dy)))
+
+
+def gelu_tanh_backward(x: npt.ArrayLike | Tensor, dy: npt.ArrayLike | Tensor) -> Tensor:
+    """``dy * gelu'(x)`` for the tanh form of GELU (``gelu(x, approximate="tanh")``), elementwise."""
+    return Tensor(_kernels.gelu_tanh_backward(_float32(x), _float32(dy)))
+
+
+def softcap_backward(x: npt.ArrayLike | Tensor, dy: npt.ArrayLike | Tensor, cap: float) -> Tensor:
+    """``dy * softcap'(x)`` of :func:`softcap`, elementwise: ``dy (1 - tanh(x / cap)^2)``."""
+    return Tensor(_kernels.softcap_backward(_float32(x), _float32(dy), float(cap)))
 
 
 def attention_backward(
@@ -428,6 +443,7 @@ def attention_backward(
     causal: bool = True,
     q_offset: int | None = None,
     window: int | None = None,
+    softcap: float | None = None,
 ) -> tuple[Tensor, Tensor, Tensor]:
     """``(dq, dk, dv)`` of :func:`attention` with the same arguments."""
     qa = _float32(q)
@@ -435,10 +451,12 @@ def attention_backward(
         raise ValueError("q must be [length, heads, head_dim]")
     if q_offset is not None and q_offset < 0:
         raise ValueError("q_offset must be non-negative")
+    if softcap is not None and not softcap > 0:
+        raise ValueError("softcap must be positive")
     s = 1.0 / math.sqrt(qa.shape[2]) if scale is None else float(scale)
     offset = -1 if q_offset is None else q_offset
     dq, dk, dv = _kernels.attention_backward(
-        qa, _float32(k), _float32(v), _float32(dout), s, causal, offset, _window(window)
+        qa, _float32(k), _float32(v), _float32(dout), s, causal, offset, _window(window), softcap or 0.0
     )
     return Tensor(dq), Tensor(dk), Tensor(dv)
 

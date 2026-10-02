@@ -191,7 +191,8 @@ def test_adapter_missing_one_factor_is_refused(base, tmp_path):  # noqa: F811
 def test_rank_in_the_config_must_match_the_tensors(base, tmp_path):  # noqa: F811
     valid_adapter(tmp_path, base.config)
     edit_config(tmp_path, r=4)
-    with pytest.raises(AdapterError, match=r"lora_a has shape \(2, 16\), expected \(4, 16\)"):
+    hidden = base.config.hidden_size
+    with pytest.raises(AdapterError, match=rf"lora_a has shape \(2, {hidden}\), expected \(4, {hidden}\)"):
         lora_module.read_peft(tmp_path, base.config)
 
 
@@ -231,7 +232,9 @@ def test_default_alpha_when_the_config_has_none(base, tmp_path):  # noqa: F811
 def test_adapter_for_another_architecture_is_refused(base, tmp_path):  # noqa: F811
     # An adapter for a wider model: same names, different shapes.
     config = base.config
-    wider = type(config)(**{**config.to_dict(), "eos_token_ids": config.eos_token_ids, "hidden_size": 32})
+    wider = type(config)(
+        **{**config.to_dict(), "eos_token_ids": config.eos_token_ids, "hidden_size": 2 * config.hidden_size}
+    )
     lora_module.write_peft(tmp_path, random_adapters(wider, LORA), LORA)
     with pytest.raises(AdapterError, match=r"has shape \(\d+, \d+\), expected"):
         lora_module.read_peft(tmp_path, config)

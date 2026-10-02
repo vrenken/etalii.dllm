@@ -3,6 +3,7 @@ and batch invariance, gets its own fingerprint, and the edit does what it says (
 
 from __future__ import annotations
 
+import dataclasses
 import json
 
 import numpy as np
@@ -277,11 +278,9 @@ def test_rome_rejects_bad_requests(model_path, tmp_path_factory):  # noqa: F811
         rome(model, tokenizer, request, corpus=[""], steps=1)
     with pytest.raises(ValueError, match="unsteered"):
         rome(steered(model, {0: np.zeros(model.config.hidden_size, dtype=np.float32)}), tokenizer, request)
-    directory = tmp_path_factory.mktemp("olmo")
-    write_hf_checkpoint(directory / "checkpoint", tiny_config("olmo2"))
-    import_model(directory / "checkpoint", directory / "model.dllm")
+    interleaved = dataclasses.replace(model.config, rope_interleaved=True)  # the one layout training refuses
     with pytest.raises(ValueError, match="fine-tuning support"):
-        rome(Transformer.from_file(directory / "model.dllm"), tokenizer, request)
+        rome(Transformer(interleaved, model.tensors), tokenizer, request)
 
 
 def test_key_covariance_is_symmetric(model_path):  # noqa: F811
