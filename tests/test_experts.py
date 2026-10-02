@@ -1,9 +1,9 @@
-"""Mixture-of-experts models (Phase 42): exact routing, batch invariance, imports and exports, the reference
-semantics, routing traces and ``dllm experts``.
+"""Mixture-of-experts models (Phase 42; shared experts Phase 44): exact routing, batch invariance, imports and
+exports, the reference semantics, routing traces and ``dllm experts``.
 
 The decoders themselves are checked against the float64 transcription of transformers in ``test_transformer.py``
-(families ``mixtral``, ``olmoe`` and ``qwen3_moe``) and against the reference implementation in
-``test_reference.py``; the routing kernel against the reference in the conformance vectors.
+(families ``mixtral``, ``olmoe``, ``qwen3_moe``, ``qwen2_moe`` and ``granitemoe``) and against the reference
+implementation in ``test_reference.py``; the routing kernel against the reference in the conformance vectors.
 """
 
 from __future__ import annotations
@@ -29,7 +29,8 @@ from etalii_dllm.numerics import PackedWeight, QuantizedWeight, fingerprint, moe
 from etalii_dllm.transformer import LayerHook, Transformer
 
 PROMPT = [1, 17, 42, 5, 63, 0, 9, 9, 30]
-MOE_FAMILIES = ["mixtral", "olmoe", "qwen3_moe"]
+MOE_FAMILIES = ["granitemoe", "granitemoeshared", "mixtral", "olmoe", "qwen2_moe", "qwen3_moe"]
+GGUF_ARCHITECTURES = {"mixtral": "llama", "olmoe": "olmoe", "qwen3_moe": "qwen3moe", "qwen2_moe": "qwen2moe"}
 
 
 def gaussian(seed: int, *shape: int) -> np.ndarray:
@@ -236,9 +237,22 @@ def test_hugging_face_settings():
     assert mixtral.family == "mixtral" and mixtral.normalize_expert_weights and mixtral.expert_size == 32
     olmoe = hf_config(tiny_config("olmoe"))
     assert not olmoe.normalize_expert_weights and olmoe.qk_norm_scope == "all"
+    qwen2 = hf_config(tiny_config("qwen2_moe"))
+    assert not qwen2.normalize_expert_weights and qwen2.attention_bias and qwen2.dense_layers is None
+    assert (qwen2.expert_intermediate_size, qwen2.shared_expert_intermediate_size, qwen2.shared_expert_gate) == (
+        8,
+        12,
+        True,
+    )
+    granite = hf_config(tiny_config("granitemoe"))
+    assert granite.family == "granitemoe" and granite.normalize_expert_weights and granite.residual_multiplier == 0.22
+    assert granite.shared_expert_intermediate_size is None
+    shared = hf_config(tiny_config("granitemoeshared"))
+    assert shared.shared_expert_intermediate_size == 12 and not shared.shared_expert_gate
     for change, message in [
         ({"clip_qkv": 8.0}, "clip_qkv"),
-        ({"shared_expert_intermediate_size": 16}, "shared experts"),
+        ({"shared_expert_intermediate_size": 16}, "shared expert"),
+        ({"n_shared_experts": 2}, "shared expert"),
         ({"num_experts_per_tok": 9}, "experts_per_token"),
     ]:
         with pytest.raises(ModelImportError, match=message):
@@ -253,7 +267,7 @@ def write_moe_gguf(path, family: str, stacked: bool = True):
 
     config = tiny_config(family)
     weights = hf_weights(config)
-    architecture = {"mixtral": "llama", "olmoe": "olmoe", "qwen3_moe": "qwen3moe"}[family]
+    architecture = GGUF_ARCHITECTURES[family]
     writer = gguf.GGUFWriter(str(path), architecture)
     writer.add_name("Tiny MoE")
     writer.add_string("general.license", "apache-2.0")
@@ -270,8 +284,10 @@ def write_moe_gguf(path, family: str, stacked: bool = True):
     writer.add_vocab_size(config["vocab_size"])
     writer.add_expert_count(config.get("num_local_experts") or config["num_experts"])
     writer.add_expert_used_count(config["num_experts_per_tok"])
-    if family == "qwen3_moe":
+    if family in ("qwen2_moe", "qwen3_moe"):
         writer.add_expert_feed_forward_length(config["moe_intermediate_size"])
+    if family == "qwen2_moe":
+        writer.add_expert_shared_feed_forward_length(config["shared_expert_intermediate_size"])
     writer.add_tokenizer_model("gpt2")
     writer.add_token_list([f"t{i}" for i in range(config["vocab_size"])])
     experts: dict[tuple[str, str], dict[int, np.ndarray]] = {}
@@ -286,6 +302,9 @@ def write_moe_gguf(path, family: str, stacked: bool = True):
             continue
         if name.endswith(("mlp.gate.weight", "block_sparse_moe.gate.weight")):
             writer.add_tensor(f"blk.{parts[2]}.ffn_gate_inp.weight", values)
+            continue
+        if name.endswith("mlp.shared_expert_gate.weight"):  # one row, stored 1-D by llama.cpp
+            writer.add_tensor(f"blk.{parts[2]}.ffn_gate_inp_shexp.weight", values.reshape(-1))
             continue
         if architecture == "llama" and ".q_proj." in name:
             values = exporting.permute_rotary(values, config["num_attention_heads"])
@@ -306,7 +325,7 @@ def write_moe_gguf(path, family: str, stacked: bool = True):
 
 
 @pytest.mark.parametrize(("family", "stacked"), [("mixtral", True), ("mixtral", False), ("olmoe", True),
-                                                 ("qwen3_moe", True)])  # fmt: skip
+                                                 ("qwen3_moe", True), ("qwen2_moe", True)])  # fmt: skip
 def test_gguf_imports_give_the_hugging_face_weights(tmp_path, family, stacked):
     pytest.importorskip("gguf")
     write_hf_checkpoint(tmp_path / "hf", tiny_config(family))
@@ -363,6 +382,10 @@ def test_exports_import_back(tmp_path, family):
     exported = json.loads((tmp_path / "out" / "config.json").read_text())
     assert exported["model_type"] == family and exported["num_experts_per_tok"] == 2
     assert import_model(tmp_path / "out", tmp_path / "again.dllm").fingerprint == original.fingerprint
+    if family.startswith("granite"):  # llama.cpp has no Granite MoE architecture
+        with pytest.raises(exporting.ExportError):
+            exporting.export_model(tmp_path / "model.dllm", tmp_path / "model.gguf", "gguf")
+        return
     exporting.export_model(tmp_path / "model.dllm", tmp_path / "model.gguf", "gguf")
     again = import_model(tmp_path / "model.gguf", tmp_path / "gguf.dllm")
     assert again.fingerprint == original.fingerprint
@@ -372,11 +395,15 @@ def test_exports_import_back(tmp_path, family):
     import gguf
 
     reader = gguf.GGUFReader(str(tmp_path / "model.gguf"))
-    architecture = {"mixtral": "llama", "olmoe": "olmoe", "qwen3_moe": "qwen3moe"}[family]
+    architecture = GGUF_ARCHITECTURES[family]
     assert reader.fields["general.architecture"].contents() == architecture
     assert reader.fields[f"{architecture}.expert_count"].contents() == 4
     names = {t.name for t in reader.tensors}
     assert "blk.1.ffn_gate_exps.weight" in names and "blk.1.ffn_gate_inp.weight" in names
+    if family == "qwen2_moe":
+        shared = {t.name: t for t in reader.tensors}["blk.1.ffn_gate_inp_shexp.weight"]
+        assert len(shared.shape) == 1 and "blk.1.ffn_down_shexp.weight" in names
+        assert reader.fields[f"{architecture}.expert_shared_feed_forward_length"].contents() == 12
 
 
 # -- the command line ---------------------------------------------------------------------------------------------

@@ -225,6 +225,11 @@ def sigmoid(x: npt.ArrayLike) -> np.ndarray:
     return np.where(x >= 0, positive, negative)
 
 
+def sigmoid_float(x: npt.ArrayLike) -> np.ndarray:
+    """``sigmoid`` of float32 ``x`` rounded once to float32 (the gate of a shared expert)."""
+    return _round(sigmoid(x))
+
+
 def _erfc_tail(a: np.ndarray) -> np.ndarray:
     """``erfc(a)`` for ``a >= 2.5``: ``e^(-a^2) / sqrt(pi)`` over Laplace's continued fraction, depth 80."""
     with np.errstate(all="ignore"):
@@ -1012,7 +1017,7 @@ class ReferenceTransformer:
                 act = swiglu(linear(row, w[q + "gate.weight"]), linear(row, w[q + "up.weight"]), config.activation)
                 shared = linear(act, w[q + "down.weight"])[0]
                 if config.shared_expert_gate:
-                    shared = shared * _round(sigmoid(linear(row, w[p + "shared_gate.weight"])[0, 0]))
+                    shared = shared * sigmoid_float(linear(row, w[p + "shared_gate.weight"])[0, 0])
                 out[r] = out[r] + shared
         return out
 

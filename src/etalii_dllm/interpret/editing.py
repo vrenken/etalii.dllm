@@ -111,10 +111,10 @@ def subject_position(tokenizer: Tokenizer, prompt: str, subject: str) -> tuple[l
     raise ValueError(f"could not find the subject {subject!r} in the tokens of the prompt")  # pragma: no cover
 
 
-def mlp_keys(model: Transformer, tokens: Sequence[int], layer: int, expert: int | None = None) -> np.ndarray:
+def mlp_keys(model: Transformer, tokens: Sequence[int], layer: int, expert: int | str | None = None) -> np.ndarray:
     """The MLP keys ``[positions, intermediate]`` of ``layer`` (0-based) for ``tokens``: the input of its down
     projection, or in a mixture-of-experts layer that of ``expert``'s down projection (at every position, routed to
-    the expert or not)."""
+    the expert or not; ``"shared"``: the shared expert's)."""
     traced = trace(model, tokens, attention=False, logits=False)
     if traced.mlp_activation is not None:
         return traced.mlp_activation[layer]
@@ -122,7 +122,7 @@ def mlp_keys(model: Transformer, tokens: Sequence[int], layer: int, expert: int 
 
 
 def key_covariance(
-    model: Transformer, tokenizer: Tokenizer, texts: Sequence[str], layer: int, expert: int | None = None
+    model: Transformer, tokenizer: Tokenizer, texts: Sequence[str], layer: int, expert: int | str | None = None
 ) -> np.ndarray:
     """``(1 / N) * sum_t k_t k_t^T`` over every position ``t`` of ``texts``: the MLP keys of ``layer`` (0-based;
     of ``expert`` in a mixture-of-experts layer), summed over positions in text order through the ``linear``
@@ -152,10 +152,12 @@ def rome(
     learning_rate: float = 0.5,
     l2: float = 1e-3,
     stop_loss: float = 0.05,
+    expert: str = "routed",
 ) -> EditResult:
     """Computes a ROME edit of ``model``. ``layer`` is 1-based (default: a quarter of the way in); ``contexts`` are
     prefixes put before the prompt to average the key over; ``corpus`` estimates the key covariance, which is
-    regularised as ``C / mean(diag C) + regularisation * I``."""
+    regularised as ``C / mean(diag C) + regularisation * I``. In a mixture-of-experts layer ``expert`` picks the
+    memory: the subject's top ``"routed"`` expert, or the ``"shared"`` expert every token runs."""
     from etalii_dllm.training import AdamW, AdamWConfig
     from etalii_dllm.training.backprop import DecoderGradients
 
@@ -171,25 +173,36 @@ def rome(
         raise ValueError(f"layer must be between 1 and {config.layers}")
     if steps < 1:
         raise ValueError("steps must be at least 1")
+    if expert not in ("routed", "shared"):
+        raise ValueError("expert must be 'routed' or 'shared'")
     index = layer - 1
+    if expert == "shared" and (not config.is_sparse(index) or config.shared_expert_intermediate_size is None):
+        raise ValueError(f"layer {layer} has no shared expert")
     target = tokenizer.encode(request.target)
     if not target:
         raise ValueError("the target has no tokens")
 
     # 1. The key: the MLP activation at the subject's last token, averaged over the prompt and its contexts. In a
     # mixture-of-experts layer: that of the expert the prompt's subject token is routed to with the largest weight
-    # (the first in rank order, so ties go to the lower expert), whose output the layer scales by that weight.
+    # (the first in rank order, so ties go to the lower expert), whose output the layer scales by that weight; or
+    # that of the shared expert, whose output a gated one scales by the sigmoid gate.
     sequences = []
     for prefix in ("", *contexts):
         tokens, position = subject_position(tokenizer, prefix + request.prompt, request.subject)
         sequences.append((tokens, position))
-    expert, routing_weight = None, 1.0
+    memory: int | str | None = None
+    routing_weight = 1.0
     if config.is_sparse(index):
         routed = trace(model, sequences[0][0], attention=False, logits=False)
         assert routed.experts is not None and routed.expert_weights is not None
-        expert = int(routed.experts[index, sequences[0][1], 0])
-        routing_weight = float(routed.expert_weights[index, sequences[0][1], 0])  # at least 1 / experts: never 0
-    keys = np.stack([mlp_keys(model, t, index, expert)[p] for t, p in sequences])
+        if expert == "shared":
+            memory = "shared"
+            if routed.shared_gate is not None:  # a sigmoid of a finite score: never 0
+                routing_weight = float(routed.shared_gate[index, sequences[0][1]])
+        else:
+            memory = int(routed.experts[index, sequences[0][1], 0])
+            routing_weight = float(routed.expert_weights[index, sequences[0][1], 0])  # at least 1 / experts: never 0
+    keys = np.stack([mlp_keys(model, t, index, memory)[p] for t, p in sequences])
     key = keys[0] if len(keys) == 1 else column_mean(keys)
 
     # 2. The value change: AdamW on delta, added to the residual stream after the layer at the subject's last token.
@@ -221,7 +234,7 @@ def rome(
         params = {"delta": delta}
         optimiser.step(params, {"delta": gradient}, step, learning_rate)
     # 3. The rank-one update of the down projection.
-    covariance = key_covariance(model, tokenizer, corpus, index, expert)
+    covariance = key_covariance(model, tokenizer, corpus, index, memory)
     diagonal = np.ascontiguousarray(np.diagonal(covariance))
     scale = sum_(diagonal) / diagonal.shape[0]
     if not scale > 0:
@@ -233,8 +246,8 @@ def rome(
     coefficients = (u / np.float32(denominator)).astype(np.float32)
     name = f"layers.{index}.mlp.down.weight"
     value = delta
-    if expert is not None:  # the layer adds routing_weight * W k, so W k changes by delta / routing_weight
-        name = f"layers.{index}.mlp.experts.{expert}.down.weight"
+    if memory is not None:  # the layer adds routing_weight * W k, so W k changes by delta / routing_weight
+        name = f"layers.{index}.mlp.{'shared' if memory == 'shared' else f'experts.{memory}'}.down.weight"
         value = (delta / np.float32(routing_weight)).astype(np.float32)
     edited = dict(weights)
     edited[name] = (weights[name] + value[:, None] * coefficients[None, :]).astype(np.float32)
@@ -258,8 +271,8 @@ def rome(
         "delta_norm": math.sqrt(sum_squares(delta)),
         "target_probability": {"before": before, "after": after},
     }
-    if expert is not None:
-        record["expert"] = expert
+    if memory is not None:
+        record["expert"] = memory
         record["routing_weight"] = routing_weight
     return EditResult(edited, record)
 

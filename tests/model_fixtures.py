@@ -397,6 +397,9 @@ _HF_TO_GGUF = {
     "mlp.gate_proj.weight": "ffn_gate.weight",
     "mlp.up_proj.weight": "ffn_up.weight",
     "mlp.down_proj.weight": "ffn_down.weight",
+    "mlp.shared_expert.gate_proj.weight": "ffn_gate_shexp.weight",
+    "mlp.shared_expert.up_proj.weight": "ffn_up_shexp.weight",
+    "mlp.shared_expert.down_proj.weight": "ffn_down_shexp.weight",
 }
 
 
@@ -455,3 +458,11 @@ def write_gguf(path: Path, config: dict | None = None, quantization: str | None 
     writer.write_tensors_to_file()
     writer.close()
     return weights
+
+
+def fixture_name(config) -> str:
+    """The :func:`tiny_config` name a ``TransformerConfig`` was imported from, the key of the golden tables:
+    the family, except for Granite MoE with a shared expert (``granitemoeshared``)."""
+    if config.family == "granitemoe" and config.shared_expert_intermediate_size is not None:
+        return "granitemoeshared"
+    return config.family

@@ -80,6 +80,10 @@ class LayerHook:
         """The experts ``[positions, k]`` each position of a mixture-of-experts layer was routed to, in rank order,
         and their weights ``[positions, k]`` (sparse layers only; they have no :meth:`mlp_activation`)."""
 
+    def shared_expert(self, layer: int, activation: np.ndarray, gate: np.ndarray | None) -> None:
+        """A sparse layer's shared expert: its hidden activation ``act(gate) * up`` ``[positions, shared size]`` and,
+        when it is gated, the sigmoid gate ``[positions, 1]`` its output is scaled by."""
+
 
 def _prepare(weight: Tensor, quantize: str | None, device: str) -> Weight:
     if quantize and QuantizedWeight.supports(weight):
@@ -591,10 +595,10 @@ class Transformer:
                 y = linear(swiglu(gate, up, config.activation), self._w[q + "down.weight"]).numpy()  # type: ignore[arg-type]
             out[rows] += y * weights[rows, ranks][:, None]
         if config.shared_expert_intermediate_size is not None:
-            out = out + self._shared_expert(h, layer)
+            out = out + self._shared_expert(h, layer, hook)
         return out
 
-    def _shared_expert(self, h: np.ndarray, layer: int) -> np.ndarray:
+    def _shared_expert(self, h: np.ndarray, layer: int, hook: LayerHook | None = None) -> np.ndarray:
         """The shared expert's output ``[rows, hidden]`` for every row, times ``sigmoid(h . gate)`` (rounded once)
         when it is gated."""
         config = self.config
@@ -609,22 +613,28 @@ class Transformer:
         else:
             gate = linear(h, self._w[q + "gate.weight"])  # type: ignore[arg-type]
             up = linear(h, self._w[q + "up.weight"])  # type: ignore[arg-type]
-            y = linear(swiglu(gate, up, config.activation), self._w[q + "down.weight"]).numpy()  # type: ignore[arg-type]
+            activation = swiglu(gate, up, config.activation)
+            y = linear(activation, self._w[q + "down.weight"]).numpy()  # type: ignore[arg-type]
             if config.shared_expert_gate:
                 score = linear(h, self._w[f"layers.{layer}.mlp.shared_gate.weight"]).numpy()  # type: ignore[arg-type]
-        if config.shared_expert_gate:
-            y = y * sigmoid_elementwise(score)
-        return y
+        s = sigmoid_elementwise(score) if config.shared_expert_gate else None
+        if hook is not None:  # hooks run on the CPU
+            hook.shared_expert(layer, activation.numpy().copy(), None if s is None else s.copy())
+        return y if s is None else y * s
 
-    def mlp_activation(self, middle: npt.ArrayLike, layer: int, expert: int | None = None) -> FloatArray:
+    def mlp_activation(self, middle: npt.ArrayLike, layer: int, expert: int | str | None = None) -> FloatArray:
         """The MLP hidden activation ``act(gate(h)) * up(h)`` of ``layer`` for residual stream rows ``middle`` (after
         the attention block, as :class:`LayerHook` sees it at ``"middle"``): the input of the down projection, the
-        "keys" of model editing. In a sparse layer, that of ``expert``, whether or not the rows were routed to it. On
-        the CPU, with the bits of the forward pass."""
+        "keys" of model editing. In a sparse layer, that of ``expert``, whether or not the rows were routed to it, or
+        with ``expert="shared"`` that of the shared expert. On the CPU, with the bits of the forward pass."""
         config = self.config
         p = f"layers.{layer}."
-        if config.is_sparse(layer):
-            if expert is None or not 0 <= expert < config.experts:
+        if expert == "shared":
+            if not config.is_sparse(layer) or config.shared_expert_intermediate_size is None:
+                raise ValueError(f"layer {layer} has no shared expert")
+            p = f"{p}mlp.shared."
+        elif config.is_sparse(layer):
+            if not isinstance(expert, int) or not 0 <= expert < config.experts:
                 raise ValueError(f"layer {layer} is a mixture of experts; name one of its {config.experts} experts")
             p = f"{p}mlp.experts.{expert}."
         elif expert is not None:

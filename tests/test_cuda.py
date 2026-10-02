@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import pytest
 from golden_values import KERNEL_FINGERPRINTS, TINY_LOGITS_FINGERPRINT
-from model_fixtures import TINY_LLAMA_CONFIG, tiny_config, write_hf_checkpoint
+from model_fixtures import TINY_LLAMA_CONFIG, fixture_name, tiny_config, write_hf_checkpoint
 
 from etalii_dllm import _kernels, cuda, numerics
 from etalii_dllm import engine as engine_module
@@ -242,12 +242,14 @@ def tiny_model_path(request, tmp_path_factory):
 def test_gpu_model_gives_the_golden_logits(tiny_model_path):
     model = Transformer.from_file(tiny_model_path, device="cuda")
     assert model.device == "cuda"
-    assert fingerprint(model.forward(PROMPT)) == TINY_LOGITS_FINGERPRINT[model.config.family]
+    assert fingerprint(model.forward(PROMPT)) == TINY_LOGITS_FINGERPRINT[fixture_name(model.config)]
     # The KV cache and repeated runs change nothing.
     cache = model.new_cache()
     stepwise = [model.forward_cached(PROMPT[: i + 1], cache) for i in range(len(PROMPT))]
-    assert fingerprint(stepwise[-1]) == TINY_LOGITS_FINGERPRINT[model.config.family]
-    assert {fingerprint(model.forward(PROMPT)) for _ in range(5)} == {TINY_LOGITS_FINGERPRINT[model.config.family]}
+    assert fingerprint(stepwise[-1]) == TINY_LOGITS_FINGERPRINT[fixture_name(model.config)]
+    assert {fingerprint(model.forward(PROMPT)) for _ in range(5)} == {
+        TINY_LOGITS_FINGERPRINT[fixture_name(model.config)]
+    }
 
 
 @gpu

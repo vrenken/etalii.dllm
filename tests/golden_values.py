@@ -66,6 +66,10 @@ GRADIENT_FINGERPRINT = {
     "mixtral": "fb4f2e7cc9064f06c4b8c7f843ae9933069607c49911f2f7c919c6becc2367a4",
     "olmoe": "a2d0729a35b75e8bc0be5b65db5a3b76c8ce96eaff1e7fa516127705cf18e2cf",
     "qwen3_moe": "fade910434dfac1470183fabd37c41a3b15425d02f60b26aa35da5211a2fdebe",
+    # Phase 44: shared experts (Qwen2-MoE gated, Granite MoE with and without one).
+    "granitemoe": "ebcedeb7a93f2a1f595209a7ebd64819efdfdce816183f93c9d59f344b0a4245",
+    "granitemoeshared": "2752b555868446c5ec40f9ff87bcad18d1be53dc1bb56ba5136eb4c4a90adee4",
+    "qwen2_moe": "b76bbbc9f44f4a79d4e16c3e2001169d2da1c2cbb90ad0445e8e00cfb094ef52",
 }
 
 # Fingerprint of the model.dllm exported after tests/test_training.py::RUN (6 AdamW steps on the ASCII data).
@@ -83,6 +87,10 @@ FINETUNE_FINGERPRINT = {
     "mixtral": "bc398b0adf8605416de0f6427b66bd464a259046e7c6f0e3f1de641825ea2c59",
     "olmoe": "21c511d458cccda8ff3f44c23fa8de178b9859142e252703538d40da04e4a697",
     "qwen3_moe": "44f5fb95695265a5346aad2892dfa2986998f6432661fafb6ff407aefe26be0a",
+    # Phase 44: shared experts (Qwen2-MoE gated, Granite MoE with and without one).
+    "granitemoe": "a5984f3f3b68c9cee83c8a2f9fb25a1acfc698a6caec369b93b5a3c4ddd587ee",
+    "granitemoeshared": "94c60ac3704aa957484b7270826f9f002e27c4895cec93a3f94223b8c661f1f3",
+    "qwen2_moe": "96cb48dbd1caeacefa549a39fbce8ee3d5200db35c17f2aa176c2eb231d607d4",
 }
 
 # Phase 8. Fingerprint of the model.dllm exported after tests/test_lora.py::RUN (6 AdamW steps on rank-2 LoRA
@@ -99,6 +107,9 @@ LORA_FINETUNE_FINGERPRINT = {
     "mixtral": "fdd2f2b4659e6a1125dde8ff4f5f4d66a92f49746a3f58bc90ce09f075534a62",
     "olmoe": "c0078fdaa67e8c5234ae5f884a2881137c7b01586a80916b117455c6af77285a",
     "qwen3_moe": "515af08a162a445027532723dddc368523214379e8f11125f6d231e86e0f9a23",
+    # Phase 44: shared experts (Qwen2-MoE gated, Granite MoE with and without one).
+    "granitemoeshared": "68711b328d0f2debbf9faaa3d0f04d4ebda48c8820bc21cd9e65deb68c39d4ec",
+    "qwen2_moe": "e3a6e60337550166ea171232f6c4bf2ad8a5770677ec9dac59bf38e54312c2aa",
 }
 
 # Phase 4. fingerprint() of the tokens of tests/test_generation.py's schema-constrained chat (placeholder model,
@@ -229,8 +240,8 @@ EVAL_FINGERPRINTS = {
 # SHA-256 of the conformance vectors' manifest.json (`dllm conformance write`, Phase 20). It covers every input and
 # output file's SHA-256, so it pins the bits of every kernel case, the sampler and the two small decoders. Phase 21
 # added the two sample-penalties cases (penalties, min-p and logit bias); Phase 41 the YaRN and LongRoPE long-factor
-# rope-inv-freq cases.
-CONFORMANCE_MANIFEST_SHA256 = "1cb0ed5a26e9e30dd2ba8b320761345e3e8da1813a1aa8867de34b456eeaa5d7"
+# rope-inv-freq cases; Phase 44 the sigmoid case and the qwen2_moe decoder (a gated shared expert).
+CONFORMANCE_MANIFEST_SHA256 = "ebf4fafb167fd057e2aa0d6878e92fe64c1522823dda531faf0f9136e5df5ade"
 
 # Phase 21: the placeholder model continuing "Deterministic decoding controls are" with every decoding control set
 # (tests/test_decoding_controls.py::CONTROLLED): penalties, min-p and logit bias.
@@ -254,6 +265,9 @@ DPO_FINETUNE_FINGERPRINT = {
     "mixtral": "ed1690da282630694eb2051f208a9d4fae3377d820299659a572f4c6340cc586",
     "olmoe": "73fc86c64b3dd5dd1a016e7b5734b620e63946e185e09ac3d14e8a46d864609a",
     "qwen3_moe": "fd14f3acff05f62f9a8d775e6dcd7fd4bed91687eb6621816172c52ba4b0bc39",
+    # Phase 44: shared experts (Qwen2-MoE gated, Granite MoE with and without one).
+    "granitemoeshared": "e19b16a3d021e526cfb37203c039c10dd5e9143d018a4559d00c57d1443cbf34",
+    "qwen2_moe": "8476a3fbc7c89a00cadab59bdcab31312cfa5af5a5bf5680e4ca74b1f46d67cb",
 }
 
 # Phase 26. Fingerprints (SHA-256 of [[chunk, score as a hex double], ...]) of tests/test_hybrid_search.py's lexical

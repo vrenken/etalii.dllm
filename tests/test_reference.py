@@ -203,6 +203,12 @@ VARIANTS = {
               "intermediate_size": 32},
     "qwen3_moe": {"family": "qwen3_moe", "qk_norm": True, "experts": 8, "experts_per_token": 3,
                   "expert_intermediate_size": 32, "normalize_expert_weights": True, "dense_layers": (0,)},
+    # Phase 44: shared experts, gated (Qwen2-MoE) or not (Granite MoE, with Granite's multipliers).
+    "qwen2_moe": {"family": "qwen2_moe", "attention_bias": True, "experts": 4, "experts_per_token": 2,
+                  "expert_intermediate_size": 16, "shared_expert_intermediate_size": 24, "shared_expert_gate": True},
+    "granitemoe": {"family": "granitemoe", "embedding_multiplier": 12.0, "attention_multiplier": 0.125,
+                   "residual_multiplier": 0.22, "logits_scaling": 8.0, "experts": 4, "experts_per_token": 2,
+                   "normalize_expert_weights": True, "intermediate_size": 16, "shared_expert_intermediate_size": 24},
 }  # fmt: skip
 
 

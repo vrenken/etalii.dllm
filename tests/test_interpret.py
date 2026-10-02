@@ -11,7 +11,7 @@ from itertools import pairwise
 import numpy as np
 import pytest
 from golden_values import TINY_TRACE_FINGERPRINT
-from model_fixtures import tiny_config, write_hf_checkpoint
+from model_fixtures import fixture_name, tiny_config, write_hf_checkpoint
 from test_engine_import import model_path  # noqa: F401 - fixture
 
 from etalii_dllm import _kernels, numerics
@@ -83,7 +83,7 @@ def test_trace_shapes_and_consistency(model):
 
 
 def test_trace_is_the_same_bits_on_every_code_path(model):
-    expected = TINY_TRACE_FINGERPRINT[model.config.family]
+    expected = TINY_TRACE_FINGERPRINT[fixture_name(model.config)]
     for isa in _kernels.supported_isas():
         _kernels.set_isa(isa)
         for count in (1, 3):

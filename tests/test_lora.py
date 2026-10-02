@@ -8,7 +8,7 @@ import json
 import numpy as np
 import pytest
 from golden_values import LORA_FINETUNE_FINGERPRINT
-from model_fixtures import tiny_config, write_hf_checkpoint
+from model_fixtures import fixture_name, tiny_config, write_hf_checkpoint
 from test_engine_import import model_path  # noqa: F401 - fixture
 from test_training import TARGETS, TOKENS, ascii_data, reference_loss
 
@@ -28,9 +28,27 @@ LORA = LoraConfig(rank=2, alpha=4.0)
 RUN = RunConfig(6, 3, 8, 3, AdamWConfig(learning_rate=3e-2), LORA)
 
 
+def peft_lora(config) -> LoraConfig:
+    """``LORA``, or for Granite MoE (whose fused experts PEFT cannot adapt one by one) its attention targets."""
+    return LoraConfig(2, 4.0, ("q", "k", "v", "o")) if config.family == "granitemoe" else LORA
+
+
 @pytest.fixture(
     scope="module",
-    params=["gemma2", "gemma3", "granite", "llama", "mixtral", "olmo2", "olmoe", "phi3", "qwen3", "qwen3_moe"],
+    params=[
+        "gemma2",
+        "gemma3",
+        "granite",
+        "granitemoeshared",
+        "llama",
+        "mixtral",
+        "olmo2",
+        "olmoe",
+        "phi3",
+        "qwen2_moe",
+        "qwen3",
+        "qwen3_moe",
+    ],
 )
 def base(request, tmp_path_factory) -> ModelFile:
     directory = tmp_path_factory.mktemp(f"lora-{request.param}")
@@ -126,7 +144,12 @@ def test_lora_runs_are_byte_identical_and_resume_bit_for_bit(base, tmp_path):
     first.train()
     assert set(first.params) == set(lora_module.adapter_shapes(base.config, LORA))
     first.save_checkpoint(tmp_path / "first.dllmckpt")
-    first.export_adapter(tmp_path / "first-adapter")
+    peft = base.config.family != "granitemoe"  # PEFT cannot adapt one of Granite MoE's fused experts
+    if peft:
+        first.export_adapter(tmp_path / "first-adapter")
+    else:
+        with pytest.raises(AdapterError, match="fused"):
+            first.export_adapter(tmp_path / "first-adapter")
 
     second = FineTuner.from_model_file(base, data, RUN)
     second.train(until=2)
@@ -136,15 +159,19 @@ def test_lora_runs_are_byte_identical_and_resume_bit_for_bit(base, tmp_path):
     resumed = FineTuner.load_checkpoint(tmp_path / "middle.dllmckpt", data, base)
     resumed.train()
     resumed.save_checkpoint(tmp_path / "resumed.dllmckpt")
-    resumed.export_adapter(tmp_path / "resumed-adapter")
     assert (tmp_path / "resumed.dllmckpt").read_bytes() == (tmp_path / "first.dllmckpt").read_bytes()
-    for name in ("adapter_config.json", "adapter_model.safetensors"):
-        assert (tmp_path / "first-adapter" / name).read_bytes() == (tmp_path / "resumed-adapter" / name).read_bytes()
+    if peft:
+        resumed.export_adapter(tmp_path / "resumed-adapter")
+        for name in ("adapter_config.json", "adapter_model.safetensors"):
+            first_bytes = (tmp_path / "first-adapter" / name).read_bytes()
+            assert first_bytes == (tmp_path / "resumed-adapter" / name).read_bytes()
 
     # The base weights are never written; the merged export is the base plus the adapters.
     fingerprint = first.export(tmp_path / "merged.dllm")
-    assert fingerprint == LORA_FINETUNE_FINGERPRINT[base.config.family]
+    assert fingerprint == LORA_FINETUNE_FINGERPRINT[fixture_name(base.config)]
     assert ModelFile(tmp_path / "merged.dllm").fine_tuning["run"]["lora"] == LORA.to_dict()
+    if not peft:
+        return
     # Importing the exported adapter onto the base writes the same weights.
     (tmp_path / "first-adapter" / "README.md").write_text("---\nlicense: mit\n---\n", encoding="utf-8")
     imported = import_model(tmp_path / "first-adapter", tmp_path / "imported.dllm", base=base.path)
@@ -184,7 +211,8 @@ def test_peft_files(base, tmp_path):
     ],
 )
 def test_unsupported_peft_features_are_refused(base, tmp_path, change, message):
-    lora_module.write_peft(tmp_path, init_adapters(base.config, LORA, 1), LORA, config=base.config)
+    lora = peft_lora(base.config)
+    lora_module.write_peft(tmp_path, init_adapters(base.config, lora, 1), lora, config=base.config)
     settings = json.loads((tmp_path / "adapter_config.json").read_text(encoding="utf-8"))
     (tmp_path / "adapter_config.json").write_text(json.dumps({**settings, **change}), encoding="utf-8")
     with pytest.raises(AdapterError, match=message):
@@ -192,7 +220,8 @@ def test_unsupported_peft_features_are_refused(base, tmp_path, change, message):
 
 
 def test_adapter_import_needs_a_base_and_a_licence(base, tmp_path):
-    lora_module.write_peft(tmp_path / "adapter", init_adapters(base.config, LORA, 1), LORA, config=base.config)
+    lora = peft_lora(base.config)
+    lora_module.write_peft(tmp_path / "adapter", init_adapters(base.config, lora, 1), lora, config=base.config)
     with pytest.raises(ModelImportError, match="--base"):
         import_model(tmp_path / "adapter", tmp_path / "out.dllm")
     with pytest.raises(ModelImportError, match="licence"):

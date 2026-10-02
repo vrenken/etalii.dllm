@@ -96,6 +96,12 @@ def add_commands(commands: Any) -> None:
     edit.add_argument("--regularisation", type=float, default=0.1, help="added to the normalised covariance")
     edit.add_argument("--steps", type=int, default=40, help="optimiser steps for the new value")
     edit.add_argument("--learning-rate", type=float, default=0.5)
+    edit.add_argument(
+        "--expert",
+        choices=("routed", "shared"),
+        default="routed",
+        help="in a mixture-of-experts layer: edit the subject's top routed expert or the shared expert",
+    )
     edit.add_argument("-o", "--output", required=True, help="the edited model.dllm file to write")
 
 
@@ -304,6 +310,7 @@ def run_edit(args: argparse.Namespace) -> int:
             regularisation=args.regularisation,
             steps=args.steps,
             learning_rate=args.learning_rate,
+            expert=args.expert,
         )
         fingerprint = write_edited_model(base, result, args.output)
     except (ModelFileError, OSError, ValueError) as error:

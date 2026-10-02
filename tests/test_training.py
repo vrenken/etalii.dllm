@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import pytest
 from golden_values import FINETUNE_FINGERPRINT, GRADIENT_FINGERPRINT
-from model_fixtures import TINY_LLAMA_CONFIG, tiny_config, write_hf_checkpoint
+from model_fixtures import TINY_LLAMA_CONFIG, fixture_name, tiny_config, write_hf_checkpoint
 from test_transformer import reference_logits
 
 from etalii_dllm import numerics
@@ -34,6 +34,8 @@ FAMILIES = [
     "gemma2",
     "gemma3",
     "granite",
+    "granitemoe",
+    "granitemoeshared",
     "llama",
     "mistral",
     "mixtral",
@@ -41,6 +43,7 @@ FAMILIES = [
     "olmoe",
     "phi3",
     "qwen2",
+    "qwen2_moe",
     "qwen3",
     "qwen3_moe",
 ]
@@ -298,7 +301,7 @@ def test_gradients_are_bit_identical_across_runs_and_threads(model_file):
     with ThreadPoolExecutor(4) as pool:
         results = list(pool.map(run, range(8)))
     assert len(set(results)) == 1
-    assert results[0][0] == GRADIENT_FINGERPRINT[model_file.config.family]
+    assert results[0][0] == GRADIENT_FINGERPRINT[fixture_name(model_file.config)]
 
 
 # Data order
@@ -381,7 +384,7 @@ def test_runs_are_byte_identical_and_resume_bit_for_bit(model_file, tmp_path):
     fingerprint = first.export(tmp_path / "first.dllm")
     assert resumed.export(tmp_path / "resumed.dllm") == fingerprint
     assert (tmp_path / "first.dllm").read_bytes() == (tmp_path / "resumed.dllm").read_bytes()
-    assert fingerprint == FINETUNE_FINGERPRINT[model_file.config.family]
+    assert fingerprint == FINETUNE_FINGERPRINT[fixture_name(model_file.config)]
 
     tuned = ModelFile(tmp_path / "first.dllm")
     assert tuned.fine_tuning["base_fingerprint"] == model_file.fingerprint

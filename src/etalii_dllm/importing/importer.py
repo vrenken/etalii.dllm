@@ -795,7 +795,7 @@ def gguf_config(gguf: GgufFile) -> TransformerConfig:
             "experts": experts,
             "experts_per_token": int(key("expert_used_count")),
             "normalize_expert_weights": bool(
-                metadata.get(f"{architecture}.expert_weights_norm", architecture != "olmoe")
+                metadata.get(f"{architecture}.expert_weights_norm", architecture not in ("olmoe", "qwen2moe"))
             ),
             "expert_intermediate_size": None if size is None else int(size),
             "dense_layers": dense or None,

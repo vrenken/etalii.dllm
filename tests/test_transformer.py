@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import pytest
 from golden_values import TINY_LOGITS_FINGERPRINT
-from model_fixtures import tiny_config, write_hf_checkpoint
+from model_fixtures import fixture_name, tiny_config, write_hf_checkpoint
 
 from etalii_dllm.architecture import TransformerConfig
 from etalii_dllm.importing import import_model
@@ -183,7 +183,7 @@ def test_concurrent_requests_do_not_interfere(model):
 
 
 def test_logits_are_bit_exact(model):
-    assert fingerprint(model.forward(PROMPT)) == TINY_LOGITS_FINGERPRINT[model.config.family]
+    assert fingerprint(model.forward(PROMPT)) == TINY_LOGITS_FINGERPRINT[fixture_name(model.config)]
 
 
 def test_rejects_bad_input(model):
