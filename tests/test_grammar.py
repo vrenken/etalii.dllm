@@ -92,10 +92,10 @@ def test_whitespace_runs_are_bounded():
 
 
 def test_unsupported_keywords_are_refused_unless_lenient():
-    schema = {"type": "string", "pattern": "^a+$"}
-    with pytest.raises(GrammarError, match="pattern"):
+    schema = {"type": "string", "pattern": "^a+$", "uniqueItems": True}
+    with pytest.raises(GrammarError, match="uniqueItems"):
         Grammar.json_schema(schema)
-    assert Grammar.json_schema(schema, lenient=True).matcher().matches(b'"b"')
+    assert Grammar.json_schema(schema, lenient=True).matcher().matches(b'"b"')  # lenient ignores value constraints
     with pytest.raises(GrammarError):
         Grammar.json_schema({"$ref": "https://example.com/schema"})
 

@@ -16,10 +16,14 @@ Determinism: the automaton is a pure function of the grammar and the bytes; stac
 Supported JSON schema keywords: ``type`` (a name or a list of names), ``properties``, ``required``,
 ``additionalProperties`` (``false``, or a free-form object when there are no ``properties``), ``items``,
 ``minItems``, ``maxItems``, ``enum``, ``const``, ``anyOf``, ``oneOf`` (treated as ``anyOf``), ``allOf`` with a
-single schema, ``$ref`` to ``#/$defs/...`` or ``#/definitions/...``, and ``nullable``. Annotations (``title``,
-``description``, ``default``, ``examples``, ``format``, ``$schema``, ``$id``, ``strict``) are ignored. Keywords
-that constrain values in ways the automaton does not check (``pattern``, ``minLength``, ``minimum``, ...) are
-rejected with a :class:`GrammarError` rather than silently ignored.
+single schema, ``$ref`` to ``#/$defs/...`` or ``#/definitions/...``, and ``nullable``. Value constraints are
+compiled to byte automata (:mod:`etalii_dllm.regexp`): on strings ``pattern`` (found anywhere unless anchored by a
+leading ``^`` or trailing ``$``), the :data:`FORMATS` and ``minLength``/``maxLength`` in code points (such strings are
+written without escape sequences, so they hold no quote, backslash or control character); on integers ``minimum``,
+``maximum``, ``exclusiveMinimum`` and ``exclusiveMaximum``. Annotations (``title``, ``description``, ``default``,
+``examples``, other ``format`` values, ``$schema``, ``$id``, ``strict``) are ignored. Keywords the automaton does not
+check (``multipleOf``, ``uniqueItems``, bounds on non-integer numbers, ...) are rejected with a :class:`GrammarError`
+rather than silently ignored; ``lenient`` grammars (tool parameters) ignore them and the value constraints.
 
 Object properties are generated in the order the schema lists them; optional properties may be left out. Between
 tokens the model may write up to :data:`MAX_WHITESPACE` whitespace bytes, enough for pretty-printed JSON but not
@@ -28,7 +32,9 @@ for endless padding.
 
 from __future__ import annotations
 
+import functools
 import json
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
@@ -48,6 +54,25 @@ _STRUCTURE = frozenset(
     {"type", "properties", "required", "additionalProperties", "items", "minItems", "maxItems", "enum", "const",
      "anyOf", "oneOf", "allOf", "$ref", "$defs", "definitions", "nullable"}
 )  # fmt: skip
+_STRING_KEYWORDS = ("pattern", "minLength", "maxLength")
+_BOUNDS = ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum")
+_CONSTRAINTS = frozenset({*_STRING_KEYWORDS, *_BOUNDS})
+"""Value constraints compiled to byte automata (:func:`string_automaton`, :func:`integer_automaton`)."""
+
+_CONTENT = r'[^"\\\x00-\x1f]*'
+"""JSON string content written without escapes: no quote, backslash or control character."""
+_DATE = r"\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])"
+_TIME = r"(?:[01]\d|2[0-3]):[0-5]\d:(?:[0-5]\d|60)(?:\.\d+)?(?:[Zz]|[+-](?:[01]\d|2[0-3]):[0-5]\d)"
+_OCTET = r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
+FORMATS = {
+    "date": _DATE,
+    "time": _TIME,
+    "date-time": _DATE + "[Tt]" + _TIME,
+    "uuid": r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+    "ipv4": _OCTET + r"(?:\." + _OCTET + "){3}",
+}
+"""The ``format`` values that constrain strings (RFC 3339 dates and times, with days 01 to 31 in any month; other
+formats stay annotations)."""
 
 
 class GrammarError(ValueError):
@@ -107,6 +132,24 @@ class _Array(_Node):
         self.maximum = maximum
 
 
+class _Text(_Node):
+    """A JSON string whose content (written without escapes) the automaton ``dfa`` matches."""
+
+    __slots__ = ("dfa",)
+
+    def __init__(self, dfa: Any) -> None:
+        self.dfa = dfa
+
+
+class _Digits(_Node):
+    """An integer whose JSON text the automaton ``dfa`` matches."""
+
+    __slots__ = ("dfa",)
+
+    def __init__(self, dfa: Any) -> None:
+        self.dfa = dfa
+
+
 class _Any(_Node):
     """Any JSON value."""
 
@@ -124,6 +167,141 @@ def _encode(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
+def _top_level_alternation(pattern: str) -> bool:
+    """Whether ``pattern`` has a ``|`` outside every group and class."""
+    depth, index, in_class = 0, 0, False
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "\\":
+            index += 2
+            continue
+        if in_class:
+            in_class = char != "]"
+        elif char == "[":
+            in_class = True
+            if pattern[index + 1 : index + 2] == "]":  # a leading "]" is a literal
+                index += 1
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == "|" and depth == 0:
+            return True
+        index += 1
+    return False
+
+
+def _searched(pattern: str) -> str:
+    """A JSON Schema ``pattern`` (found anywhere in the string unless anchored by a leading ``^`` or a trailing
+    ``$``) as a full-match regex."""
+    body = pattern[1:] if pattern.startswith("^") else pattern
+    anchored_end = False
+    if body.endswith("$"):
+        backslashes = len(body[:-1]) - len(body[:-1].rstrip("\\"))
+        anchored_end = backslashes % 2 == 0  # an escaped "\$" is a literal dollar sign
+    if anchored_end:
+        body = body[:-1]
+    anchored = pattern.startswith("^") or anchored_end
+    if anchored and _top_level_alternation(body):
+        raise GrammarError(f"pattern {pattern!r}: anchors around a top-level alternation are ambiguous; group it")
+    anything = r"[\s\S]*"
+    return f"{'' if pattern.startswith('^') else anything}(?:{body}){'' if anchored_end else anything}"
+
+
+@functools.lru_cache(maxsize=256)
+def string_automaton(pattern: str | None, text_format: str | None, min_length: int, max_length: int | None) -> Any:
+    """The byte automaton of string content written without escapes that matches ``pattern`` (JSON Schema
+    semantics), the format and the length bounds (in code points): the intersection of their automata, trimmed so
+    that every state can still reach a match."""
+    from etalii_dllm.regexp import Counted, compile_regex, intersect
+
+    dfa = compile_regex(_CONTENT)
+    if pattern is not None:
+        dfa = intersect(dfa, compile_regex(_searched(pattern)))
+    if text_format is not None:
+        dfa = intersect(dfa, compile_regex(FORMATS[text_format]))
+    if min_length or max_length is not None:
+        return Counted(dfa, min_length, max_length)
+    return dfa
+
+
+def _same_length(low: str, high: str) -> list[str]:
+    """Regex branches for the digit strings from ``low`` to ``high`` (of equal length)."""
+    if low == high:
+        return [low]
+    if len(low) == 1:
+        return [f"[{low}-{high}]"]
+    rest = len(low) - 1
+    if low[1:] == "0" * rest and high[1:] == "9" * rest:
+        return [f"[{low[0]}-{high[0]}]\\d{{{rest}}}"]
+    if low[0] == high[0]:
+        return [low[0] + "(?:" + "|".join(_same_length(low[1:], high[1:])) + ")"]
+    branches = [low[0] + "(?:" + "|".join(_same_length(low[1:], "9" * rest)) + ")"]
+    if int(high[0]) - int(low[0]) > 1:
+        branches.append(f"[{int(low[0]) + 1}-{int(high[0]) - 1}]\\d{{{rest}}}")
+    branches.append(high[0] + "(?:" + "|".join(_same_length("0" * rest, high[1:])) + ")")
+    return branches
+
+
+def _magnitudes(low: int, high: int | None) -> list[str]:
+    """Regex branches for the decimal texts (no leading zeros) of the integers ``low .. high`` (``None``: no end)."""
+    end = high if high is not None else 10 ** len(str(low)) - 1
+    branches: list[str] = []
+    for length in range(len(str(low)), len(str(end)) + 1):
+        first = max(low, 10 ** (length - 1) if length > 1 else 0)
+        last = min(end, 10**length - 1)
+        if first <= last:
+            branches += _same_length(str(first), str(last))
+    if high is None:
+        branches.append(f"[1-9]\\d{{{len(str(low))},}}")
+    return branches
+
+
+@functools.lru_cache(maxsize=256)
+def integer_automaton(low: int | None, high: int | None) -> Any:
+    """The byte automaton of the JSON texts of the integers ``low .. high`` (``None``: unbounded); ``-0`` is not
+    one of them."""
+    from etalii_dllm.regexp import compile_regex
+
+    if low is not None and high is not None and low > high:
+        raise GrammarError(f"no integer lies between {low} and {high}")
+    branches: list[str] = []
+    if high is None or high >= 0:
+        branches += _magnitudes(max(low, 0) if low is not None else 0, high)
+    if low is None or low < 0:
+        closest = min(high, -1) if high is not None else -1
+        branches.append("-(?:" + "|".join(_magnitudes(-closest, None if low is None else -low)) + ")")
+    return compile_regex("|".join(branches))
+
+
+def _bounds(schema: Mapping[str, Any]) -> tuple[int | None, int | None]:
+    """The integer range of ``minimum``/``maximum``/``exclusiveMinimum``/``exclusiveMaximum`` (numbers, or the
+    draft 4 booleans)."""
+    low = high = None
+
+    def number(name: str) -> float:
+        value = schema[name]
+        if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
+            raise GrammarError(f"'{name}' must be a finite number")
+        return value
+
+    if "minimum" in schema:
+        low = math.ceil(number("minimum"))
+        if schema.get("exclusiveMinimum") is True and low == number("minimum"):
+            low += 1
+    if "maximum" in schema:
+        high = math.floor(number("maximum"))
+        if schema.get("exclusiveMaximum") is True and high == number("maximum"):
+            high -= 1
+    if "exclusiveMinimum" in schema and not isinstance(schema["exclusiveMinimum"], bool):
+        bound = math.floor(number("exclusiveMinimum")) + 1
+        low = bound if low is None else max(low, bound)
+    if "exclusiveMaximum" in schema and not isinstance(schema["exclusiveMaximum"], bool):
+        bound = math.ceil(number("exclusiveMaximum")) - 1
+        high = bound if high is None else min(high, bound)
+    return low, high
+
+
 class _SchemaCompiler:
     def __init__(self, root: Mapping[str, Any], lenient: bool) -> None:
         self._root = root
@@ -135,7 +313,7 @@ class _SchemaCompiler:
             return _ANY
         if not isinstance(schema, Mapping):
             raise GrammarError(f"a schema must be an object, got {schema!r}")
-        unsupported = sorted(set(schema) - _ANNOTATIONS - _STRUCTURE)
+        unsupported = sorted(set(schema) - _ANNOTATIONS - _STRUCTURE - _CONSTRAINTS)
         if unsupported and not self._lenient:
             names = ", ".join(unsupported)
             raise GrammarError(f"JSON schema keyword(s) not supported by constrained decoding: {names}")
@@ -175,9 +353,23 @@ class _SchemaCompiler:
 
     def _typed(self, kind: str, schema: Mapping[str, Any]) -> _Node:
         if kind == "string":
-            return _STRING
+            text_format = schema.get("format") if schema.get("format") in FORMATS else None
+            if self._lenient or (text_format is None and not any(k in schema for k in _STRING_KEYWORDS)):
+                return _STRING
+            pattern = schema.get("pattern")
+            if pattern is not None and not isinstance(pattern, str):
+                raise GrammarError("'pattern' must be a string")
+            min_length, max_length = int(schema.get("minLength", 0)), schema.get("maxLength")
+            if max_length is not None and int(max_length) < min_length:
+                raise GrammarError("'maxLength' is smaller than 'minLength'")
+            maximum = None if max_length is None else int(max_length)
+            return _Text(string_automaton(pattern, text_format, min_length, maximum))
         if kind in ("number", "integer"):
-            return _Number(integer=kind == "integer")
+            if self._lenient or not any(k in schema for k in _BOUNDS):
+                return _Number(integer=kind == "integer")
+            if kind == "number":
+                raise GrammarError("minimum, maximum and their exclusive forms are supported on integers only")
+            return _Digits(integer_automaton(*_bounds(schema)))
         if kind == "boolean":
             return _Literals([b"true", b"false"])
         if kind == "null":
@@ -269,6 +461,10 @@ def _expand(node: _Node, rest: Stack) -> list[Stack]:
         return [((_LIT, b'"', 0), ((_STR, 0), rest))]
     if isinstance(node, _Number):
         return [((_NUM, node.integer, 0), rest)]
+    if isinstance(node, _Text):
+        return [_push(rest, [_literal(b'"'), (_RE, node.dfa, 0), _literal(b'"')])]
+    if isinstance(node, _Digits):
+        return [((_RE, node.dfa, 0), rest)]
     if isinstance(node, _Literals):
         return [((_ALT, node.options, 0), rest)] if node.options else []
     if isinstance(node, _Union):

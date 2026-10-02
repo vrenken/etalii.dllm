@@ -138,9 +138,9 @@ AdamW from `grad.hpp`.
 | `chat.py` | Chat messages and the fixed prompt format for models without a chat template. |
 | `chat_template.py` | Renders a model's own Jinja chat template the way `transformers` does. |
 | `tools.py` | Tool calling in the Hermes `<tool_call>` format: presenting tools, constraining and parsing calls. |
-| `grammar.py` | Constrained decoding: byte-level JSON and regex grammars and the token masks they induce over a token trie. |
+| `grammar.py` | Constrained decoding: byte-level JSON and regex grammars and the token masks they induce over a token trie; string patterns, formats, lengths and integer bounds compile to byte automata. |
 | `batch_jobs.py` | `dllm batch`: OpenAI batch files run concurrently with output in input order and content-derived ids, exact resume, digests and `--verify`. |
-| `regexp.py` | Regular expressions compiled to byte-level DFAs (UTF-8 ranges included) for regex-constrained output. |
+| `regexp.py` | Regular expressions compiled to byte-level DFAs (UTF-8 ranges included) for regex-constrained output; trimmed intersections and code point counting for schema constraints. |
 | `generation.py` | The autoregressive loop: forward pass, sample, append, repeat; stop sequences, logprobs, result fingerprint. |
 | `speculative.py` | Drafters for speculative decoding (prompt lookup, a draft model); the loop in `generation.py` keeps only drafted tokens it would have chosen. |
 | `prompt_cache.py` | KV caches of earlier requests, lent to the next prompt that shares their prefix; saves work, never changes tokens. |
