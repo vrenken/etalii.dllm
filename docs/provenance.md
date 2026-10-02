@@ -27,8 +27,8 @@ The `lineage` section of the header lists every step, oldest first:
 | Step | Recorded |
 | --- | --- |
 | `import` | the source `format` and a digest of the `source` section (every source file's path, SHA-256 and size) |
-| `adapter` | a digest of the `adapter` section (`dllm import ADAPTER --base BASE`) |
-| `fine_tune` | the data fingerprint, the number of steps and a digest of the run settings (`dllm finetune`) |
+| `adapter` | a digest of the `adapter` section (`dllm import ADAPTER --base BASE`), and `base_quantize` when the adapter was merged into a dequantised base |
+| `fine_tune` | the data fingerprint, the number of steps and a digest of the run settings (`dllm finetune`), and `base_quantize` for LoRA on a quantised base |
 | `edit` | the method and a digest of the edit record (`dllm edit`) |
 | `merge` | the method and a digest of the `merge` section, which holds every input's fingerprint and lineage (`dllm merge`, [building models](model-building.md)) |
 

@@ -815,6 +815,19 @@ exactly specified, so the answers stay the same bits on every machine, and they 
 the shared expert as well) and edit like the other mixtures: `dllm edit --expert shared` changes the shared expert
 instead of the routed one. Details: [model format](model-format.md#conversion-rules).
 
+## 41. Fine-tune on a quantised base
+
+```bash
+dllm finetune qwen2.5-1.5b.dllm --data my-data.jsonl --lora-rank 8 --base-quantize q4_0 \
+    --adapter-output my-adapter -o qwen-qlora.dllm --steps 200 --learning-rate 1e-3
+dllm --model qwen-qlora.dllm chat
+```
+
+`--base-quantize q8_0` or `q4_0` keeps the model's large matrices quantised while LoRA trains, so a fine-tune needs
+much less memory (QLoRA). The run is defined exactly as LoRA on the dequantised weights, so it gives the same bits on
+every machine and replays from its receipt. `dllm import my-adapter --base qwen2.5-1.5b.dllm --base-quantize q4_0`
+rebuilds the merged model from the adapter. Details: [training](training.md#quantised-bases).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,

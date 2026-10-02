@@ -157,7 +157,7 @@ AdamW from `grad.hpp`.
 | `unicode.py` | Normalisation, lower-casing and regex categories from Unicode 15.1 tables shipped in the package, so the Python version cannot change tokenization. |
 | `models.py` | The `LanguageModel` protocol and the seeded placeholder `BigramModel`. |
 | `transformer.py` | The decoder of every family (RMSNorm, QK-norm, RoPE, grouped-query attention, SwiGLU, mixtures of experts with the `moe_route` kernel and shared experts) and its KV cache, on CPU or GPU, float32, Q8_0 or Q4_0. |
-| `lora.py` | LoRA adapters: merging `W + scale · B·A` with the `linear` kernel, adapter gradients, and the PEFT directory format (every expert's projections in mixture-of-experts layers, the shared expert's too, with each family's PEFT module names). |
+| `lora.py` | LoRA adapters: merging `W + scale · B·A` with the `linear` kernel (also lazily, one weight at a time), quantised Q8_0/Q4_0 bases defined as their dequantised weights, adapter gradients, and the PEFT directory format (every expert's projections in mixture-of-experts layers, the shared expert's too, with each family's PEFT module names). |
 | `architecture.py` | `TransformerConfig`: the shape of a decoder, independent of where its weights came from. |
 | `modelfile.py` | Reading and writing the `model.dllm` container ([format](../model-format.md)), its lineage and whole-file hash ([verifiable models](../provenance.md)). |
 | `numerics.py`, `tensor.py` | Thin wrappers over the C++ kernels, fingerprints, `DeterministicRandom`, and the 64-byte aligned float32 `Tensor`. |

@@ -191,3 +191,14 @@ def test_cli_distills_into_a_quantized_student(llama, tmp_path, capsys, monkeypa
     replay = ["replay", str(tmp_path / "student.json"), "--base", str(llama.path), "--teacher", str(llama.path)]
     assert main(replay) == 0
     assert "verified" in capsys.readouterr().out
+
+
+def test_folded_scales_stay_lazy(tmp_path):
+    from etalii_dllm.training.backprop import DecoderGradients
+
+    granite = _model(tmp_path, "granite")  # Granite folds its residual multiplier into the output projections
+    frozen = QuantizedBase(granite.tensors, "q8_0")
+    folded = DecoderGradients(granite.config)._folded(frozen)
+    eager = DecoderGradients(granite.config)._folded(dequantized_weights(granite.tensors, "q8_0"))
+    assert not isinstance(folded, dict) and len(folded) == len(eager) and list(folded) == list(eager)
+    assert all(np.asarray(folded[name]).tobytes() == np.asarray(eager[name]).tobytes() for name in eager)
