@@ -5,9 +5,10 @@ base model, data file and settings give a byte-identical fine-tuned `model.dllm`
 checkpoint and resumed ends in exactly the same bytes as one that ran straight through. The code is in
 `src/etalii_dllm/training/`; the gradient kernels are in `cpp/include/dllm/grad.hpp`.
 
-This is roadmap Phase 3, with LoRA added in Phase 8. It trains either every parameter of the Llama/Qwen2/Qwen3
-decoder or [LoRA adapters](#lora-adapters) on its linear layers; there is no pre-training from scratch (weights come
-from [importing open models](research/model-import.md)).
+This is roadmap Phase 3, with LoRA added in Phase 8 and every model family in Phase 40. It trains either every
+parameter of the decoder or [LoRA adapters](#lora-adapters) on its linear layers, for every architecture the engine
+runs: Llama, Mistral, Qwen2, Qwen3, OLMo 2, Granite, Gemma 2, Gemma 3 and Phi-3/Phi-4-mini (with LongRoPE). There is
+no pre-training from scratch (weights come from [importing open models](research/model-import.md)).
 
 ## Usage
 
@@ -141,7 +142,13 @@ byte-identical runs, bit-exact resumption, the step formula, LoRA, receipts and 
 - **Gradients** come from C++ backward kernels with the same rules as the forward kernels (`docs/kernels.md`):
   every element has one double accumulator summed in a fixed order. Sums over positions (weight gradients, keys and
   values, embedding rows) visit positions in ascending order. The training forward pass is the decoder's own, so
-  its last-position logits equal `Transformer.forward` bit for bit (tested).
+  its last-position logits equal `Transformer.forward` bit for bit (tested for every family).
+- **Every family.** The backward pass follows each architecture's forward pass step by step: post-layer norms
+  (OLMo 2) and sandwich norms (Gemma), QK-norm over the whole projection or per head, Gemma's norms scaled by
+  `1 + weight`, the tanh GELU, attention and logit soft-caps, the scaled embedding, local RoPE bases and sliding
+  windows. Constant scales that the decoder folds into weights (Granite's residual multiplier in the output
+  projections, the LongRoPE attention factor in the query and key rows) are folded the same way in training, and
+  their gradients are multiplied back by the same float32 constant, so the stored weights are what is trained.
 - **Batches.** Each window's loss and gradients are computed on their own and summed elementwise in batch order, so
   a window's contribution does not depend on which windows share its batch. The loss is the mean next-token
   cross-entropy over all targets of the batch.
@@ -154,7 +161,8 @@ byte-identical runs, bit-exact resumption, the step formula, LoRA, receipts and 
 
 `tests/test_training.py` checks the gradient kernels against float64 references, the decoder's gradients against
 float64 finite differences, byte-identical runs, bit-exact resumption, and golden hashes of the gradients and of a
-short fine-tuning run.
+short fine-tuning run, for a tiny synthetic model of each of the nine families; `tests/test_lora.py` and
+`tests/test_preference.py` do the same for LoRA and DPO.
 
 ## Outputs
 

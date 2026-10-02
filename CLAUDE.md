@@ -30,7 +30,7 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
 ## Layout
 
 - `cpp/include/dllm/`: header-only C++ kernels (`random.hpp`, `math.hpp` transcendentals, `nn.hpp` matmul/norm/RoPE/
-  attention, `grad.hpp` their gradients plus cross-entropy and AdamW, `quant.hpp` Q8_0, `interp.hpp` attention probabilities/cosine/Cholesky for interpretability, `parallel.hpp` the thread pool, `fpenv.hpp` the
+  attention, `grad.hpp` their gradients (also tanh GELU, soft-caps, unit-offset norms) plus cross-entropy and AdamW, `quant.hpp` Q8_0, `interp.hpp` attention probabilities/cosine/Cholesky for interpretability, `parallel.hpp` the thread pool, `fpenv.hpp` the
   floating point environment every binding runs in,
   `simd.hpp` the per-machine AVX2/SSE2/NEON dispatch, `cuda.hpp` the CUDA backend; evaluation orders in `docs/kernels.md`);
   `cpp/kernels.cpp` binds them as `etalii_dllm._kernels`. `cpp/cuda/kernels.cu` holds the GPU kernels: CMake embeds it
@@ -48,7 +48,7 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
   min-p, choice seeds; `docs/api.md#decoding-controls`), `regexp` (regexes compiled to byte DFAs for `grammar`), `numeric_automata` (number bounds and `multipleOf` as byte DFAs, exact decimals), `schema_algebra` (`allOf`/`not`/`if` merged and negated into plain schemas for `grammar`), `gbnf` (GBNF grammars for `grammar`; `docs/api.md#grammars`), `cuda` (the GPU backend: NVRTC discovery, `CudaTensor`, device
   ops; `--device cuda`/`DLLM_DEVICE`), `architecture` (`TransformerConfig`), `modelfile`
   (the `model.dllm` container, `docs/model-format.md`), `importing` (safetensors/GGUF readers and `dllm import`),
-  `training` (gradients, AdamW, data order, checkpoints and `dllm finetune`, DPO on preference pairs in
+  `training` (gradients of every model family, AdamW, data order, checkpoints and `dllm finetune`, DPO on preference pairs in
   `training/preference.py`, `docs/training.md`), `lora` (LoRA
   adapters, always merged into the weights; the PEFT format), `grammar`
   (JSON-schema constrained decoding over a token trie), `tools` (tool calling in the Hermes `<tool_call>` format), `interpret/` (activation tracing via `LayerHook`, logit lens,

@@ -317,12 +317,17 @@ element, a fixed order, one rounding.
 
 - **`linear_backward`**: `dx[r, k] = sum_n dy[r, n] w[n, k]` (`n` ascending), `dw[n, k] = sum_r dy[r, n] x[r, k]`
   and `db[n] = sum_r dy[r, n]` (`r` ascending).
-- **`rms_norm_backward`**: `inv` recomputed as in the forward kernel; `dx_i = inv w_i dy_i - x_i inv^3 / dim *
-  sum_j w_j dy_j x_j` (`j` ascending); `dw_i = sum_r dy x inv` over rows ascending.
+- **`rms_norm_backward`**: `inv` recomputed as in the forward kernel; `dx_i = inv g_i dy_i - x_i inv^3 / dim *
+  sum_j g_j dy_j x_j` (`j` ascending) with `g = w`, or `g = 1 + w` in double with `add_unit_offset` (Gemma);
+  `dw_i = sum_r dy x inv` over rows ascending.
 - **`silu_backward`**: `dy * s (1 + x (1 - s))` with `s = sigmoid(x)`, in double.
+- **`gelu_tanh_backward`**: with `u = sqrt(2/pi) (x + 0.044715 x^3)` and `t = tanh(u)` (`dllm` tanh),
+  `dy * (0.5 (1 + t) + 0.5 x (1 - t^2) sqrt(2/pi) (1 + 3 * 0.044715 x^2))`, in double.
+- **`softcap_backward`**: `dy * (1 - t^2)` with `t = tanh(x / cap)`, in double (logit soft-capping).
 - **`rope(..., inverse=True)`**: the same rotation with `sin` negated (exactly), i.e. the transpose.
 - **`attention_backward`**: per (query, head), in query-then-head order, the probabilities are recomputed exactly as
-  in the forward pass; `dp_j = sum_i dout_i v_ji`, `D = sum_j p_j dp_j`, `ds_j = p_j (dp_j - D)`,
+  in the forward pass; `dp_j = sum_i dout_i v_ji`, `D = sum_j p_j dp_j`, `ds_j = p_j (dp_j - D)` (times
+  `1 - tanh(s_j / softcap)^2` of the scaled score `s_j` when a soft-cap is set),
   `dq = scale sum_j ds_j k_j`; `dk_j` and `dv_j` accumulate `scale ds_j q` and `p_j dout` in double over queries
   ascending, then heads ascending.
 - **`cross_entropy`**: `logsumexp = max + log(sum_j exp(l_j - max))` (`j` ascending, `dllm` exp/log); the loss is

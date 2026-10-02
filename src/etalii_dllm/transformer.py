@@ -203,6 +203,30 @@ def _rope_scaled(name: str, tensor: Tensor, config: TransformerConfig) -> Tensor
     return Tensor(rows.reshape(values.shape))
 
 
+def fold_scales(config: TransformerConfig, weights: Mapping[str, Tensor]) -> dict[str, Tensor]:
+    """``weights`` with the architecture's constant scales folded in, elementwise in float32: Granite's residual
+    multiplier into the attention and MLP output projections, and the LongRoPE attention factor into the rows of the
+    query and key projections that feed the rotated dimensions. Both are linear maps, so folding them keeps the
+    decoder on one code path (CPU, GPU and the training forward pass)."""
+    folded = dict(weights)
+    if config.residual_multiplier != 1.0:
+        # Granite scales the outputs of attention and the MLP before the residual add; scaling the two output
+        # projections once is the same map.
+        residual = np.float32(config.residual_multiplier)
+        scaled = ("attention.o.weight", "mlp.down.weight")
+        folded = {
+            name: Tensor(tensor.numpy() * residual) if name.endswith(scaled) else tensor
+            for name, tensor in folded.items()
+        }
+    if config.rope_attention_factor != 1.0:
+        if config.qk_norm:
+            raise ValueError("a LongRoPE attention factor together with QK-norm is not supported")
+        # LongRoPE scales the rotated query and key dimensions by its attention factor. Rotation is linear, so
+        # scaling the rows of the q/k projections that produce those dimensions is the same map.
+        folded = {name: _rope_scaled(name, tensor, config) for name, tensor in folded.items()}
+    return folded
+
+
 class Transformer:
     """A decoder-only transformer with the architecture and tensor names of ``docs/model-format.md``."""
 
@@ -248,21 +272,7 @@ class Transformer:
         self.tensors: Mapping[str, Tensor] = weights
         """The float32 source tensors (usually memory-mapped from the model file)."""
         self._embedding = weights["token_embedding.weight"].numpy()
-        if config.residual_multiplier != 1.0:
-            # Granite scales the outputs of attention and the MLP before the residual add; scaling the two output
-            # projections once (elementwise, float32) is the same map and keeps CPU and GPU on one code path.
-            residual = np.float32(config.residual_multiplier)
-            scaled = ("attention.o.weight", "mlp.down.weight")
-            weights = {
-                name: Tensor(tensor.numpy() * residual) if name.endswith(scaled) else tensor
-                for name, tensor in weights.items()
-            }
-        if config.rope_attention_factor != 1.0:
-            if config.qk_norm:
-                raise ValueError("a LongRoPE attention factor together with QK-norm is not supported")
-            # LongRoPE scales the rotated query and key dimensions by its attention factor. Rotation is linear, so
-            # scaling the rows of the q/k projections that produce those dimensions is the same map.
-            weights = {name: _rope_scaled(name, tensor, config) for name, tensor in weights.items()}
+        weights = fold_scales(config, weights)
         head = weights["token_embedding.weight" if config.tie_word_embeddings else "lm_head.weight"]
         # Matrices are packed (or quantised, or uploaded to the GPU) once here; norms and biases stay plain (on the
         # GPU they are uploaded too); the embedding table stays on the host, which looks up the rows.

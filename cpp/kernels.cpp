@@ -747,7 +747,7 @@ NB_MODULE(_kernels, module) {
 
     m.def(
         "rms_norm_backward",
-        [](FloatTensor x, std::optional<FloatVector> weight, FloatTensor dy, double eps) {
+        [](FloatTensor x, std::optional<FloatVector> weight, FloatTensor dy, double eps, bool add_unit_offset) {
             require(x.ndim() >= 1, "x must have at least one dimension");
             const std::size_t dim = x.shape(x.ndim() - 1);
             require(dy.size() == x.size() && dy.shape(dy.ndim() - 1) == dim, "dy must have the shape of x");
@@ -757,10 +757,11 @@ NB_MODULE(_kernels, module) {
             auto dx_array = make_array(shape_of(x), &dx);
             auto dw_array = make_array({dim}, &dw);
             dllm::rms_norm_backward(x.data(), weight ? weight->data() : nullptr, dy.data(), dx, dw, leading_rows(x),
-                                    dim, eps);
+                                    dim, eps, add_unit_offset);
             return std::make_tuple(dx_array, dw_array);
         },
         nb::arg("x"), nb::arg("weight").none(), nb::arg("dy"), nb::arg("eps") = 1e-6,
+        nb::arg("add_unit_offset") = false,
         "Gradients (dx, dweight) of rms_norm(); fixed order, double accumulators.");
 
     m.def(
@@ -777,9 +778,36 @@ NB_MODULE(_kernels, module) {
         nb::arg("x"), nb::arg("dy"), "dy * silu'(x), elementwise.");
 
     m.def(
+        "gelu_tanh_backward",
+        [](FloatTensor x, FloatTensor dy) {
+            require(x.size() == dy.size(), "x and dy must have the same size");
+            float* out;
+            auto result = make_array(shape_of(x), &out);
+            for (std::size_t i = 0; i < x.size(); ++i) {
+                out[i] = dllm::gelu_tanh_backward(x.data()[i], dy.data()[i]);
+            }
+            return result;
+        },
+        nb::arg("x"), nb::arg("dy"), "dy * gelu_tanh'(x), elementwise.");
+
+    m.def(
+        "softcap_backward",
+        [](FloatTensor x, FloatTensor dy, double cap) {
+            require(x.size() == dy.size(), "x and dy must have the same size");
+            require(cap > 0.0, "cap must be positive");
+            float* out;
+            auto result = make_array(shape_of(x), &out);
+            for (std::size_t i = 0; i < x.size(); ++i) {
+                out[i] = dllm::softcap_backward(x.data()[i], dy.data()[i], cap);
+            }
+            return result;
+        },
+        nb::arg("x"), nb::arg("dy"), nb::arg("cap"), "dy * softcap'(x), elementwise.");
+
+    m.def(
         "attention_backward",
         [](FloatTensor q, FloatTensor k, FloatTensor v, FloatTensor dout, double scale, bool causal,
-           std::int64_t q_offset, std::size_t window) {
+           std::int64_t q_offset, std::size_t window, double softcap) {
             require(q.ndim() == 3 && k.ndim() == 3 && v.ndim() == 3, "q, k and v must be [length, heads, dim]");
             const std::size_t q_len = q.shape(0);
             const std::size_t kv_len = k.shape(0);
@@ -801,11 +829,11 @@ NB_MODULE(_kernels, module) {
             auto dv_array = make_array(shape_of(v), &dv);
             dllm::attention_backward(q.data(), k.data(), v.data(), dout.data(), dq, dk, dv, q_len, kv_len,
                                      q.shape(1), k.shape(1), q.shape(2), v.shape(2), scale, causal,
-                                     static_cast<std::size_t>(q_offset), window);
+                                     static_cast<std::size_t>(q_offset), window, softcap);
             return std::make_tuple(dq_array, dk_array, dv_array);
         },
         nb::arg("q"), nb::arg("k"), nb::arg("v"), nb::arg("dout"), nb::arg("scale"), nb::arg("causal") = true,
-        nb::arg("q_offset") = -1, nb::arg("window") = 0, "Gradients (dq, dk, dv) of attention(); fixed order, double accumulators.");
+        nb::arg("q_offset") = -1, nb::arg("window") = 0, nb::arg("softcap") = 0.0, "Gradients (dq, dk, dv) of attention(); fixed order, double accumulators.");
 
     m.def(
         "cross_entropy",

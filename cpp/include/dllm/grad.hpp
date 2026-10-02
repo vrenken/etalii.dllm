@@ -71,12 +71,14 @@ inline void linear_backward(const float* x, const float* w, const float* dy, flo
     }
 }
 
-// Gradients of RMSNorm y = x * inv_rms * w (w may be null), with inv_rms = 1 / sqrt(mean(x^2) + eps).
-//   dx_i = inv_rms (w_i dy_i) - x_i inv_rms^3 / dim * sum_j w_j dy_j x_j   (j ascending)
+// Gradients of RMSNorm y = x * inv_rms * g (g = w, or 1 + w in double with add_unit_offset as in Gemma; g = 1 when
+// w is null), with inv_rms = 1 / sqrt(mean(x^2) + eps).
+//   dx_i = inv_rms (g_i dy_i) - x_i inv_rms^3 / dim * sum_j g_j dy_j x_j   (j ascending)
 //   dw_i = sum_r dy[r, i] x[r, i] inv_rms_r                               (r ascending)
 // inv_rms is recomputed exactly as the forward kernel computes it.
 inline void rms_norm_backward(const float* x, const float* weight, const float* dy, float* dx, float* dw,
-                              std::size_t rows, std::size_t dim, double eps) {
+                              std::size_t rows, std::size_t dim, double eps, bool add_unit_offset = false) {
+    const double offset = add_unit_offset ? 1.0 : 0.0;
     std::vector<double> dw_acc(dim, 0.0);
     for (std::size_t r = 0; r < rows; ++r) {
         const float* xr = x + r * dim;
@@ -88,14 +90,14 @@ inline void rms_norm_backward(const float* x, const float* weight, const float* 
         const double inv_rms = 1.0 / std::sqrt(sum_sq / static_cast<double>(dim) + eps);
         double dot_acc = 0.0;
         for (std::size_t i = 0; i < dim; ++i) {
-            const double wi = weight != nullptr ? static_cast<double>(weight[i]) : 1.0;
+            const double wi = weight != nullptr ? offset + static_cast<double>(weight[i]) : 1.0;
             dot_acc += wi * static_cast<double>(dyr[i]) * static_cast<double>(xr[i]);
             dw_acc[i] += static_cast<double>(dyr[i]) * static_cast<double>(xr[i]) * inv_rms;
         }
         const double coefficient = dot_acc * inv_rms * inv_rms * inv_rms / static_cast<double>(dim);
         if (dx != nullptr) {
             for (std::size_t i = 0; i < dim; ++i) {
-                const double wi = weight != nullptr ? static_cast<double>(weight[i]) : 1.0;
+                const double wi = weight != nullptr ? offset + static_cast<double>(weight[i]) : 1.0;
                 dx[r * dim + i] = static_cast<float>(inv_rms * wi * static_cast<double>(dyr[i]) -
                                                      static_cast<double>(xr[i]) * coefficient);
             }
@@ -115,22 +117,40 @@ inline float silu_backward(float x, float dy) {
     return static_cast<float>(static_cast<double>(dy) * s * (1.0 + d * (1.0 - s)));
 }
 
+// d gelu_tanh(x) / dx with u = sqrt(2/pi) (x + 0.044715 x^3) and t = tanh(u):
+//   0.5 (1 + t) + 0.5 x (1 - t^2) sqrt(2/pi) (1 + 3 * 0.044715 x^2); returns dy times that, rounded once.
+inline float gelu_tanh_backward(float x, float dy) {
+    constexpr double sqrt_2_over_pi = 7.97884560802865355879e-01;
+    const double d = x;
+    const double t = dllm::tanh(sqrt_2_over_pi * (d + 0.044715 * d * d * d));
+    const double slope = 0.5 * (1.0 + t) + 0.5 * d * (1.0 - t * t) * sqrt_2_over_pi * (1.0 + 3.0 * 0.044715 * d * d);
+    return static_cast<float>(static_cast<double>(dy) * slope);
+}
+
+// d softcap(x) / dx = 1 - tanh(x / cap)^2; returns dy times that, rounded once.
+inline float softcap_backward(float x, float dy, double cap) {
+    const double t = dllm::tanh(static_cast<double>(x) / cap);
+    return static_cast<float>(static_cast<double>(dy) * (1.0 - t * t));
+}
+
 // Gradients of attention() (nn.hpp) with the same shapes and masking. For every (query t, head h), in t-ascending
 // then h-ascending order, the probabilities p are recomputed exactly as the forward kernel does, then
 //   dp_j = sum_i dout_i v[j, i]           (i ascending)
 //   D    = sum_j p_j dp_j                 (j ascending)
-//   ds_j = p_j (dp_j - D)
+//   ds_j = p_j (dp_j - D)                  (times 1 - tanh(s_j / softcap)^2 when softcap > 0)
 //   dq_i = scale sum_j ds_j k[j, i]       (j ascending)
 //   dk[j] += scale ds_j q,  dv[j] += p_j dout   (double accumulators, visited in (t, h) order)
 inline void attention_backward(const float* q, const float* k, const float* v, const float* dout, float* dq,
                                float* dk, float* dv, std::size_t q_len, std::size_t kv_len, std::size_t q_heads,
                                std::size_t kv_heads, std::size_t head_dim, std::size_t value_dim, double scale,
-                               bool causal, std::size_t q_offset, std::size_t window = 0) {
+                               bool causal, std::size_t q_offset, std::size_t window = 0,
+                               double softcap = 0.0) {
     if (kv_heads == 0 || q_heads % kv_heads != 0) {
         throw std::invalid_argument("q_heads must be a multiple of kv_heads");
     }
     const std::size_t group = q_heads / kv_heads;
     std::vector<double> probs(kv_len);
+    std::vector<double> slopes(kv_len, 1.0);
     std::vector<double> dprobs(kv_len);
     std::vector<double> dq_acc(head_dim);
     std::vector<double> dk_acc(kv_len * kv_heads * head_dim, 0.0);
@@ -162,6 +182,11 @@ inline void attention_backward(const float* q, const float* k, const float* v, c
                     dotp += static_cast<double>(qh[i]) * static_cast<double>(kj[i]);
                 }
                 probs[j] = dotp * scale;
+                if (softcap > 0.0) {
+                    const double t = dllm::tanh(probs[j] / softcap);
+                    probs[j] = softcap * t;
+                    slopes[j] = 1.0 - t * t;
+                }
                 if (j == 0 || probs[j] > max) {
                     max = probs[j];
                 }
@@ -187,7 +212,7 @@ inline void attention_backward(const float* q, const float* k, const float* v, c
                 dq_acc[i] = 0.0;
             }
             for (std::size_t j = 0; j < visible; ++j) {
-                const double ds = probs[j] * (dprobs[j] - weighted) * scale;
+                const double ds = probs[j] * (dprobs[j] - weighted) * slopes[j] * scale;
                 const float* kj = kw + (j * kv_heads + kvh) * head_dim;
                 double* dkj = dkw + (j * kv_heads + kvh) * head_dim;
                 double* dvj = dvw + (j * kv_heads + kvh) * value_dim;

@@ -17,9 +17,12 @@ from etalii_dllm.transformer import Transformer
 PROMPT = [1, 17, 42, 5, 63, 0, 9, 9, 30]
 
 
-def reference_logits(config: TransformerConfig, w: dict[str, np.ndarray], tokens: list[int]) -> np.ndarray:
-    """Straightforward float64 NumPy version of the Hugging Face Llama/Qwen2/Phi-3 forward pass (test-only; NumPy
-    reductions are fine here because this is the yardstick, not the engine)."""
+def reference_logits(
+    config: TransformerConfig, w: dict[str, np.ndarray], tokens: list[int], *, every_position: bool = False
+) -> np.ndarray:
+    """Straightforward float64 NumPy version of the Hugging Face forward pass of every supported family (test-only;
+    NumPy reductions are fine here because this is the yardstick, not the engine): the last position's logits, or
+    every position's with ``every_position``."""
     w = {name: np.asarray(values, dtype=np.float64) for name, values in w.items()}
     n, hd, rd = len(tokens), config.head_dim, config.rotary_dimension
 
@@ -89,7 +92,8 @@ def reference_logits(config: TransformerConfig, w: dict[str, np.ndarray], tokens
         mlp = mlp * config.residual_multiplier
         x = x + (norm(mlp, w[p + "mlp_post_norm.weight"]) if post else mlp)
     head = w["token_embedding.weight"] if config.tie_word_embeddings else w["lm_head.weight"]
-    logits = norm(x, w["final_norm.weight"])[-1] @ head.T / config.logits_scaling
+    hidden = norm(x, w["final_norm.weight"])
+    logits = (hidden if every_position else hidden[-1]) @ head.T / config.logits_scaling
     if config.logits_softcap:
         logits = config.logits_softcap * np.tanh(logits / config.logits_softcap)
     return logits

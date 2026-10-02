@@ -197,6 +197,7 @@ module map), with Mermaid diagrams.
 | 37. Exact fill-in-the-middle ✅ | ✅ Fill-in-the-middle prompts from the model's FIM tokens (#247); ✅ `suffix` on the completions API, Ollama and `dllm generate` (#248); ✅ in receipts, the specification and the reference implementation (#249); ✅ docs, tests and golden values (#250). See [fill-in-the-middle](docs/api.md#fill-in-the-middle) |
 | 38. Exact length and stop controls ✅ | ✅ `min_tokens` and `ignore_eos` (#252); ✅ `stop_token_ids` and `include_stop_str_in_output` (#253); ✅ in receipts, the specification and the reference implementation (#254); ✅ docs, tests and golden values (#255). See [length and stop controls](docs/api.md#length-and-stop-controls) |
 | 39. Deterministic MCP sampling, prompts and resources ✅ | ✅ MCP sampling answered exactly by the engine (#257); ✅ MCP prompts in the host and `dllm chat` (#258); ✅ MCP resources in the host and `dllm chat` (#259); ✅ docs and tests (#260). See [MCP](docs/mcp.md#sampling-prompts-and-resources) |
+| 40. Reproducible fine-tuning of every model family ✅ | ✅ Fine-tuning OLMo 2 and Granite (#262); ✅ Gemma 2 and Gemma 3, with backward kernels for the tanh GELU, soft-caps and unit-offset norms (#263); ✅ Phi-3/Phi-4-mini with LongRoPE, and LoRA, DPO and distillation for every family (#264); ✅ docs, tests and golden values (#265). See [fine-tuning](docs/training.md#what-makes-it-reproducible) |
 
 ## Working with Claude Code
 

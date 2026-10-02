@@ -745,6 +745,18 @@ dllm chat --mcp-server "notes=python notes_server.py" --mcp-prompt review --mcp-
 (sampling) get an answer from the engine that is the same every time for the same request. Details:
 [MCP](mcp.md#sampling-prompts-and-resources).
 
+## 36. Fine-tune Gemma, OLMo 2, Granite and Phi models
+
+```bash
+# gemma3-270m.dllm from section 1
+dllm finetune gemma3-270m.dllm --data my-data.jsonl -o gemma3-270m-tuned.dllm --steps 50 --learning-rate 1e-4
+dllm finetune gemma3-270m.dllm --data my-data.jsonl --lora-rank 8 -o gemma3-270m-lora.dllm --steps 50
+```
+
+Fine-tuning, LoRA, DPO and distillation work for every model family the engine runs, not only Llama, Mistral and
+Qwen: OLMo 2, Granite, Gemma 2, Gemma 3 and Phi-3/Phi-4-mini (with LongRoPE) too. As before, the same model, data
+and options give a byte-identical result on every machine. Details: [training](training.md#what-makes-it-reproducible).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
@@ -752,8 +764,8 @@ dllm chat --mcp-server "notes=python notes_server.py" --mcp-prompt review --mcp-
   Llama-3.2-1B-Instruct and gemma-3-270m-it (tokenizer, chat template, logits within 1e-3 and the
   same greedy answer; see `tests/test_reference_models.py`), and so is the embedding model Qwen3-Embedding-0.6B. Other Llama/Qwen2/Qwen3 models should work but are not
   checked. Mistral, Granite, Phi-3 and Gemma 2 are checked against `transformers` only on tiny synthetic models (their real
-  checkpoints are gated or too large for a CI runner in float32). Fine-tuning works for Llama, Mistral, Qwen2 and
-  Qwen3, not yet for OLMo 2, Granite, Gemma or Phi models that use LongRoPE; Phi-3/Phi-4-mini with LongRoPE run up to their
+  checkpoints are gated or too large for a CI runner in float32). Fine-tuning is checked on tiny synthetic models
+  of every family, not on the real checkpoints; Phi-3/Phi-4-mini with LongRoPE run up to their
   original context (4096 tokens) rather than the advertised 128k. If one misbehaves,
   please open an issue with the `dllm inspect` output.
 - Speed: on a 4-core cloud VM, SmolLM2-135M reads a prompt at about 300 tokens per second and generates about 45
