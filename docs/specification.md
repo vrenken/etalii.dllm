@@ -311,6 +311,26 @@ ends are stripped; an empty result casts no vote. The winner is the answer with 
 answer whose first vote has the lowest choice index; the response is that choice's answer, or choice 0 when nobody
 voted.
 
+### Beam search
+
+A beam search ([beam search](api.md#beam-search)) of width `W` starts from one empty hypothesis. A hypothesis's
+log-likelihood is the sum in double, in token order, of the float32 `log_softmax` (section 3) values of its tokens,
+including the stop token that ended it. Each step:
+
+1. Every live hypothesis takes the `2W` tokens with the highest log-probability after its context (ties: lower id
+   first) as candidates, with log-likelihood `parent + log_softmax[t]`.
+2. All candidates are ranked by log-likelihood descending, then by token sequence ascending.
+3. They are taken in that order until `W` live hypotheses are chosen. A candidate whose token is a stop token finishes
+   (without that token) if its rank is below `W`, and is dropped otherwise; so does a candidate whose text now
+   contains a stop sequence (with that token, the text cut before the stop sequence). Every other candidate becomes
+   live.
+
+The search ends when `W` hypotheses have finished or none is live, or after `max_tokens` steps (or when the context
+window is full), when every live hypothesis finishes with `length`. Finished hypotheses are ranked by
+`log_likelihood / exp(length_penalty * log(length))` (`length` counts the scored tokens; portable `exp` and `log` in
+double) descending, then by token sequence ascending, and the first `n_best` are the answers. The sampler takes no
+part.
+
 ### Guided decoding
 
 A guided answer ([guided decoding](api.md#guided-decoding)) replaces each step's float32 logits `l` by a combination
@@ -341,7 +361,7 @@ Not covered here, but just as fixed:
 SIMD path, thread count or GPU is in use) with the reference implementation. It checks the prompt's logits and a
 greedy, a sampled and a controlled 16-token answer (every logit adjustment and `min_p` at once) and a greedy answer in a window just
 longer than the prompt, which rolls it ([the context window](#the-context-window)), and a greedy answer that starts in a
-thinking block with a budget of 2 tokens ([reasoning](#reasoning)), and the prompt's scores ([prompt scoring](#prompt-scoring)), and a sampled answer with classifier-free guidance ([guided decoding](#guided-decoding)), and prints `equal` for each part, or where the two first differ. CI runs it
+thinking block with a budget of 2 tokens ([reasoning](#reasoning)), and the prompt's scores ([prompt scoring](#prompt-scoring)), and a sampled answer with classifier-free guidance ([guided decoding](#guided-decoding)), and the three ranked answers of a beam search of width 3 with their score bits ([beam search](#beam-search)), and prints `equal` for each part, or where the two first differ. CI runs it
 for SmolLM2-135M on every release platform and SIMD path, in float32 and Q8_0.
 
 **Elsewhere.** `dllm conformance write DIR` writes the vectors:

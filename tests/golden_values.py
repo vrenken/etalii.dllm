@@ -240,3 +240,9 @@ GUIDANCE_FINGERPRINTS = {
     "ensembled": "393f94ccc4212df37fcd746b55c35465e6e3e06d1892bb6a5185cc91ddeb591b",
 }
 """Fingerprints of guided answers on the test model (tests/test_guidance.py)."""
+
+BEAM_FINGERPRINTS = {
+    "chat": "fa459fa24ee3f0362b40a36708a1884cfb6bf91ddc741a430bb842feda5884f0",
+    "raw": "4a17e38917e5ee70296ca38876925d7fd2be6a62b3550208ec8d184cb51abe9d",
+}
+"""Fingerprints of the best beam search answers on the test model (tests/test_beam.py)."""

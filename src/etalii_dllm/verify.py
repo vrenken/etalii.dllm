@@ -35,6 +35,8 @@ SAMPLED = SamplingOptions(temperature=0.8, seed=7)
 NEGATIVE_PROMPT = "The capital of Germany is"
 GUIDED = SamplingOptions(temperature=0.8, seed=7, negative_prompt=NEGATIVE_PROMPT, guidance_scale=2.0)
 """The guided check: a sampled answer with classifier-free guidance (docs/specification.md#guided-decoding)."""
+BEAM_WIDTH = 3
+"""The beam check: the ranked answers of a beam search this wide (docs/specification.md#beam-search)."""
 CONTROLLED = SamplingOptions(
     temperature=0.9,
     top_k=40,
@@ -285,4 +287,18 @@ def check_reference(engine: Any, max_tokens: int = MAX_TOKENS) -> ReferenceCheck
     else:
         differing = np.flatnonzero(scored.view(np.uint32) != expected_scores.view(np.uint32))
         results["scored"] = f"{len(differing)} of {len(scored)} differ, first at token {int(differing[0]) + 1}"
+    # A beam search (docs/specification.md#beam-search): every ranked answer's tokens and the bits of its scores.
+    from etalii_dllm import beam
+
+    found = beam.search_tokens(engine.model, context, BEAM_WIDTH, max_tokens, engine.stop_tokens, n_best=BEAM_WIDTH)
+    ranked = twin.beam_search(context, BEAM_WIDTH, max_tokens, stops, n_best=BEAM_WIDTH)
+    mine = [(list(h.tokens), h.finish_reason, h.log_likelihood.hex(), h.score.hex()) for h in found]
+    theirs = [(tokens, reason, total.hex(), value.hex()) for tokens, reason, total, value in ranked]
+    differing = [i for i, (a, b) in enumerate(zip(mine, theirs, strict=False)) if a != b]
+    if mine == theirs:
+        results["beam"] = "equal"
+    elif differing:
+        results["beam"] = f"answer {differing[0]} of {len(mine)} differs"
+    else:
+        results["beam"] = f"{len(mine)} answers, the reference has {len(theirs)}"
     return ReferenceCheck(results)

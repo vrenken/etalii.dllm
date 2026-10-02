@@ -624,6 +624,16 @@ the big model knows better than a small one with the same tokenizer (contrastive
 averages several models. Each is exact, so the answer repeats on every machine; the server has the same as
 `guidance` and `contrast` request fields and the same model options. Details: [guided decoding](api.md#guided-decoding).
 
+## 26. Find the most likely answers with beam search
+
+```bash
+dllm generate --prompt "The capital of France is" --max-tokens 12 --beams 4 --n-best 2
+```
+
+Beam search follows several likely continuations at once and prints the best ones, best first, with their
+log-likelihoods on stderr. It is exact too: the same answers on every machine. The server has the same as a `beam`
+field on chat completions and completions. Details: [beam search](api.md#beam-search).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
@@ -647,7 +657,7 @@ averages several models. Each is exact, so the answer repeats on every machine; 
   engine asks for). SmolLM2-135M does not know tools, so expect clumsy calls from it; constrained decoding still
   guarantees that every call names a real tool with arguments that fit its schema.
 - Structured output supports the common JSON-schema keywords; `pattern`, `minLength`, `minimum` and similar are
-  refused with an error (see [HTTP API](api.md)). No images, audio or `n` > 1.
+  refused with an error (see [HTTP API](api.md)). No images or audio.
 - MCP servers' own resources and prompts are not offered to the model (only their tools), and servers that ask
   the client for sampling or elicitation are not supported.
 - Models with Unigram or WordPiece tokenizers, GGUF files with a SentencePiece vocabulary (convert from the

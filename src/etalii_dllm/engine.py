@@ -613,8 +613,9 @@ class DllmEngine:
         shared = self.inflight.get_or_start(key, start)
         return ChatStream(shared.prompt_tokens, self._answer(shared.reader(), request), shared.cached_tokens)
 
-    def _generate(self, request: ChatRequest, tools: Sequence[Tool]) -> _ChatGeneration:
-        constraint = self._constraint(request, tools)
+    def request_prompt(self, request: ChatRequest, tools: Sequence[Tool] = ()) -> tuple[Sequence[ChatMessage], str]:
+        """The messages a request's answer continues (grounded and truncated as configured) and its prompt text: the
+        raw prompt, or the rendered conversation."""
         messages = request.messages
         if self.retriever is not None and request.prompt is None:
             messages, _ = self.retriever.ground(messages)
@@ -625,6 +626,11 @@ class DllmEngine:
             if request.prompt is not None
             else self.render_chat(messages, tools, thinking=request.thinking)
         )
+        return messages, prompt
+
+    def _generate(self, request: ChatRequest, tools: Sequence[Tool]) -> _ChatGeneration:
+        constraint = self._constraint(request, tools)
+        messages, prompt = self.request_prompt(request, tools)
         tracker = None
         if request.prompt is None and self.thinks and (constraint is None or not constraint.active):
             # Structured output and forced tool calls constrain the output from its first token: no thinking then.

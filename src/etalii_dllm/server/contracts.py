@@ -116,6 +116,16 @@ class VoteOptions(BaseModel):
     """A regex whose last match (its first group, when it has groups) is the answer that votes."""
 
 
+class BeamOptions(BaseModel):
+    """Extension: exact beam search (docs/api.md#beam-search)."""
+
+    width: int
+    n_best: int = 1
+    """How many of the best answers to return as choices (1 to ``width``)."""
+    length_penalty: float = 1.0
+    """Answers are ranked by ``log_likelihood / length ** length_penalty``."""
+
+
 class StreamOptions(BaseModel):
     include_usage: bool | None = None
 
@@ -174,6 +184,8 @@ class ChatCompletionRequest(BaseModel):
     """Extension: classifier-free guidance away from a negative prompt (docs/api.md#guided-decoding)."""
     contrast: ContrastOptions | None = None
     """Extension: contrastive decoding against the server's amateur model (docs/api.md#guided-decoding)."""
+    beam: BeamOptions | None = None
+    """Extension: return the best answers of an exact beam search (docs/api.md#beam-search)."""
 
 
 DECODING_CONTROLS = (
@@ -202,6 +214,7 @@ DECODING_CONTROLS = (
     "vote",
     "guidance",
     "contrast",
+    "beam",
 )
 """Request fields added since Phase 21: left out of the payloads ids are derived from while unset, so the ids of
 requests without them did not change."""

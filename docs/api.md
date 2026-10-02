@@ -295,6 +295,32 @@ votes, choice indexes) and the winner's index, and `usage.completion_tokens` cou
 ballots and the winner), which `dllm replay` and `POST /v1/receipts/verify` check by voting again. `vote` cannot be
 combined with `stream` or `n`; `n` in a vote is 1 to 16.
 
+## Beam search
+
+The best answers by exact log-likelihood instead of a sampled one ([specification](specification.md#beam-search)).
+`beam: {"width": W, "n_best": K, "length_penalty": A}` on chat completions and completions (`dllm generate --beams W
+--n-best K --length-penalty A`) keeps the W most likely partial answers, extends them together and returns the K
+best finished ones as choices, best first. Every step has a fixed rule: a hypothesis's log-likelihood is the double
+sum of its float32 token log-probabilities, candidates are ranked by log-likelihood and then by token sequence (a total
+order, so ties never depend on sort stability), and finished answers are ranked by
+`log_likelihood / length ** length_penalty`. Width 1 is greedy decoding.
+
+```bash
+dllm --model qwen2.5-0.5b.dllm generate --prompt "The capital of France is" --max-tokens 12 --beams 4 --n-best 2
+curl -s localhost:5080/v1/chat/completions -H 'content-type: application/json' -d '{
+  "messages": [{"role": "user", "content": "Name a prime number."}], "max_tokens": 16,
+  "beam": {"width": 4, "n_best": 2}, "receipt": true}'
+```
+
+The response's `beam` holds every returned answer's log-likelihood, score, finish reason and fingerprint;
+`logprobs: true` gives each answer's token log-probabilities. `stop` and `max_tokens` work as usual; temperature,
+top-k, top-p and seeds play no part. Penalties, logit bias, min-p, watermarks, guides, tools, structured output,
+`top_logprobs`, `stream`, `n` and rolling are refused with a 400 error, since they would change what the search ranks.
+With `"receipt": true` the receipt is a beam receipt (`"beam": "dllm-beam/1"`: the request, the settings and every
+answer's fingerprint and score bits; on completions each choice carries its prompt's), which `dllm replay` and
+`POST /v1/receipts/verify` check by searching again. A search runs `width` sequences per step, each with its own
+KV cache, in one batched pass.
+
 ## Guided decoding
 
 Decoding from a combination of several next-token distributions, each one an exactly defined float32 computation
