@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import pytest
 from golden_values import TINY_LOGITS_FINGERPRINT
-from model_fixtures import tiny_config, write_hf_checkpoint
+from model_fixtures import fixture_name, tiny_config, write_hf_checkpoint
 
 from etalii_dllm.architecture import TransformerConfig
 from etalii_dllm.importing import import_model
@@ -118,6 +118,12 @@ def reference_logits(
                     q = f"{p}mlp.experts.{e}."
                     gate = h[row] @ w[q + "gate.weight"].T
                     mlp[row] += weight * ((act(gate) * (h[row] @ w[q + "up.weight"].T)) @ w[q + "down.weight"].T)
+            if config.shared_expert_intermediate_size is not None:  # every row's shared expert, maybe gated
+                q = f"{p}mlp.shared."
+                shared = (act(h @ w[q + "gate.weight"].T) * (h @ w[q + "up.weight"].T)) @ w[q + "down.weight"].T
+                if config.shared_expert_gate:
+                    shared = shared / (1.0 + np.exp(-(h @ w[p + "mlp.shared_gate.weight"].T)))
+                mlp = mlp + shared
         else:
             gate = h @ w[p + "mlp.gate.weight"].T
             mlp = (act(gate) * (h @ w[p + "mlp.up.weight"].T)) @ w[p + "mlp.down.weight"].T
@@ -177,7 +183,7 @@ def test_concurrent_requests_do_not_interfere(model):
 
 
 def test_logits_are_bit_exact(model):
-    assert fingerprint(model.forward(PROMPT)) == TINY_LOGITS_FINGERPRINT[model.config.family]
+    assert fingerprint(model.forward(PROMPT)) == TINY_LOGITS_FINGERPRINT[fixture_name(model.config)]
 
 
 def test_rejects_bad_input(model):

@@ -268,6 +268,10 @@ For new tokens at positions `start …`, all in float32 unless stated:
       - Each row's output starts at 0. For each chosen expert of the row, in increasing expert order (not rank
         order), `y = linear(swiglu(linear(h_row, We_gate), linear(h_row, We_up)), We_down)` and the output becomes
         `output + y * weight`, two float32 operations per element.
+      - With a shared expert (`shared_expert_intermediate_size`), every row also runs
+        `y = linear(swiglu(linear(h, Ws_gate), linear(h, Ws_up)), Ws_down)`; with `shared_expert_gate` (Qwen2-MoE)
+        `y = y * f32(sigmoid(linear(h, Wshared_gate)))` (`math.hpp`'s sigmoid in double, rounded once; the gate
+        is one row and never quantised). The output becomes `output + y`, after the routed experts.
       - `m` is that output. Each row is computed on its own, so which rows share an expert never matters.
    7. A steering vector for this layer is added: `x = x + v`.
 3. `logits = linear(norm(x, final_norm), head)`, where `head` is the embedding when tied. Divide by `logits_scaling`

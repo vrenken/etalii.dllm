@@ -60,9 +60,10 @@ _BY_HF_MODULE = {module.split(".")[1]: target for target, module in MODULES.item
 _MIXTRAL_EXPERTS = {"gate": "w1", "up": "w3", "down": "w2"}
 _BY_MIXTRAL_EXPERT = {module: target for target, module in _MIXTRAL_EXPERTS.items()}
 _EXPERT_TARGETS = ("gate", "up", "down")
+# A shared expert (Qwen2-MoE): mlp.shared_expert.gate_proj/up_proj/down_proj.
 _PEFT_KEY = re.compile(
-    r"^(?:base_model\.model\.)?model\.layers\.(\d+)\.(self_attn|mlp|block_sparse_moe)\.(?:experts\.(\d+)\.)?(\w+)"
-    r"\.lora_([AB])\.weight$"
+    r"^(?:base_model\.model\.)?model\.layers\.(\d+)\.(self_attn|mlp|block_sparse_moe)\."
+    r"(?:experts\.(\d+)\.|(shared_expert)\.)?(\w+)\.lora_([AB])\.weight$"
 )
 
 
@@ -104,12 +105,15 @@ class LoraConfig:
 
 def target_weights(config: TransformerConfig, lora: LoraConfig) -> list[str]:
     """The adapted weight names, in tensor order. In a mixture-of-experts layer ``gate``, ``up`` and ``down`` adapt
-    every expert's projection (``layers.N.mlp.experts.E.gate.weight``); the router is never adapted."""
+    every expert's projection (``layers.N.mlp.experts.E.gate.weight``) and the shared expert's
+    (``layers.N.mlp.shared.gate.weight``); the router and the shared expert's gate are never adapted."""
     names = []
     for layer in range(config.layers):
         for target in lora.targets:
             if target in _EXPERT_TARGETS and config.is_sparse(layer):
                 names.extend(f"layers.{layer}.mlp.experts.{e}.{target}.weight" for e in range(config.experts))
+                if config.shared_expert_intermediate_size is not None:
+                    names.append(f"layers.{layer}.mlp.shared.{target}.weight")
             else:
                 names.append(f"layers.{layer}.{_WEIGHT_NAMES[target]}")
     return tensor_order(names)
@@ -174,10 +178,18 @@ def adapter_gradients(
 def peft_key(name: str, config: TransformerConfig | None = None) -> str:
     """``layers.3.attention.q.weight.lora_a`` -> ``base_model.model.model.layers.3.self_attn.q_proj.lora_A.weight``;
     an expert's ``layers.3.mlp.experts.5.gate.weight.lora_a`` -> ``...layers.3.mlp.experts.5.gate_proj.lora_A.weight``
-    (Mixtral: ``...layers.3.block_sparse_moe.experts.5.w1.lora_A.weight``)."""
+    (Mixtral: ``...layers.3.block_sparse_moe.experts.5.w1.lora_A.weight``); a shared expert's
+    ``layers.3.mlp.shared.up.weight.lora_b`` -> ``...layers.3.mlp.shared_expert.up_proj.lora_B.weight``. Granite MoE
+    stores its experts fused (one parameter for all of them, gate and up rows stacked), so PEFT has no module for
+    one of them: its expert adapters are refused."""
     layer, rest = name.split(".", 2)[1:]
     weight, kind = rest.rsplit(".", 1)
     suffix = f"lora_{kind[-1].upper()}.weight"
+    if weight.startswith(("mlp.experts.", "mlp.shared.")) and config is not None and config.family == "granitemoe":
+        raise AdapterError("Granite MoE's experts are fused, so PEFT cannot adapt one; export the merged model")
+    if weight.startswith("mlp.shared."):
+        target = weight.split(".")[2]
+        return f"base_model.model.model.layers.{layer}.mlp.shared_expert.{MODULES[target].split('.')[1]}.{suffix}"
     if weight.startswith("mlp.experts."):
         expert, target = weight.split(".")[2:4]
         if config is not None and config.family == "mixtral":
@@ -260,9 +272,16 @@ def _adapter_name(key: str, config: TransformerConfig, directory: Path) -> tuple
     match = _PEFT_KEY.match(key)
     if match is None:
         raise AdapterError(f"{directory}: unsupported adapter tensor {key!r}")
-    layer, parent, expert, module, kind = match.groups()
+    layer, parent, expert, shared, module, kind = match.groups()
     index, suffix = int(layer), f".lora_{kind.lower()}"
-    if expert is None:
+    if shared is not None:
+        target = _BY_HF_MODULE.get(module)
+        if target not in _EXPERT_TARGETS:
+            raise AdapterError(f"{directory}: unsupported adapter tensor {key!r}")
+        fits = 0 <= index < config.layers and config.is_sparse(index) and parent == "mlp"
+        fits = fits and config.shared_expert_intermediate_size is not None and config.family != "granitemoe"
+        name = f"layers.{index}.mlp.shared.{target}.weight{suffix}"
+    elif expert is None:
         target = _BY_HF_MODULE.get(module)
         if target is None:
             raise AdapterError(f"{directory}: unsupported adapter tensor {key!r}")
@@ -275,7 +294,7 @@ def _adapter_name(key: str, config: TransformerConfig, directory: Path) -> tuple
         if target not in _EXPERT_TARGETS:
             raise AdapterError(f"{directory}: unsupported adapter tensor {key!r}")
         fits = 0 <= index < config.layers and config.is_sparse(index) and int(expert) < config.experts
-        fits = fits and parent == ("block_sparse_moe" if mixtral else "mlp")
+        fits = fits and parent == ("block_sparse_moe" if mixtral else "mlp") and config.family != "granitemoe"
         name = f"layers.{index}.mlp.experts.{int(expert)}.{target}.weight{suffix}"
     if not fits:
         raise AdapterError(f"{directory}: tensor {key!r} does not fit the model")

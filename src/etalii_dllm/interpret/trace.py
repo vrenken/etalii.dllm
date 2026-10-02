@@ -46,6 +46,12 @@ class Trace:
     dense layers); ``None`` for dense models."""
     expert_weights: np.ndarray | None = None
     """``[L, n, k]``: the weights of those experts (0 in dense layers); ``None`` for dense models."""
+    shared_activation: np.ndarray | None = None
+    """Models with a shared expert: ``[L, n, shared size]``, its hidden activation ``act(gate) * up`` at every
+    position (0 in dense layers); ``None`` otherwise."""
+    shared_gate: np.ndarray | None = None
+    """Models with a gated shared expert: ``[L, n]``, the sigmoid gate its output was scaled by (0 in dense layers);
+    ``None`` otherwise."""
 
     def arrays(self) -> Iterator[tuple[str, np.ndarray]]:
         """The captured arrays by name, in a fixed order."""
@@ -57,6 +63,8 @@ class Trace:
             "mlp_output",
             "attention",
             "expert_weights",
+            "shared_activation",
+            "shared_gate",
         )
         for name in names:
             values = getattr(self, name)
@@ -89,6 +97,7 @@ class _Recorder(LayerHook):
         self.mlp_activations: list[np.ndarray] = []
         self.mlp_outputs: list[np.ndarray] = []
         self.routes: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        self.shared: dict[int, tuple[np.ndarray, np.ndarray | None]] = {}
 
     def residual(self, layer: int, point: str, x: np.ndarray) -> None:  # type: ignore[override]
         if point == "middle":
@@ -111,6 +120,9 @@ class _Recorder(LayerHook):
     def routing(self, layer: int, experts: np.ndarray, weights: np.ndarray) -> None:
         self.routes[layer] = (experts, weights)
 
+    def shared_expert(self, layer: int, activation: np.ndarray, gate: np.ndarray | None) -> None:
+        self.shared[layer] = (activation, gate)
+
 
 def trace(model: Transformer, tokens: Sequence[int], *, attention: bool = True, logits: bool = True) -> Trace:
     """Runs ``tokens`` through ``model`` (on the CPU) and returns every intermediate activation. ``attention=False``
@@ -125,6 +137,15 @@ def trace(model: Transformer, tokens: Sequence[int], *, attention: bool = True, 
         experts, expert_weights = np.full(shape, -1, dtype=np.int64), np.zeros(shape, dtype=np.float32)
         for layer, (chosen, weights) in recorder.routes.items():
             experts[layer], expert_weights[layer] = chosen, weights
+    shared_activation = shared_gate = None
+    if config.shared_expert_intermediate_size is not None:
+        n = len(tokens)
+        shared_activation = np.zeros((config.layers, n, config.shared_expert_intermediate_size), dtype=np.float32)
+        shared_gate = np.zeros((config.layers, n), dtype=np.float32) if config.shared_expert_gate else None
+        for layer, (activation, gate) in recorder.shared.items():
+            shared_activation[layer] = activation
+            if shared_gate is not None and gate is not None:
+                shared_gate[layer] = gate[:, 0]
     return Trace(
         tokens=tuple(int(t) for t in tokens),
         residual=np.stack(recorder.streams),
@@ -137,4 +158,6 @@ def trace(model: Transformer, tokens: Sequence[int], *, attention: bool = True, 
         logits=model.logits_from_hidden(hidden) if logits else None,
         experts=experts,
         expert_weights=expert_weights,
+        shared_activation=shared_activation,
+        shared_gate=shared_gate,
     )

@@ -44,7 +44,8 @@ def tiny_config(family: str) -> dict:
     soft-caps attention scores and logits at about their size, so the caps bend them. The mixture-of-experts configs
     route each token to 2 of 4 experts: Mixtral renormalises the two weights, OLMoE does not (and normalises the whole
     query and key projections), Qwen3-MoE renormalises, gives its experts a hidden size of their own and keeps a dense
-    MLP in layer 0."""
+    MLP in layer 0. Qwen2-MoE does not renormalise and adds a gated shared expert of its own size; Granite MoE adds
+    Granite's multipliers, renormalises and stores its experts fused, and ``granitemoeshared`` adds a shared expert."""
     config = {**TINY_LLAMA_CONFIG, "model_type": family}
     if family == "gemma2":
         del config["hidden_act"]
@@ -128,6 +129,32 @@ def tiny_config(family: str) -> dict:
             norm_topk_prob=False,
             clip_qkv=None,
         )
+    elif family == "qwen2_moe":
+        config.update(
+            architectures=["Qwen2MoeForCausalLM"],
+            use_sliding_window=False,
+            tie_word_embeddings=False,
+            moe_intermediate_size=8,
+            shared_expert_intermediate_size=12,
+            num_experts=4,
+            num_experts_per_tok=2,
+            norm_topk_prob=False,
+            decoder_sparse_step=1,
+            mlp_only_layers=[],
+        )
+    elif family in ("granitemoe", "granitemoeshared"):
+        config.update(
+            architectures=["GraniteMoeSharedForCausalLM" if family == "granitemoeshared" else "GraniteMoeForCausalLM"],
+            embedding_multiplier=12.0,
+            attention_multiplier=0.125,
+            residual_multiplier=0.22,
+            logits_scaling=8.0,
+            intermediate_size=8,
+            num_local_experts=4,
+            num_experts_per_tok=2,
+        )
+        if family == "granitemoeshared":
+            config["shared_intermediate_size"] = 12
     elif family == "qwen3_moe":
         config.update(
             architectures=["Qwen3MoeForCausalLM"],
@@ -146,17 +173,21 @@ def tiny_config(family: str) -> dict:
 
 def moe_settings(config: dict) -> dict:
     """The mixture-of-experts fields of our config for a Hugging Face ``config`` (empty for dense models)."""
-    family = config["model_type"]
-    if family not in ("mixtral", "olmoe", "qwen3_moe"):
+    family = {"granitemoeshared": "granitemoe"}.get(config["model_type"], config["model_type"])
+    if family not in ("mixtral", "olmoe", "qwen2_moe", "qwen3_moe", "granitemoe"):
         return {}
     settings = {
         "experts": config.get("num_local_experts") or config["num_experts"],
         "experts_per_token": config["num_experts_per_tok"],
-        "normalize_expert_weights": family == "mixtral" or bool(config.get("norm_topk_prob")),
+        "normalize_expert_weights": family in ("mixtral", "granitemoe") or bool(config.get("norm_topk_prob")),
     }
-    if family == "qwen3_moe":
+    if family in ("qwen2_moe", "qwen3_moe"):
         settings["expert_intermediate_size"] = config["moe_intermediate_size"]
         settings["dense_layers"] = tuple(config.get("mlp_only_layers") or ()) or None
+    shared = config.get("shared_expert_intermediate_size") or config.get("shared_intermediate_size")
+    if shared:
+        settings["shared_expert_intermediate_size"] = shared
+        settings["shared_expert_gate"] = family == "qwen2_moe"
     return settings
 
 
@@ -184,7 +215,7 @@ def head_dim(config: dict) -> int:
 
 def hf_weights(config: dict, seed: int = 11) -> dict[str, np.ndarray]:
     """Float32 weights (already bf16-representable) for a Llama/Qwen2/Qwen3 config, keyed by Hugging Face name."""
-    family = {"gemma3_text": "gemma3"}.get(config["model_type"], config["model_type"])
+    family = {"gemma3_text": "gemma3", "granitemoeshared": "granitemoe"}.get(config["model_type"], config["model_type"])
     ours = TransformerConfig.from_dict(
         {
             "family": family
@@ -193,12 +224,14 @@ def hf_weights(config: dict, seed: int = 11) -> dict[str, np.ndarray]:
                 "gemma2",
                 "gemma3",
                 "granite",
+                "granitemoe",
                 "mistral",
                 "mixtral",
                 "olmo2",
                 "olmoe",
                 "phi3",
                 "qwen2",
+                "qwen2_moe",
                 "qwen3",
                 "qwen3_moe",
             )
@@ -213,7 +246,7 @@ def hf_weights(config: dict, seed: int = 11) -> dict[str, np.ndarray]:
             "context_length": config["max_position_embeddings"],
             "rms_norm_eps": config["rms_norm_eps"],
             "rope_theta": config["rope_theta"],
-            "attention_bias": family == "qwen2",
+            "attention_bias": family in ("qwen2", "qwen2_moe"),
             "qk_norm": family in ("gemma3", "olmo2", "olmoe", "qwen3", "qwen3_moe"),
             "qk_norm_scope": "all" if family in ("olmo2", "olmoe") else "head",
             "norm_placement": {"olmo2": "post", "gemma2": "sandwich", "gemma3": "sandwich"}.get(family, "pre"),
@@ -257,7 +290,15 @@ def hf_weights(config: dict, seed: int = 11) -> dict[str, np.ndarray]:
                 else:
                     hf_rest = f"mlp.experts.{expert}.{projection}_proj.weight"
             elif rest == "mlp.router.weight":
-                hf_rest = "block_sparse_moe.gate.weight" if family == "mixtral" else "mlp.gate.weight"
+                hf_rest = {
+                    "mixtral": "block_sparse_moe.gate.weight",
+                    "granitemoe": "block_sparse_moe.router.layer.weight",
+                }
+                hf_rest = hf_rest.get(family, "mlp.gate.weight")
+            elif rest.startswith("mlp.shared."):  # Granite's are fused below
+                hf_rest = f"mlp.shared_expert.{rest.split('.')[2]}_proj.weight"
+            elif rest == "mlp.shared_gate.weight":
+                hf_rest = "mlp.shared_expert_gate.weight"
             else:
                 hf_rest = layer_names[rest]
             hf = f"model.layers.{layer}.{hf_rest}"
@@ -265,6 +306,24 @@ def hf_weights(config: dict, seed: int = 11) -> dict[str, np.ndarray]:
         if name.endswith("mlp.router.weight"):  # wider router logits, so the top-k choices are clear-cut
             values = values * np.float32(16)
         weights[hf] = bf16_to_float32(to_bf16_bits(values))
+    if family == "granitemoe":  # experts stacked, gate and up rows fused, as GraniteMoeParallelExperts stores them
+        for layer in range(config["num_hidden_layers"]):
+            p = f"model.layers.{layer}."
+            experts = range(ours.experts)
+            weights[p + "block_sparse_moe.input_linear.weight"] = np.stack(
+                [
+                    np.concatenate([weights.pop(f"{p}mlp.experts.{e}.{x}_proj.weight") for x in ("gate", "up")])
+                    for e in experts
+                ]
+            )
+            weights[p + "block_sparse_moe.output_linear.weight"] = np.stack(
+                [weights.pop(f"{p}mlp.experts.{e}.down_proj.weight") for e in experts]
+            )
+            if ours.shared_expert_intermediate_size is not None:
+                weights[p + "shared_mlp.input_linear.weight"] = np.concatenate(
+                    [weights.pop(f"{p}mlp.shared_expert.{x}_proj.weight") for x in ("gate", "up")]
+                )
+                weights[p + "shared_mlp.output_linear.weight"] = weights.pop(p + "mlp.shared_expert.down_proj.weight")
     if family == "phi3":  # fused projections, rows stacked q, k, v and gate, up
         for layer in range(config["num_hidden_layers"]):
             p = f"model.layers.{layer}."
@@ -338,6 +397,9 @@ _HF_TO_GGUF = {
     "mlp.gate_proj.weight": "ffn_gate.weight",
     "mlp.up_proj.weight": "ffn_up.weight",
     "mlp.down_proj.weight": "ffn_down.weight",
+    "mlp.shared_expert.gate_proj.weight": "ffn_gate_shexp.weight",
+    "mlp.shared_expert.up_proj.weight": "ffn_up_shexp.weight",
+    "mlp.shared_expert.down_proj.weight": "ffn_down_shexp.weight",
 }
 
 
@@ -396,3 +458,11 @@ def write_gguf(path: Path, config: dict | None = None, quantization: str | None 
     writer.write_tensors_to_file()
     writer.close()
     return weights
+
+
+def fixture_name(config) -> str:
+    """The :func:`tiny_config` name a ``TransformerConfig`` was imported from, the key of the golden tables:
+    the family, except for Granite MoE with a shared expert (``granitemoeshared``)."""
+    if config.family == "granitemoe" and config.shared_expert_intermediate_size is not None:
+        return "granitemoeshared"
+    return config.family

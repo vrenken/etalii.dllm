@@ -611,6 +611,8 @@ NB_MODULE(_kernels, module) {
         nb::arg("add_unit_offset") = false, "RMSNorm over the last dimension, fixed order, double accumulator.");
 
     m.def("silu", &elementwise<dllm::silu>, nb::arg("x"), "Elementwise x * sigmoid(x).");
+    m.def("sigmoid_elementwise", &elementwise<dllm::sigmoid_float>, nb::arg("x"),
+          "Elementwise logistic sigmoid, in double, rounded once.");
     m.def("gelu", &elementwise<dllm::gelu>, nb::arg("x"), "Elementwise exact (erf) GELU.");
     m.def("gelu_tanh", &elementwise<dllm::gelu_tanh>, nb::arg("x"), "Elementwise tanh-approximated GELU.");
     m.def(

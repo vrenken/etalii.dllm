@@ -9,7 +9,7 @@ import math
 import numpy as np
 import pytest
 from golden_values import DPO_FINETUNE_FINGERPRINT
-from model_fixtures import TINY_LLAMA_CONFIG, tiny_config, write_hf_checkpoint
+from model_fixtures import TINY_LLAMA_CONFIG, fixture_name, tiny_config, write_hf_checkpoint
 
 from etalii_dllm import _kernels, evaluation
 from etalii_dllm.cli import main as cli
@@ -47,7 +47,20 @@ def pairs(sequence_length: int = 24) -> PreferenceData:
 
 @pytest.fixture(
     scope="module",
-    params=["gemma2", "gemma3", "granite", "llama", "mixtral", "olmo2", "olmoe", "phi3", "qwen3", "qwen3_moe"],
+    params=[
+        "gemma2",
+        "gemma3",
+        "granite",
+        "granitemoeshared",
+        "llama",
+        "mixtral",
+        "olmo2",
+        "olmoe",
+        "phi3",
+        "qwen2_moe",
+        "qwen3",
+        "qwen3_moe",
+    ],
 )
 def model_file(request, tmp_path_factory) -> ModelFile:
     directory = tmp_path_factory.mktemp(request.param)
@@ -228,7 +241,7 @@ def test_dpo_runs_are_byte_identical_and_resume_bit_for_bit(model_file, tmp_path
 
     fingerprint = first.export(tmp_path / "first.dllm")
     assert resumed.export(tmp_path / "resumed.dllm") == fingerprint
-    assert fingerprint == DPO_FINETUNE_FINGERPRINT[model_file.config.family]
+    assert fingerprint == DPO_FINETUNE_FINGERPRINT[fixture_name(model_file.config)]
     tuned = ModelFile(tmp_path / "first.dllm")
     assert tuned.fine_tuning["run"]["objective"] == "dpo"
     assert tuned.fine_tuning["data_fingerprint"] == data.fingerprint

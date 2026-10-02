@@ -42,6 +42,8 @@ _HF_ARCHITECTURES = {
     "mixtral": "MixtralForCausalLM",
     "olmoe": "OlmoeForCausalLM",
     "qwen3_moe": "Qwen3MoeForCausalLM",
+    "qwen2_moe": "Qwen2MoeForCausalLM",
+    "granitemoe": "GraniteMoeForCausalLM",
 }
 _HF_ACTIVATIONS = {"silu": "silu", "gelu_tanh": "gelu_pytorch_tanh"}
 
@@ -80,9 +82,12 @@ def hf_config_json(config: TransformerConfig) -> dict[str, Any]:
         supported = ", ".join(sorted(_HF_ARCHITECTURES))
         raise ExportError(f"exporting {config.family} models to safetensors is not supported (supported: {supported})")
     eos = list(config.eos_token_ids)
+    architecture, model_type = _HF_ARCHITECTURES[config.family], config.family
+    if config.family == "granitemoe" and config.shared_expert_intermediate_size is not None:
+        architecture, model_type = "GraniteMoeSharedForCausalLM", "granitemoeshared"
     document: dict[str, Any] = {
-        "architectures": [_HF_ARCHITECTURES[config.family]],
-        "model_type": config.family,
+        "architectures": [architecture],
+        "model_type": model_type,
         "vocab_size": config.vocabulary_size,
         "hidden_size": config.hidden_size,
         "intermediate_size": config.intermediate_size,
@@ -112,7 +117,7 @@ def hf_config_json(config: TransformerConfig) -> dict[str, Any]:
         document["layer_types"] = [
             "sliding_attention" if sliding is None or i in sliding else "full_attention" for i in range(config.layers)
         ]
-    if config.family == "granite":
+    if config.family in ("granite", "granitemoe"):
         document |= {
             "embedding_multiplier": config.embedding_multiplier,
             "residual_multiplier": config.residual_multiplier,
@@ -121,16 +126,20 @@ def hf_config_json(config: TransformerConfig) -> dict[str, Any]:
         if config.attention_multiplier is not None:
             document["attention_multiplier"] = config.attention_multiplier
     if config.experts:
-        document["num_local_experts" if config.family == "mixtral" else "num_experts"] = config.experts
+        local = config.family in ("mixtral", "granitemoe")
+        document["num_local_experts" if local else "num_experts"] = config.experts
         document["num_experts_per_tok"] = config.experts_per_token
-        if config.family != "mixtral":
+        if not local:
             document["norm_topk_prob"] = config.normalize_expert_weights
-        if config.family == "qwen3_moe":
+        if config.family in ("qwen2_moe", "qwen3_moe"):
             document |= {
                 "moe_intermediate_size": config.expert_size,
                 "decoder_sparse_step": 1,
                 "mlp_only_layers": list(config.dense_layers or ()),
             }
+        if config.shared_expert_intermediate_size is not None:
+            key = "shared_intermediate_size" if config.family == "granitemoe" else "shared_expert_intermediate_size"
+            document[key] = config.shared_expert_intermediate_size
     try:
         again = hf_config(document)
     except ModelImportError as error:
@@ -168,17 +177,27 @@ _HF_GLOBALS = {
 
 
 _MIXTRAL_EXPERTS = {"gate": "w1", "down": "w2", "up": "w3"}
+# Granite MoE fuses each expert's gate and up rows into input_linear and stacks the experts.
+_GRANITE_FUSED = {"gate": "input_linear", "up": "input_linear", "down": "output_linear"}
 
 
 def hf_tensor_name(name: str, config: TransformerConfig) -> str:
     if name in _HF_GLOBALS:
         return _HF_GLOBALS[name]
     _, index, rest = name.split(".", 2)
-    moe = "block_sparse_moe" if config.family == "mixtral" else "mlp"
+    moe = "block_sparse_moe" if config.family in ("mixtral", "granitemoe") else "mlp"
     if rest == "mlp.router.weight":
-        return f"model.layers.{index}.{moe}.gate.weight"
+        return f"model.layers.{index}.{moe}.{'router.layer' if config.family == 'granitemoe' else 'gate'}.weight"
+    if rest == "mlp.shared_gate.weight":
+        return f"model.layers.{index}.mlp.shared_expert_gate.weight"
+    if rest.startswith("mlp.shared."):
+        if config.family == "granitemoe":  # gate and up are fused into input_linear by export_safetensors
+            return f"model.layers.{index}.shared_mlp.{_GRANITE_FUSED[rest.split('.')[2]]}.weight"
+        return f"model.layers.{index}.mlp.shared_expert.{rest.split('.')[2]}_proj.weight"
     if rest.startswith("mlp.experts."):
         _, _, expert, projection, _ = rest.split(".")
+        if config.family == "granitemoe":  # stacked over the experts (and gate/up fused) by export_safetensors
+            return f"model.layers.{index}.block_sparse_moe.{_GRANITE_FUSED[projection]}.weight"
         hf = _MIXTRAL_EXPERTS[projection] if config.family == "mixtral" else f"{projection}_proj"
         return f"model.layers.{index}.{moe}.experts.{expert}.{hf}.weight"
     names = {**_HF_NAMES, **(_HF_POST_NORMS if config.norm_placement == "post" else _HF_PRE_NORMS)}
@@ -236,6 +255,35 @@ def _readme(model: ModelFile) -> bytes:
     return (front + body).encode("utf-8")
 
 
+def _hf_tensors(model: ModelFile) -> dict[str, np.ndarray]:
+    """The checkpoint's tensors by Hugging Face name. Where several of ours share one name (Granite MoE), they are
+    joined in the order transformers reads them: experts ascending (stacked), gate rows before up rows."""
+    config = model.config
+    groups: dict[str, list[str]] = {}
+    for name in tensor_order(model.tensors):
+        groups.setdefault(hf_tensor_name(name, config), []).append(name)
+    tensors: dict[str, np.ndarray] = {}
+    for target, names in groups.items():
+        if len(names) == 1:
+            tensors[target] = model.tensors[names[0]]
+            continue
+
+        def key(name: str) -> tuple[int, int]:
+            parts = name.split(".")
+            expert = int(parts[4]) if parts[3] == "experts" else 0
+            return expert, ("gate", "up", "down").index(parts[-2])
+
+        names.sort(key=key)
+        if ".experts." in names[0]:
+            per_expert: dict[int, list[np.ndarray]] = {}
+            for name in names:
+                per_expert.setdefault(key(name)[0], []).append(_rows(model, name))
+            tensors[target] = np.stack([np.concatenate(rows) for _, rows in sorted(per_expert.items())])
+        else:
+            tensors[target] = np.concatenate([_rows(model, name) for name in names])
+    return tensors
+
+
 def export_safetensors(model: ModelFile, directory: str | Path) -> list[Path]:
     """Writes ``model`` as a Hugging Face model directory; returns the files written, in name order."""
     config = model.config
@@ -256,7 +304,7 @@ def export_safetensors(model: ModelFile, directory: str | Path) -> list[Path]:
     directory.mkdir(parents=True, exist_ok=True)
     for name, data in files.items():
         (directory / name).write_bytes(data)
-    tensors = {hf_tensor_name(name, config): model.tensors[name] for name in model.tensors}
+    tensors = _hf_tensors(model)
     write_safetensors(directory / "model.safetensors", tensors)
     return [directory / name for name in sorted([*files, "model.safetensors"])]  # by name: WindowsPath sorts casefolded
 
@@ -265,7 +313,7 @@ def export_safetensors(model: ModelFile, directory: str | Path) -> list[Path]:
 
 # family -> GGUF architecture; llama.cpp stores Mixtral as "llama" with experts.
 _GGUF_FAMILIES = {"llama": "llama", "qwen2": "qwen2", "qwen3": "qwen3", "mixtral": "llama", "olmoe": "olmoe",
-                  "qwen3_moe": "qwen3moe"}  # fmt: skip
+                  "qwen3_moe": "qwen3moe", "qwen2_moe": "qwen2moe"}  # fmt: skip
 _GGUF_NAMES = {
     "attention_norm.weight": "attn_norm.weight",
     "mlp_norm.weight": "ffn_norm.weight",
@@ -282,6 +330,10 @@ _GGUF_NAMES = {
     "mlp.up.weight": "ffn_up.weight",
     "mlp.down.weight": "ffn_down.weight",
     "mlp.router.weight": "ffn_gate_inp.weight",
+    "mlp.shared.gate.weight": "ffn_gate_shexp.weight",
+    "mlp.shared.up.weight": "ffn_up_shexp.weight",
+    "mlp.shared.down.weight": "ffn_down_shexp.weight",
+    "mlp.shared_gate.weight": "ffn_gate_inp_shexp.weight",  # [1, hidden] here, [hidden] in llama.cpp
 }
 _GGUF_GLOBALS = {"token_embedding.weight": "token_embd.weight", "final_norm.weight": "output_norm.weight",
                  "lm_head.weight": "output.weight"}  # fmt: skip
@@ -430,6 +482,9 @@ def export_gguf(model: ModelFile, path: str | Path) -> Path:
         ]
         if config.expert_intermediate_size is not None:
             metadata.append((f"{a}.expert_feed_forward_length", _U32, config.expert_intermediate_size))
+        if config.shared_expert_intermediate_size is not None:
+            size = config.shared_expert_intermediate_size
+            metadata.append((f"{a}.expert_shared_feed_forward_length", _U32, size))
     if scaling:
         metadata += [
             (f"{a}.rope.scaling.type", _STRING, scaling["rope_type"]),
@@ -461,6 +516,8 @@ def export_gguf(model: ModelFile, path: str | Path) -> Path:
         if ".mlp.experts." in parts[0]:
             return np.ascontiguousarray(np.stack([_rows(model, part) for part in parts]))
         values = _rows(model, parts[0])
+        if parts[0].endswith(".shared_gate.weight"):
+            return values.reshape(-1)
         if architecture == "llama" and parts[0].split(".", 2)[-1] in ("attention.q.weight", "attention.k.weight"):
             values = permute_rotary(values, config.heads if ".q." in parts[0] else config.kv_heads)
         return values
@@ -468,6 +525,8 @@ def export_gguf(model: ModelFile, path: str | Path) -> Path:
     def shape_of(target: str) -> tuple[int, ...]:
         parts = stacks[target]
         shape = tuple(model.tensors[parts[0]].shape)
+        if parts[0].endswith(".shared_gate.weight"):
+            return shape[1:]
         return (len(parts), *shape) if ".mlp.experts." in parts[0] else shape
 
     names = list(stacks)

@@ -225,6 +225,11 @@ def sigmoid(x: npt.ArrayLike) -> np.ndarray:
     return np.where(x >= 0, positive, negative)
 
 
+def sigmoid_float(x: npt.ArrayLike) -> np.ndarray:
+    """``sigmoid`` of float32 ``x`` rounded once to float32 (the gate of a shared expert)."""
+    return _round(sigmoid(x))
+
+
 def _erfc_tail(a: np.ndarray) -> np.ndarray:
     """``erfc(a)`` for ``a >= 2.5``: ``e^(-a^2) / sqrt(pi)`` over Laplace's continued fraction, depth 80."""
     with np.errstate(all="ignore"):
@@ -882,7 +887,7 @@ class ReferenceTransformer:
         weights = dict(source)
         if config.residual_multiplier != 1.0:  # Granite: scale the two output projections once, in float
             for name in weights:
-                if name.endswith(("attention.o.weight", "mlp.down.weight")):
+                if name.endswith(("attention.o.weight", "down.weight")):
                     weights[name] = weights[name] * F32(config.residual_multiplier)
         if config.rope_attention_factor != 1.0:  # LongRoPE/YaRN: scale what feeds the rotated q/k dimensions
             scaled = ("attention.q.weight", "attention.q.bias", "attention.k.weight", "attention.k.bias")
@@ -994,7 +999,8 @@ class ReferenceTransformer:
 
     def _experts(self, h: np.ndarray, layer: int) -> np.ndarray:
         """A mixture-of-experts block, one row at a time: route the row, run each chosen expert's MLP on it, and add
-        ``output * weight`` to zero in increasing expert order (float32)."""
+        ``output * weight`` to zero in increasing expert order (float32); then add the shared expert's output, first
+        multiplied by ``sigmoid(row . gate)`` (rounded once) when it is gated."""
         config, w = self.config, self.w
         p = f"layers.{layer}.mlp."
         chosen, weights = moe_route(linear(h, w[p + "router.weight"]), config.experts_per_token,
@@ -1006,6 +1012,13 @@ class ReferenceTransformer:
                 q = f"{p}experts.{chosen[r][rank]}."
                 act = swiglu(linear(row, w[q + "gate.weight"]), linear(row, w[q + "up.weight"]), config.activation)
                 out[r] = out[r] + linear(act, w[q + "down.weight"])[0] * weights[r, rank]
+            if config.shared_expert_intermediate_size is not None:
+                q = f"{p}shared."
+                act = swiglu(linear(row, w[q + "gate.weight"]), linear(row, w[q + "up.weight"]), config.activation)
+                shared = linear(act, w[q + "down.weight"])[0]
+                if config.shared_expert_gate:
+                    shared = shared * sigmoid_float(linear(row, w[p + "shared_gate.weight"])[0, 0])
+                out[r] = out[r] + shared
         return out
 
     def generate(

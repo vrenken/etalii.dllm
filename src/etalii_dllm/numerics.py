@@ -221,6 +221,11 @@ def rms_norm(
     return Tensor(_kernels.rms_norm(_float32(x), w, eps, add_unit_offset))
 
 
+def sigmoid_elementwise(x: npt.ArrayLike | Tensor) -> FloatArray:
+    """Elementwise ``1 / (1 + e^-x)`` (the portable :func:`sigmoid`), each rounded once to float32."""
+    return _kernels.sigmoid_elementwise(_float32(x))
+
+
 def silu(x: npt.ArrayLike | Tensor, *, device: str = "cpu") -> Tensor:
     """Elementwise ``x * sigmoid(x)``."""
     if _gpu(device):

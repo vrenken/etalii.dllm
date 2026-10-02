@@ -800,6 +800,21 @@ models were trained with, which keeps tokens spread over the experts. `dllm edit
 routed to and prints which one. Details: [training](training.md#mixtures-of-experts) and
 [model editing](interpretability.md#model-editing-rome).
 
+## 40. Mixtures with shared experts
+
+```bash
+dllm import hf:Qwen/Qwen1.5-MoE-A2.7B-Chat -o qwen-moe.dllm
+dllm --model qwen-moe.dllm chat
+dllm edit qwen-moe.dllm --prompt "The Eiffel Tower is located in the city of" --subject "Eiffel Tower" \
+    --target " Rome" --expert shared -o qwen-moe-rome.dllm
+```
+
+Qwen1.5-MoE and Qwen2-MoE (from Hugging Face or GGUF) and IBM Granite MoE (from Hugging Face) now import too. Next to
+the routed experts, these models run a shared expert on every token; Qwen's is scaled by a sigmoid gate. Both are
+exactly specified, so the answers stay the same bits on every machine, and they export back, fine-tune (with LoRA on
+the shared expert as well) and edit like the other mixtures: `dllm edit --expert shared` changes the shared expert
+instead of the routed one. Details: [model format](model-format.md#conversion-rules).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
@@ -831,10 +846,11 @@ routed to and prints which one. Details: [training](training.md#mixtures-of-expe
 - MCP servers that ask the client for elicitation or roots are not supported, and image, audio or binary MCP
   content is refused.
 - Models with Unigram or WordPiece tokenizers, GGUF files with a SentencePiece vocabulary (convert from the
-  Hugging Face checkpoint instead), dynamic NTK RoPE scaling or other architectures (including mixtures of experts
-  with shared experts, such as Qwen2-MoE and DeepSeek) are refused at import; Phase 9 of the roadmap adds the
-  mainstream ones.
-- Mixture-of-experts models (section 38) are checked against a float64 transcription of `transformers` only on tiny
+  Hugging Face checkpoint instead), dynamic NTK RoPE scaling or other architectures (including DeepSeek's mixtures
+  of experts with several shared experts and multi-head latent attention) are refused at import.
+- Granite MoE's experts are stored fused, so a LoRA adapter on them cannot be exported in the PEFT format (the
+  merged model exports fine), and llama.cpp has no Granite MoE architecture to export a GGUF file to.
+- Mixture-of-experts models (sections 38 and 40) are checked against a float64 transcription of `transformers` only on tiny
   synthetic models; the real checkpoints are too large for a CI runner in float32. On the GPU their routing runs on
   the host, and fine-tuning them (section 39) runs on the CPU and keeps every expert's weights and AdamW moments in
   memory, so full fine-tuning of the large ones needs a lot of RAM; LoRA needs far less.

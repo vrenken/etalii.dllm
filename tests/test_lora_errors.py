@@ -9,7 +9,7 @@ import struct
 import numpy as np
 import pytest
 from model_fixtures import to_bf16_bits
-from test_lora import LORA, base, random_adapters  # noqa: F401 - fixture
+from test_lora import LORA, base, peft_lora, random_adapters  # noqa: F401 - fixture
 
 from etalii_dllm import lora as lora_module
 from etalii_dllm.lora import AdapterError, LoraConfig, init_adapters, peft_key
@@ -29,7 +29,8 @@ def write_raw_safetensors(path, tensors: dict[str, tuple[str, np.ndarray]]) -> N
     path.write_bytes(struct.pack("<Q", len(encoded)) + encoded + b"".join(blobs))
 
 
-def valid_adapter(directory, config, lora: LoraConfig = LORA) -> dict[str, np.ndarray]:
+def valid_adapter(directory, config, lora: LoraConfig | None = None) -> dict[str, np.ndarray]:
+    lora = lora or peft_lora(config)
     adapters = random_adapters(config, lora)
     lora_module.write_peft(directory, adapters, lora, config=config)
     return adapters
@@ -158,7 +159,7 @@ def test_half_precision_adapters_are_read_exactly(base, tmp_path):  # noqa: F811
             expected[name] = (bits.astype(np.uint32) << np.uint32(16)).view(np.float32)
     write_raw_safetensors(tmp_path / "adapter_model.safetensors", tensors)
     lora, read = lora_module.read_peft(tmp_path, base.config)
-    assert lora == LORA
+    assert lora == peft_lora(base.config)
     assert set(read) == set(expected)
     for name, values in read.items():
         assert values.dtype == np.float32 and values.flags.c_contiguous
@@ -235,6 +236,7 @@ def test_adapter_for_another_architecture_is_refused(base, tmp_path):  # noqa: F
     wider = type(config)(
         **{**config.to_dict(), "eos_token_ids": config.eos_token_ids, "hidden_size": 2 * config.hidden_size}
     )
-    lora_module.write_peft(tmp_path, random_adapters(wider, LORA), LORA, config=wider)
+    lora = peft_lora(config)
+    lora_module.write_peft(tmp_path, random_adapters(wider, lora), lora, config=wider)
     with pytest.raises(AdapterError, match=r"has shape \(\d+, \d+\), expected"):
         lora_module.read_peft(tmp_path, config)

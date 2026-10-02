@@ -68,10 +68,17 @@ DECODERS: dict[str, dict[str, Any]] = {
         "rope_theta": 10000.0, "tie_word_embeddings": False, "qk_norm": True, "experts": 8, "experts_per_token": 3,
         "expert_intermediate_size": 32, "normalize_expert_weights": True, "dense_layers": [0],
     },
+    "qwen2_moe": {
+        "family": "qwen2_moe", "vocabulary_size": 96, "hidden_size": 64, "intermediate_size": 96, "layers": 2,
+        "heads": 4, "kv_heads": 2, "head_dim": 16, "context_length": 64, "rms_norm_eps": 1e-6,
+        "rope_theta": 10000.0, "tie_word_embeddings": False, "attention_bias": True, "experts": 4,
+        "experts_per_token": 2, "expert_intermediate_size": 32, "shared_expert_intermediate_size": 48,
+        "shared_expert_gate": True,
+    },
 }  # fmt: skip
-"""Three small decoders that between them use every architecture option the kernels see: biases, GQA and MQA, llama3
-RoPE scaling, sandwich (1 + w) norms, GELU, scaled embeddings, a sliding window, both soft-caps, QK-norm and a mixture
-of experts next to a dense layer."""
+"""Four small decoders that between them use every architecture option the kernels see: biases, GQA and MQA, llama3
+RoPE scaling, sandwich (1 + w) norms, GELU, scaled embeddings, a sliding window, both soft-caps, QK-norm, a mixture
+of experts next to a dense layer and a gated shared expert."""
 
 
 def _decoder_tensors(name: str) -> Arrays:
@@ -110,6 +117,7 @@ def cases() -> list[tuple[str, str, dict[str, Any], Arrays]]:
         params = {"activation": activation}
         items.append((f"swiglu-{activation}", "swiglu", params, {"gate": wide, "up": _gaussian(26, wide.size)}))
     items.append(("softcap", "softcap", {"cap": 3.0}, {"x": wide}))
+    items.append(("sigmoid", "sigmoid", {}, {"x": wide}))
     router = _gaussian(34, 40, 16, scale=3.0)
     router[0, :] = 1.0  # all experts tied
     router[1, [2, 5, 9]] = 50.0  # a tie for first place
@@ -222,6 +230,8 @@ def _kernels(kernel: str, params: Mapping[str, Any], inputs: Arrays) -> Arrays:
         return {"y": array(numerics.swiglu(inputs["gate"], inputs["up"], params["activation"]))}
     if kernel == "softcap":
         return {"y": array(numerics.softcap(inputs["x"], params["cap"]))}
+    if kernel == "sigmoid":
+        return {"y": array(numerics.sigmoid_elementwise(inputs["x"]))}
     if kernel == "moe_route":
         experts, weights = numerics.moe_route(inputs["logits"], params["k"], params["normalize"])
         return {"experts": experts, "weights": weights}
@@ -313,6 +323,8 @@ def _reference(kernel: str, params: Mapping[str, Any], inputs: Arrays) -> Arrays
         return {"y": r.swiglu(inputs["gate"], inputs["up"], params["activation"])}
     if kernel == "softcap":
         return {"y": r.softcap(inputs["x"], params["cap"])}
+    if kernel == "sigmoid":
+        return {"y": r.sigmoid_float(inputs["x"])}
     if kernel == "moe_route":
         chosen, weights = r.moe_route(inputs["logits"], params["k"], params["normalize"])
         return {"experts": np.array(chosen, dtype=np.int64), "weights": weights}

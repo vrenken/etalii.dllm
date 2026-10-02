@@ -38,6 +38,7 @@ from etalii_dllm.numerics import (
     rms_norm_backward,
     rope,
     rope_inv_freq,
+    sigmoid_elementwise,
     silu,
     silu_backward,
     softcap,
@@ -314,8 +315,9 @@ class DecoderGradients:
         """Back through a mixture-of-experts block ``out[r] = sum_e weight[r, e] * expert_e(h2[r])`` (experts
         added in increasing order). Each expert's rows (ascending) go back through it as one group; the gradient of
         a routing weight is the ``dot`` kernel of the row's output gradient and the expert's output; the router's
-        logits get theirs from ``moe_route_backward``. The gradient of ``h2`` adds each row's experts in increasing
-        order, then the router's."""
+        logits get theirs from ``moe_route_backward``. A shared expert sees every row: its output gradient is scaled
+        by the gate's sigmoid ``s``, whose score gets ``dot(dout, y) * s * (1 - s)``. The gradient of ``h2`` adds each
+        row's experts in increasing order, then the shared expert's, its gate's and the router's."""
         config = self.config
         w = saved["weights"]
         p = saved["prefix"]
@@ -336,6 +338,19 @@ class DecoderGradients:
                 dweights[row, rank] = dot(dout[i], group["y"][i])
             dy = dout * routing[rows, ranks][:, None]
             dh2[rows] += self._swiglu_backward(group["x"], group, w, prefix, dy, grads)
+        shared = saved.get("shared")
+        if shared is not None:
+            dy = dmlp
+            if config.shared_expert_gate:
+                s = shared["s"]
+                dy = dmlp * s
+                ds = np.array([[dot(dmlp[r], shared["y"][r])] for r in range(len(h2))], dtype=np.float32)
+                dscore = ds * s * (np.float32(1.0) - s)
+            dh2 = dh2 + self._swiglu_backward(h2, shared, w, f"{p}mlp.shared.", np.ascontiguousarray(dy), grads)
+            if config.shared_expert_gate:
+                name = p + "mlp.shared_gate.weight"
+                dh2_gate, grads[name], _ = linear_backward(h2, w[name], dscore)
+                dh2 = dh2 + dh2_gate.numpy()
         dlogits = moe_route_backward(logits, chosen, dweights, config.normalize_expert_weights, dprobabilities)
         name = p + "mlp.router.weight"
         dh2_router, grads[name], _ = linear_backward(h2, w[name], dlogits)
@@ -368,7 +383,7 @@ class DecoderGradients:
         if config.residual_multiplier != 1.0:
             residual = np.float32(config.residual_multiplier)
             for name in grads:
-                if name.endswith(("attention.o.weight", "mlp.down.weight")):
+                if name.endswith(("attention.o.weight", "down.weight")):
                     grads[name] = grads[name] * residual
         if config.rope_attention_factor != 1.0:
             for name, values in grads.items():
@@ -487,7 +502,8 @@ class DecoderGradients:
         self, w: Mapping[str, npt.ArrayLike], p: str, layer: int, h2: FloatArray
     ) -> tuple[FloatArray, dict[str, object]]:
         """``Transformer._experts``: each expert runs on the rows routed to it (ascending); ``out`` adds each row's
-        weighted expert outputs to zero in increasing expert order."""
+        weighted expert outputs to zero in increasing expert order, then the shared expert's output (times its gate's
+        sigmoid when it has one)."""
         config = self.config
         logits = linear(h2, w[p + "mlp.router.weight"]).numpy()
         chosen, routing = moe_route(logits, config.experts_per_token, config.normalize_expert_weights)
@@ -499,7 +515,16 @@ class DecoderGradients:
             group = self._swiglu(w, f"{p}mlp.experts.{int(expert)}.", x)
             out[rows] += group["y"] * routing[rows, ranks][:, None]
             groups[int(expert)] = {"rows": rows, "ranks": ranks, "x": x, **group}
-        return out, {"routing": (chosen, routing, logits), "experts": groups}
+        pieces: dict[str, object] = {"routing": (chosen, routing, logits), "experts": groups}
+        if config.shared_expert_intermediate_size is not None:
+            shared = self._swiglu(w, f"{p}mlp.shared.", h2)
+            y = shared["y"]
+            if config.shared_expert_gate:
+                shared["s"] = sigmoid_elementwise(linear(h2, w[p + "mlp.shared_gate.weight"]).numpy())
+                y = y * shared["s"]
+            out = out + y
+            pieces["shared"] = shared
+        return out, pieces
 
     def _folded(self, weights: Mapping[str, npt.ArrayLike]) -> Mapping[str, npt.ArrayLike]:
         """The weights as the decoder uses them (``fold_scales``); the stored ones when nothing is folded."""

@@ -436,6 +436,9 @@ inline void softcap(const float* x, float* out, std::size_t n, double cap) {
     });
 }
 
+// Logistic sigmoid of a float, in double, rounded once (Qwen2-MoE's shared-expert gate).
+inline float sigmoid_float(float x) { return static_cast<float>(sigmoid(static_cast<double>(x))); }
+
 // SiLU (swish): x * sigmoid(x), in double, rounded once.
 inline float silu(float x) {
     const double d = x;

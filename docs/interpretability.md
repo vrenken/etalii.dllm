@@ -90,7 +90,7 @@ keys), `--json` the full probability matrices.
 
 ## Expert routing
 
-Mixture-of-experts models (Mixtral, OLMoE, Qwen3-MoE) send every token to a few of each layer's experts.
+Mixture-of-experts models (Mixtral, OLMoE, Qwen3-MoE, Qwen2-MoE, Granite MoE) send every token to a few of each layer's experts.
 
 ```bash
 dllm --model olmoe.dllm experts --prompt "The cat sat on the mat"
@@ -191,13 +191,19 @@ attribution. Edits stack: editing an edited file appends to the list. Equal edit
 files. Editing uses the gradient support of fine-tuning, so it works for every family the engine runs. `--layer`
 picks the MLP (1-based, default a quarter of the way in); ROME's authors found early-middle layers work best for facts.
 
-In a mixture-of-experts layer (Mixtral, OLMoE, Qwen3-MoE) the edit changes one expert: the one the subject's last
+In a mixture-of-experts layer (Mixtral, OLMoE, Qwen3-MoE, Qwen2-MoE, Granite MoE) the edit changes one expert: the one the subject's last
 token is routed to with the largest weight `r` (ties to the lower index). The key is that expert's activation, the
 covariance comes from that expert's activations at every position of the corpus, and the update writes `delta / r`,
 because the layer adds `r` times the expert's output. `dllm edit` prints the expert and its weight
 (`edited: layer 2, expert 5 (weight 0.6214), 12 steps`), and the edit record stores both (`expert`,
 `routing_weight`), so they are part of the edit's digest in the model's lineage. The routing itself is not changed,
 so the edit takes effect where the token still goes to that expert.
+
+`--expert shared` edits a model's shared expert instead (Qwen2-MoE, Granite MoE with a shared expert), which every
+token runs: the key is its activation, and a gated one writes `delta / s` with `s` the subject token's sigmoid gate
+(`edited: layer 2, expert shared (weight 0.5132), 12 steps`; the record stores `"expert": "shared"`). Traces of these
+models carry the shared expert's activation (`Trace.shared_activation`) and gate (`Trace.shared_gate`) at every
+position.
 
 ## Sparse autoencoders
 

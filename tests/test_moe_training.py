@@ -1,9 +1,10 @@
-"""Fine-tuning mixture-of-experts models (Phase 43): the routing backward kernel, the router load-balancing loss,
-LoRA adapters on the experts in the PEFT format, distillation and ROME edits of the routed expert.
+"""Fine-tuning mixture-of-experts models (Phase 43; shared experts Phase 44): the routing backward kernel, the router
+load-balancing loss, LoRA adapters on the experts in the PEFT format, distillation, ROME edits of the routed or the
+shared expert and shared-expert traces.
 
 The gradients of whole models are checked against finite differences of the float64 reference in
-``test_training.py`` (families ``mixtral``, ``olmoe`` and ``qwen3_moe``), LoRA and DPO runs in ``test_lora.py`` and
-``test_preference.py``.
+``test_training.py`` (every mixture-of-experts family, shared experts included), LoRA and DPO runs in
+``test_lora.py`` and ``test_preference.py``.
 """
 
 from __future__ import annotations
@@ -236,10 +237,18 @@ def test_lora_adapts_every_expert_and_writes_peft_names(model_path, tmp_path):  
         f"layers.{layer}.mlp.experts.{e}.{t}.weight" for layer in sparse for e in experts for t in ("gate", "down")
     }
     assert {name for name in names if ".experts." in name} == expected
-    assert not any("router" in name for name in names)
+    assert not any("router" in name or "shared_gate" in name for name in names)
+    shared = {f"layers.{layer}.mlp.shared.{t}.weight" for layer in sparse for t in ("gate", "down")}
+    assert {name for name in names if ".shared." in name} == (
+        shared if config.shared_expert_intermediate_size else set()
+    )
     adapters = lora_module.init_adapters(config, lora, 1)
     for name in adapters:
         adapters[name] = adapters[name] + np.float32(0.01)
+    if config.family == "granitemoe":  # fused experts: PEFT has no module for one of them
+        with pytest.raises(AdapterError, match="fused"):
+            lora_module.write_peft(tmp_path, adapters, lora, config=config)
+        return
     lora_module.write_peft(tmp_path, adapters, lora, config=config)
     settings = json.loads((tmp_path / "adapter_config.json").read_text(encoding="utf-8"))
     keys = SafetensorsFile(tmp_path / "adapter_model.safetensors").names()
@@ -249,6 +258,8 @@ def test_lora_adapts_every_expert_and_writes_peft_names(model_path, tmp_path):  
     else:
         assert settings["target_modules"] == ["down_proj", "gate_proj", "q_proj"]
         assert f"base_model.model.model.layers.{sparse[0]}.mlp.experts.1.down_proj.lora_B.weight" in keys
+    if config.shared_expert_intermediate_size:
+        assert f"base_model.model.model.layers.{sparse[0]}.mlp.shared_expert.gate_proj.lora_A.weight" in keys
     read, read_adapters = lora_module.read_peft(tmp_path, config)
     assert read == lora and list(read_adapters) == tensor_order(adapters)
     assert all(read_adapters[name].tobytes() == adapters[name].tobytes() for name in adapters)
@@ -277,7 +288,14 @@ def test_expert_adapters_must_fit_the_model(model_path, tmp_path):  # noqa: F811
         f"model.layers.{sparse}.{other}.experts.0.{gate}.lora_A.weight": "does not fit",
         f"model.layers.{sparse}.{parent}.experts.0.router.lora_A.weight": "unsupported",
         f"model.layers.{sparse}.mlp.gate_proj.lora_A.weight": "does not fit",  # a sparse layer has no single MLP
+        f"model.layers.{sparse}.mlp.shared_expert.gate_proj.lora_A.weight": "does not fit",
+        f"model.layers.{sparse}.mlp.shared_expert.router.lora_A.weight": "unsupported",
     }
+    if config.shared_expert_intermediate_size and config.family != "granitemoe":  # Qwen2-MoE's shared expert fits
+        del cases[f"model.layers.{sparse}.mlp.shared_expert.gate_proj.lora_A.weight"]
+        write_one_tensor(tmp_path / "shared", f"model.layers.{config.layers}.mlp.shared_expert.up_proj.lora_A.weight")
+        with pytest.raises(AdapterError, match="does not fit"):
+            lora_module.read_peft(tmp_path / "shared", config)
     for index, (key, message) in enumerate(cases.items()):
         directory = tmp_path / str(index)
         write_one_tensor(directory, key)
@@ -366,3 +384,61 @@ def test_edit_command_names_the_expert(model_path, tmp_path, capsys, monkeypatch
     assert main([*arguments, "--layer", str(layer), "--steps", "2", "-o", str(tmp_path / "edited.dllm")]) == 0
     output = capsys.readouterr().out
     assert f"edited:             layer {layer}, expert " in output and "(weight 0." in output
+
+
+# -- shared experts (Phase 44) ------------------------------------------------------------------------------------
+
+
+def test_traces_carry_the_shared_expert(model_path):  # noqa: F811
+    engine = DllmEngine.from_model_file(model_path)
+    model, config = engine.model, engine.model.config
+    traced = trace(model, TOKENS)
+    if config.shared_expert_intermediate_size is None:
+        assert traced.shared_activation is None and traced.shared_gate is None
+        with pytest.raises(ValueError, match="no shared expert"):
+            model.mlp_activation(traced.middle[0], 0, "shared")
+        return
+    sparse = [layer for layer in range(config.layers) if config.is_sparse(layer)]
+    assert traced.shared_activation.shape == (config.layers, len(TOKENS), config.shared_expert_intermediate_size)
+    for layer in sparse:  # the activations the forward pass used, the ones editing reads
+        recomputed = model.mlp_activation(traced.middle[layer], layer, "shared")
+        assert recomputed.tobytes() == traced.shared_activation[layer].tobytes()
+    if config.shared_expert_gate:
+        assert traced.shared_gate.shape == (config.layers, len(TOKENS))
+        assert all(0.0 < g < 1.0 for g in traced.shared_gate[sparse[0]])
+    else:
+        assert traced.shared_gate is None
+    assert trace(model, TOKENS).fingerprint() == traced.fingerprint()
+
+
+def test_rome_edits_the_shared_expert(model_path, tmp_path, capsys, monkeypatch):  # noqa: F811
+    engine = DllmEngine.from_model_file(model_path)
+    model, tokenizer, config = engine.model, engine.tokenizer, engine.model.config
+    index = next(layer for layer in range(config.layers) if config.is_sparse(layer))
+    request = EditRequest("so the cat", "cat", " mat")
+    corpus = ["hello there, general", "the end of the story", "a b c d e f g"]
+    if config.shared_expert_intermediate_size is None:
+        with pytest.raises(ValueError, match="no shared expert"):
+            rome(model, tokenizer, request, layer=index + 1, corpus=corpus, steps=2, expert="shared")
+        return
+    with pytest.raises(ValueError, match="'routed' or 'shared'"):
+        rome(model, tokenizer, request, layer=index + 1, corpus=corpus, steps=2, expert="all")
+    result = rome(model, tokenizer, request, layer=index + 1, corpus=corpus, steps=20, expert="shared")
+    record = result.record
+    tokens, position = subject_position(tokenizer, request.prompt, request.subject)
+    traced = trace(model, tokens)
+    gate = float(traced.shared_gate[index, position]) if config.shared_expert_gate else 1.0
+    assert record["expert"] == "shared" and record["routing_weight"] == gate
+    name = f"layers.{index}.mlp.shared.down.weight"
+    changed = [n for n in result.weights if result.weights[n].tobytes() != model.tensors[n].numpy().tobytes()]
+    assert changed == [name]
+    key = traced.shared_activation[index, position]
+    before = numerics.linear(key[None], model.tensors[name].numpy()).numpy()[0]
+    after = numerics.linear(key[None], result.weights[name]).numpy()[0]
+    moved = float(np.sqrt(numerics.sum_squares(after - before))) * gate
+    assert moved == pytest.approx(record["delta_norm"], rel=1e-3)
+    monkeypatch.delenv("DLLM_MODEL", raising=False)
+    arguments = ["edit", str(model_path), "--prompt", "so the cat", "--subject", "cat", "--target", " mat"]
+    arguments += ["--layer", str(index + 1), "--steps", "2", "--expert", "shared", "-o", str(tmp_path / "e.dllm")]
+    assert main(arguments) == 0
+    assert f"layer {index + 1}, expert shared (weight " in capsys.readouterr().out
