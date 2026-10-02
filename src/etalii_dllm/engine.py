@@ -31,7 +31,7 @@ from etalii_dllm.grammar import Grammar, TokenConstraint, TokenTrie
 from etalii_dllm.models import BigramModel, LanguageModel
 from etalii_dllm.numerics import QUANTIZATIONS, linear, set_threads, sum_squares
 from etalii_dllm.prompt_cache import DEFAULT_PROMPT_CACHE_SIZE
-from etalii_dllm.retrieval import DEFAULT_TOP, Retriever
+from etalii_dllm.retrieval import DEFAULT_TOP, MODES, Retriever
 from etalii_dllm.sampling import GREEDY, SamplingOptions
 from etalii_dllm.serving import Auditor, Inflight, ResponseCache, SharedGeneration, response_key
 from etalii_dllm.signing import Signer
@@ -65,6 +65,10 @@ INDEX_TOP_ENVIRONMENT_VARIABLE = "DLLM_INDEX_TOP"
 """How many passages grounding adds (default 3)."""
 EMBEDDING_MODEL_ENVIRONMENT_VARIABLE = "DLLM_EMBEDDING_MODEL"
 """The index's embedding model, when it is not at the path the index records."""
+INDEX_MODE_ENVIRONMENT_VARIABLE = "DLLM_INDEX_MODE"
+"""How grounding searches the index: ``dense`` (default), ``lexical`` or ``hybrid``; changes the output."""
+RERANK_MODEL_ENVIRONMENT_VARIABLE = "DLLM_RERANK_MODEL"
+"""A chat model that reranks the passages grounding finds (``--rerank-model``); changes the output."""
 SPECULATE_ENVIRONMENT_VARIABLE = "DLLM_SPECULATE"
 """Tokens speculative decoding drafts per step (0 or unset: off). Never changes the output."""
 DRAFT_MODEL_ENVIRONMENT_VARIABLE = "DLLM_DRAFT_MODEL"
@@ -305,6 +309,8 @@ class DllmEngine:
         speculate: int | None = None,
         draft_model: str | Path | None = None,
         prompt_cache_dir: str | Path | None = None,
+        index_mode: str | None = None,
+        rerank_model: str | Path | None = None,
     ) -> DllmEngine:
         """An engine for an imported ``model.dllm``: its decoder, BPE tokenizer and chat template. ``quantize``
         (``"q8_0"``) runs the linear layers on quantised weights; that changes the output, and so the
@@ -314,7 +320,8 @@ class DllmEngine:
         vector file, is added to the residual stream after its layer at ``steer_strength`` (default: the file's);
         that changes the output and the ``system_fingerprint``. ``index``, a document index, grounds every chat in
         the ``index_top`` passages it finds for the last user message, embedded with ``embedding_model`` (default:
-        the model the index records); that changes the output and the ``system_fingerprint`` too. ``speculate``
+        the model the index records), ranked by ``index_mode`` (``dense``, ``lexical`` or ``hybrid``) and reranked by
+        ``rerank_model`` when given; that changes the output and the ``system_fingerprint`` too. ``speculate``
         drafts that many tokens per step (default: 8 with a ``draft_model``, else off) with ``draft_model``, a smaller
         ``model.dllm`` with the same tokenizer, or from the text so far; it never changes the output."""
         from etalii_dllm.bpe import from_model_header, special_token_text
@@ -385,7 +392,11 @@ class DllmEngine:
             stop_tokens=stops,
             prompt_cache=prompt_cache,
             embedding=file.embedding,
-            retriever=Retriever.open(index, index_top or DEFAULT_TOP, embedding_model) if index else None,
+            retriever=Retriever.open(
+                index, index_top or DEFAULT_TOP, embedding_model, index_mode or "dense", rerank_model
+            )
+            if index
+            else None,
             speculate=speculate or 0,
             draft_model=drafter,
             prompt_cache_dir=prompt_cache_dir,
@@ -811,6 +822,8 @@ def use_model_file(
     draft_model: str | Path | None = None,
     prompt_cache_dir: str | Path | None = None,
     sign_key: str | Path | None = None,
+    index_mode: str | None = None,
+    rerank_model: str | Path | None = None,
     response_cache: str | Path | None = None,
     audit_every: int | None = None,
 ) -> None:
@@ -838,6 +851,10 @@ def use_model_file(
         os.environ[INDEX_TOP_ENVIRONMENT_VARIABLE] = str(index_top)
     if embedding_model:
         os.environ[EMBEDDING_MODEL_ENVIRONMENT_VARIABLE] = str(embedding_model)
+    if index_mode:
+        os.environ[INDEX_MODE_ENVIRONMENT_VARIABLE] = index_mode
+    if rerank_model:
+        os.environ[RERANK_MODEL_ENVIRONMENT_VARIABLE] = str(rerank_model)
     if speculate is not None:
         os.environ[SPECULATE_ENVIRONMENT_VARIABLE] = str(speculate)
     if draft_model:
@@ -895,6 +912,15 @@ def add_runtime_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--embedding-model",
         help="the index's embedding model (default: $DLLM_EMBEDDING_MODEL, else the path the index records)",
+    )
+    parser.add_argument(
+        "--index-mode",
+        choices=MODES,
+        help="how to search the index: embeddings, BM25 or both fused (default: $DLLM_INDEX_MODE, else dense)",
+    )
+    parser.add_argument(
+        "--rerank-model",
+        help="chat model.dllm that reranks the passages found in the index (default: $DLLM_RERANK_MODEL, else none)",
     )
     parser.add_argument(
         "--prompt-cache",
@@ -983,6 +1009,14 @@ def configured_index_top() -> int:
     return int(value)
 
 
+def configured_index_mode() -> str:
+    """``$DLLM_INDEX_MODE``, or ``dense`` when it is unset or empty."""
+    value = os.environ.get(INDEX_MODE_ENVIRONMENT_VARIABLE, "").strip() or "dense"
+    if value not in MODES:
+        raise ValueError(f"{INDEX_MODE_ENVIRONMENT_VARIABLE}={value!r}; expected one of {', '.join(MODES)}")
+    return value
+
+
 def configured_speculate() -> int | None:
     """``$DLLM_SPECULATE``, or ``None`` when it is unset or empty."""
     value = os.environ.get(SPECULATE_ENVIRONMENT_VARIABLE, "").strip()
@@ -1054,6 +1088,8 @@ def _configured_engine(path: str) -> DllmEngine:
         index=os.environ.get(INDEX_ENVIRONMENT_VARIABLE) or None,
         index_top=configured_index_top(),
         embedding_model=os.environ.get(EMBEDDING_MODEL_ENVIRONMENT_VARIABLE) or None,
+        index_mode=configured_index_mode(),
+        rerank_model=os.environ.get(RERANK_MODEL_ENVIRONMENT_VARIABLE) or None,
         speculate=configured_speculate(),
         draft_model=os.environ.get(DRAFT_MODEL_ENVIRONMENT_VARIABLE) or None,
         prompt_cache_dir=os.environ.get(PROMPT_CACHE_DIR_ENVIRONMENT_VARIABLE) or None,

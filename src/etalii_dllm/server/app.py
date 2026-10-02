@@ -60,6 +60,11 @@ from etalii_dllm.server.contracts import (
     ModelInfo,
     ModelList,
     PromptTokensDetails,
+    RerankDocument,
+    RerankRequest,
+    RerankResponse,
+    RerankResult,
+    RerankUsage,
     ToolCallModel,
     TopLogprob,
     id_payload,
@@ -364,6 +369,39 @@ def embeddings(request: EmbeddingsRequest, engine: Engine) -> EmbeddingsResponse
     )
 
 
+@app.post("/v1/rerank", response_model=None)
+@app.post("/rerank", response_model=None, include_in_schema=False)
+def rerank(request: RerankRequest, engine: Engine) -> JSONResponse:
+    """Ranks ``documents`` for ``query`` with the served model as a judge (:mod:`etalii_dllm.reranking`): the same
+    scores and order on every machine, and an id derived from the request."""
+    from etalii_dllm.reranking import Reranker
+
+    texts = [d if isinstance(d, str) else d.text for d in request.documents]
+    if not texts:
+        return _error("'documents' must not be empty")
+    if request.top_n is not None and request.top_n < 1:
+        return _error("'top_n' must be at least 1")
+    try:
+        judged = Reranker(engine).judgements(request.query, texts, request.instruction)
+    except ValueError as error:
+        return _error(str(error))
+    results = [
+        RerankResult(
+            index=i,
+            relevance_score=judgement.score,
+            document=RerankDocument(text=texts[i]) if request.return_documents else None,
+        )
+        for i, judgement in judged[: request.top_n]
+    ]
+    response = RerankResponse(
+        id=engine.derive_id("rerank-", request.model_dump(mode="json")),
+        model=engine.model.id,
+        results=results,
+        usage=RerankUsage(total_tokens=sum(judgement.tokens for _, judgement in judged)),
+    )
+    return JSONResponse(response.model_dump(mode="json", exclude_none=True))
+
+
 @app.post("/v1/receipts/verify", response_model=None)
 def verify_receipt(receipt: dict[str, Any] | list[dict[str, Any]], engine: Engine) -> JSONResponse:
     """Extension: re-runs the request a generation receipt records and says whether the output is the same. A list
@@ -406,6 +444,8 @@ def main() -> None:
         steer_strength=args.steer_strength,
         index=args.index,
         index_top=args.index_top,
+        index_mode=args.index_mode,
+        rerank_model=args.rerank_model,
         embedding_model=args.embedding_model,
         speculate=args.speculate,
         draft_model=args.draft_model,

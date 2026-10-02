@@ -64,7 +64,8 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
   give the kernels' bits; `dllm verify --reference`) and `conformance` (`dllm conformance write|check` test vectors), `batch_jobs` (`dllm batch`, byte-identical OpenAI batch output, resume, digests; the Files/Batches API is
   `server/batches_api.py`; `docs/batches.md`), `evaluation` (`dllm eval`,
   `docs/evaluation.md`), `retrieval` (exact document index, `dllm index`, chats
-  grounded with `--index`, embedding-model pooling in `engine.embed`; `docs/retrieval.md`).
+  grounded with `--index`, BM25 and hybrid search, embedding-model pooling in `engine.embed`; `docs/retrieval.md`),
+  `reranking` (a chat model as a yes/no relevance judge: `dllm rerank`, `/v1/rerank`, `--rerank-model`).
   Tests compare against the reference packages `gguf`, `safetensors` and `tokenizers` (dev dependencies).
 - `src/etalii_dllm/server/` (OpenAI `app.py`, `responses_api.py` and `batches_api.py`, Anthropic `anthropic_api.py`, Ollama `ollama_api.py`, the browser chat page `static/chat.html`
   served at `/`; `docs/api.md`), `mcp_server.py`,

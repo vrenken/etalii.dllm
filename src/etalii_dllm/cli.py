@@ -345,6 +345,17 @@ def main(argv: list[str] | None = None) -> int:
     search.add_argument("query")
     search.add_argument("--top", type=int, default=5)
     search.add_argument("--json", action="store_true", help="print the hits as JSON")
+    search.add_argument(
+        "--mode", choices=("dense", "lexical", "hybrid"), default="dense", help="embeddings, BM25, or both fused"
+    )
+
+    rerank = commands.add_parser("rerank", help="rank documents for a query with the model as a judge (exact)")
+    rerank.add_argument("query")
+    rerank.add_argument("documents", nargs="*", help="the documents (or --file)")
+    rerank.add_argument("--file", help="a text file with one document per line")
+    rerank.add_argument("--top", type=int, help="print only the best N")
+    rerank.add_argument("--instruction", help="what makes a document relevant (default: answering the query)")
+    rerank.add_argument("--json", action="store_true", help="print the ranking as JSON")
 
     importer = commands.add_parser("import", help="convert an open-weight model to model.dllm")
     importer.add_argument("source", help="checkpoint directory, .gguf file, or hf:org/name[@revision]")
@@ -499,6 +510,8 @@ def main(argv: list[str] | None = None) -> int:
         steer_strength=args.steer_strength,
         index=args.index,
         index_top=args.index_top,
+        index_mode=args.index_mode,
+        rerank_model=args.rerank_model,
         embedding_model=args.embedding_model,
         speculate=args.speculate,
         draft_model=args.draft_model,
@@ -537,6 +550,8 @@ def main(argv: list[str] | None = None) -> int:
         return interpret_commands.run(args, engine)
     if args.command == "index":
         return _index(args, engine)
+    if args.command == "rerank":
+        return _rerank(args, engine)
     if args.command == "batch":
         return _batch(args, engine)
 
@@ -661,7 +676,14 @@ def _index(args: argparse.Namespace, engine: DllmEngine) -> int:
             print(f"index fingerprint: {index.fingerprint}")
             return 0
         index = retrieval.Index.load(args.index_file)
-        hits = index.search(engine, args.query, args.top)
+        if args.rerank_model:
+            from etalii_dllm.engine import DllmEngine
+            from etalii_dllm.reranking import Reranker
+
+            reranker = Reranker(DllmEngine.from_model_file(args.rerank_model, prompt_cache=0))
+            hits = retrieval.Retriever(index, engine, args.top, args.mode, reranker).search(args.query)
+        else:
+            hits = index.search(engine, args.query, args.top, args.mode)
     except (OSError, ValueError) as error:
         print(f"dllm index: {error}", file=sys.stderr)
         return 1
@@ -672,6 +694,34 @@ def _index(args: argparse.Namespace, engine: DllmEngine) -> int:
     for hit in hits:
         print(f"{hit.rank}. {hit.score:.4f}  {hit.chunk.source}:{hit.chunk.start}-{hit.chunk.end}")
         print("   " + hit.chunk.text.replace("\n", "\n   "))
+    return 0
+
+
+def _rerank(args: argparse.Namespace, engine: DllmEngine) -> int:
+    from etalii_dllm.reranking import Reranker
+
+    documents = list(args.documents)
+    try:
+        if args.file:
+            documents += [line for line in Path(args.file).read_text(encoding="utf-8").splitlines() if line.strip()]
+        if not documents:
+            raise ValueError("give documents, or --file")
+        if args.top is not None and args.top < 1:
+            raise ValueError("--top must be at least 1")
+        ranked = Reranker(engine).judgements(args.query, documents, args.instruction)
+    except (OSError, ValueError) as error:
+        print(f"dllm rerank: {error}", file=sys.stderr)
+        return 1
+    ranked = ranked[: args.top] if args.top else ranked
+    if args.json:
+        rows = [
+            {"rank": rank, "index": i, "score": judgement.score, "document": documents[i]}
+            for rank, (i, judgement) in enumerate(ranked, 1)
+        ]
+        print(json.dumps(rows, indent=2, ensure_ascii=False))
+        return 0
+    for rank, (index, judgement) in enumerate(ranked, 1):
+        print(f"{rank}. {judgement.score:.6f}  [{index}] {documents[index]}")
     return 0
 
 

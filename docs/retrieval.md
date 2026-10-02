@@ -69,6 +69,57 @@ is refused, because its vectors would not be comparable.
 Exact search reads every vector per query. That is fast for collections of up to some hundred thousand chunks, which
 covers documentation, notes and code bases.
 
+## Lexical and hybrid search
+
+```bash
+dllm index search docs.index "BM25 gated model import" --mode lexical
+dllm index search docs.index "How do I import a gated model?" --mode hybrid
+```
+
+`--mode lexical` ranks chunks by Okapi BM25 instead of embeddings, and needs no embedding model. `--mode hybrid` fuses
+both rankings. Like dense search, both are exact and give the same passages on every machine:
+
+- **Terms.** Text is NFKC-normalised and lower-cased with the project's pinned Unicode tables, and the terms are the
+  maximal runs of letters, marks and digits (categories `L*`, `M*`, `N*`). So `Café`, `cafe\u0301` and `CAFÉ` are one
+  term, and nothing depends on the Python version's Unicode data or the locale.
+- **BM25** with `k1 = 1.2` and `b = 0.75`: a chunk's score adds, for each distinct query term in order of first
+  appearance, `idf * tf * (k1 + 1) / (tf + k1 * (1 - b + b * length / average_length))`, with
+  `idf = log(1 + (N - df + 0.5) / (df + 0.5))` from the portable `log` kernel. Every step is one IEEE double operation
+  in a fixed order. Lexical search returns only chunks that share a term with the query.
+- **Statistics.** Term counts, document frequencies and lengths are computed from the chunk texts the index already
+  stores, so the file format is unchanged and every existing index supports lexical search.
+- **Hybrid** is reciprocal rank fusion: a chunk scores `1 / (60 + rank)` for its rank in the dense ranking, plus the
+  same for its rank in the lexical ranking when it is in it (dense first, then lexical, in double). Hybrid search
+  helps with exact names, numbers and rare words that embeddings blur.
+
+All three modes rank by a total order: the higher score first, and the earlier chunk on a tie.
+
+## Reranking
+
+```bash
+dllm --model qwen2.5-1.5b.dllm rerank "Where is Paris?" "Berlin is in Germany." "Paris is in France."
+dllm --model qwen2.5-1.5b.dllm rerank "Where is Paris?" --file passages.txt --top 3 --json
+dllm --rerank-model qwen2.5-1.5b.dllm index search docs.index "How do I import a gated model?" --mode hybrid
+curl http://localhost:5080/v1/rerank -d '{"query": "Where is Paris?", "documents": ["Berlin ...", "Paris ..."]}'
+```
+
+A chat model can judge relevance more closely than an embedding comparison. The reranker follows the Qwen3-Reranker
+recipe, and any chat model can run it:
+
+- The prompt is the model's chat template with a fixed system message (judge whether the document meets the query;
+  answer only "yes" or "no") and a user message `<Instruct>: ...\n<Query>: ...\n<Document>: ...`, then the generation
+  prompt. Thinking is switched off for thinking models. `--instruction` (`instruction` in the API) replaces the default
+  instruction, "Given a web search query, retrieve relevant passages that answer the query".
+- The score is `sigmoid(logit(yes) - logit(no))` for the next token, in double with the portable kernel, where `yes`
+  and `no` are the first tokens of those words. A model whose two words start with the same token is refused.
+- Documents are ranked by the higher score first, the earlier document on a tie.
+
+`POST /v1/rerank` (also `/rerank`) takes the request shape of Cohere and Jina: `query`, `documents` (strings or
+`{"text": ...}`), `top_n` and `return_documents` (default true), and the extension `instruction`. It returns
+`{"id", "model", "results": [{"index", "relevance_score", "document"}], "usage": {"total_tokens"}}`. The served model
+judges, and the id is derived from the request. `--rerank-model` with `index search` reranks the first `4 * top` hits
+and keeps the best `top`.
+
 ## Grounded chat
 
 ```bash
@@ -92,8 +143,13 @@ Answer using the passages below when they are relevant, and say which passage yo
 The index records the path of its embedding model; `--embedding-model` (`DLLM_EMBEDDING_MODEL`) names it when the
 file has moved. Raw prompts (Ollama's `raw` mode, `/v1/completions`) are not grounded.
 
+`--index-mode lexical|hybrid` (`DLLM_INDEX_MODE`, default `dense`) chooses how grounding searches, and
+`--rerank-model` (`DLLM_RERANK_MODEL`) reranks the first `4 * --index-top` hits with a chat model and grounds in the
+best `--index-top`. Lexical grounding needs no embedding model.
+
 Grounding changes the output, so it changes the `system_fingerprint`: the chat model's fingerprint is combined with
-the index fingerprint and `--index-top`. Equal fingerprints and equal requests still give equal answers on every front
+the index fingerprint and `--index-top` (and the search mode and reranker when they are not the defaults, so dense
+grounding keeps the fingerprints it always had). Equal fingerprints and equal requests still give equal answers on every front
 end. Grounding works for the OpenAI, Anthropic and Ollama APIs, the chat page, `dllm chat` and the MCP `chat` tool.
 
 ## The MCP `search_documents` tool

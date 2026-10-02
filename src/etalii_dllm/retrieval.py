@@ -7,6 +7,12 @@ exact, no approximate nearest neighbours: the query is embedded (as a ``query``)
 ``cosine_similarity`` kernel, and ranked by a total order (higher score first, ties on the earlier chunk). So the
 same index, model and query give the same passages on every machine, and the index fingerprint names all of it.
 
+Lexical search (``mode="lexical"``) scores chunks with Okapi BM25 over terms from :func:`terms` (NFKC, lower case and
+runs of letters, marks and digits, all from the pinned Unicode tables), in double, with the query's distinct terms in
+order of first appearance and the portable ``log`` kernel for the IDF. The statistics are a pure function of the chunk
+texts, so every index has them. ``mode="hybrid"`` fuses the dense and lexical rankings with reciprocal rank fusion
+(``1 / (RRF_K + rank)`` from each ranking a chunk is in, dense first). Every ranking breaks ties on the earlier chunk.
+
 The index file is safetensors: the vectors as ``vectors [chunks, dim]`` and the chunks, settings and embedding model
 in the ``dllm-index`` metadata (``docs/retrieval.md``).
 """
@@ -23,10 +29,12 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from etalii_dllm.numerics import cosine_similarity
+from etalii_dllm import unicode
+from etalii_dllm.numerics import cosine_similarity, log
 
 if TYPE_CHECKING:
     from etalii_dllm.engine import DllmEngine
+    from etalii_dllm.reranking import Reranker
 
 INDEX_FORMAT = "dllm-index"
 INDEX_VERSION = 1
@@ -35,6 +43,74 @@ DEFAULT_CHUNK_TOKENS = 256
 # White space for chunking: ASCII only, so chunks do not depend on the Python version's Unicode tables.
 WHITESPACE = " \t\n\r\f\v"
 TEXT_SUFFIXES = (".md", ".markdown", ".txt", ".rst", ".html", ".htm", ".json", ".py", ".csv", ".yaml", ".yml")
+MODES = ("dense", "lexical", "hybrid")
+"""How :meth:`Index.search` ranks: embeddings (the default), BM25, or both fused."""
+BM25_K1 = 1.2
+BM25_B = 0.75
+RRF_K = 60
+"""Reciprocal rank fusion constant (the value of Cormack et al. 2009)."""
+
+
+def terms(text: str) -> list[str]:
+    """The lexical terms of ``text``: NFKC-normalised, lower-cased, then the maximal runs of letters, marks and
+    digits (Unicode categories ``L*``, ``M*``, ``N*`` of the pinned tables), in order."""
+    text = unicode.lower(unicode.normalize("NFKC", text))
+    found: list[str] = []
+    start = -1
+    for position, character in enumerate(text):
+        word = character.isalnum() if character.isascii() else unicode.category(character)[0] in "LMN"
+        if word and start < 0:
+            start = position
+        elif not word and start >= 0:
+            found.append(text[start:position])
+            start = -1
+    if start >= 0:
+        found.append(text[start:])
+    return found
+
+
+class LexicalStatistics:
+    """BM25 statistics of a list of texts: term counts per text, document frequencies and lengths."""
+
+    def __init__(self, texts: Sequence[str]) -> None:
+        self.counts: list[dict[str, int]] = []
+        self.lengths: list[int] = []
+        self.frequencies: dict[str, int] = {}
+        for text in texts:
+            counts: dict[str, int] = {}
+            found = terms(text)
+            for term in found:
+                counts[term] = counts.get(term, 0) + 1
+            for term in counts:
+                self.frequencies[term] = self.frequencies.get(term, 0) + 1
+            self.counts.append(counts)
+            self.lengths.append(len(found))
+        self.average_length = sum(self.lengths) / len(self.lengths) if self.lengths else 0.0
+
+    def idf(self, term: str) -> float:
+        frequency = self.frequencies.get(term, 0)
+        return log(1.0 + (len(self.counts) - frequency + 0.5) / (frequency + 0.5))
+
+    def scores(self, query: str) -> list[float]:
+        """The BM25 score of every text for ``query``: per text, the query's distinct terms in order of first
+        appearance, each adding ``idf * tf * (k1 + 1) / (tf + k1 * (1 - b + b * length / average))``."""
+        distinct = list(dict.fromkeys(terms(query)))
+        weights = [(term, self.idf(term)) for term in distinct if term in self.frequencies]
+        result = []
+        for counts, length in zip(self.counts, self.lengths, strict=True):
+            norm = BM25_K1 * (1.0 - BM25_B + BM25_B * length / self.average_length) if self.average_length else 0.0
+            total = 0.0
+            for term, idf in weights:
+                frequency = counts.get(term, 0)
+                if frequency:
+                    total += idf * (frequency * (BM25_K1 + 1.0)) / (frequency + norm)
+            result.append(total)
+        return result
+
+
+def _ranking(scores: Sequence[float]) -> list[int]:
+    """Indices by score, highest first, ties on the lower index (a total order)."""
+    return sorted(range(len(scores)), key=lambda i: (-scores[i], i))
 
 
 class RetrievalError(ValueError):
@@ -70,6 +146,7 @@ class Index:
     """The embedding model: ``fingerprint`` (its weights), ``id`` and the ``path`` it was loaded from, if known."""
     chunk_tokens: int = DEFAULT_CHUNK_TOKENS
     fingerprint: str = field(default="")
+    _lexical: LexicalStatistics | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self.vectors = np.ascontiguousarray(self.vectors, dtype=np.float32)
@@ -131,19 +208,46 @@ class Index:
                 f"not {engine.model.id} ({str(fingerprint)[:12]})"
             )
 
-    def search(self, engine: DllmEngine, query: str, top: int = 5) -> list[Hit]:
-        """The ``top`` chunks closest to ``query``, best first (ties on the earlier chunk)."""
+    @property
+    def lexical(self) -> LexicalStatistics:
+        """BM25 statistics of the chunks, computed once."""
+        if self._lexical is None:
+            self._lexical = LexicalStatistics([chunk.text for chunk in self.chunks])
+        return self._lexical
+
+    def search(self, engine: DllmEngine | None, query: str, top: int = 5, mode: str = "dense") -> list[Hit]:
+        """The ``top`` chunks for ``query``, best first (ties on the earlier chunk), ranked by ``mode`` (see the
+        module docstring). Lexical search returns only chunks sharing a term with the query and needs no
+        ``engine``."""
         if top < 1:
             raise ValueError("top must be at least 1")
+        if mode not in MODES:
+            raise ValueError(f"unknown search mode {mode!r}; expected one of {', '.join(MODES)}")
         if not query.strip():
             raise ValueError("the query must not be empty")
-        self.check_model(engine)
+        if mode != "lexical":
+            if engine is None:
+                raise ValueError(f"{mode} search needs the embedding model")
+            self.check_model(engine)
         if not self.chunks:
             return []
-        vector = engine.embed(query, input_type=_prompt(engine, "query")).vector
-        scores = cosine_similarity(self.vectors, vector)
-        order = np.lexsort((np.arange(len(self.chunks)), -scores.astype(np.float64)))[:top]
-        return [Hit(rank + 1, float(scores[i]), self.chunks[i], int(i)) for rank, i in enumerate(order)]
+        if mode == "lexical":
+            scores = self.lexical.scores(query)
+            order = [i for i in _ranking(scores) if scores[i] > 0.0]
+        else:
+            assert engine is not None
+            vector = engine.embed(query, input_type=_prompt(engine, "query")).vector
+            scores = [float(x) for x in cosine_similarity(self.vectors, vector)]
+            order = _ranking(scores)
+            if mode == "hybrid":
+                fused = [0.0] * len(self.chunks)
+                lexical = self.lexical.scores(query)
+                for ranking in (order, [i for i in _ranking(lexical) if lexical[i] > 0.0]):
+                    for rank, i in enumerate(ranking, 1):
+                        fused[i] += 1.0 / (RRF_K + rank)
+                scores = fused
+                order = _ranking(scores)
+        return [Hit(rank + 1, scores[i], self.chunks[i], i) for rank, i in enumerate(order[:top])]
 
 
 def _prompt(engine: DllmEngine, name: str) -> str | None:
@@ -269,6 +373,8 @@ def build_index(
 
 
 DEFAULT_TOP = 3
+RERANK_DEPTH = 4
+"""With a reranker, grounding reranks this many times ``top`` hits."""
 GROUNDING_INSTRUCTION = (
     "Answer using the passages below when they are relevant, and say which passage you used by its number. "
     "If they do not contain the answer, say so."
@@ -278,30 +384,76 @@ GROUNDING_INSTRUCTION = (
 class Retriever:
     """Grounds chats in an index: the last user message is the query, and the ``top`` passages found are added to
     the system message (:meth:`ground`). Equal requests get equal passages, so answers stay reproducible; the
-    :attr:`fingerprint` (index, embedding model and ``top``) goes into the chat engine's ``system_fingerprint``."""
+    :attr:`fingerprint` (index, embedding model, ``top``, and the search mode and reranker when they are not the
+    defaults) goes into the chat engine's ``system_fingerprint``.
 
-    def __init__(self, index: Index, embedder: DllmEngine, top: int = DEFAULT_TOP) -> None:
+    With a ``reranker`` (:class:`etalii_dllm.reranking.Reranker`), the first ``RERANK_DEPTH * top`` hits are scored
+    again by the reranking model and the best ``top`` of them, in its order, are the passages."""
+
+    def __init__(
+        self,
+        index: Index,
+        embedder: DllmEngine | None,
+        top: int = DEFAULT_TOP,
+        mode: str = "dense",
+        reranker: Reranker | None = None,
+    ) -> None:
         if top < 1:
             raise ValueError("top must be at least 1")
-        index.check_model(embedder)
+        if mode not in MODES:
+            raise ValueError(f"unknown search mode {mode!r}; expected one of {', '.join(MODES)}")
+        if embedder is not None:
+            index.check_model(embedder)
+        elif mode != "lexical":
+            raise ValueError(f"{mode} search needs the embedding model")
         self.index = index
         self.embedder = embedder
         self.top = top
-        self.fingerprint = hashlib.sha256(f"{index.fingerprint}|{top}".encode()).hexdigest()
+        self.mode = mode
+        self.reranker = reranker
+        key = f"{index.fingerprint}|{top}"  # the dense default keeps the fingerprints it always had
+        if mode != "dense":
+            key += f"|{mode}"
+        if reranker is not None:
+            key += f"|rerank:{reranker.fingerprint}"
+        self.fingerprint = hashlib.sha256(key.encode()).hexdigest()
 
     @staticmethod
-    def open(path: str | Path, top: int = DEFAULT_TOP, embedding_model: str | Path | None = None) -> Retriever:
-        """The index at ``path`` with its embedding model (``embedding_model``, else the path the index records)."""
+    def open(
+        path: str | Path,
+        top: int = DEFAULT_TOP,
+        embedding_model: str | Path | None = None,
+        mode: str = "dense",
+        rerank_model: str | Path | None = None,
+    ) -> Retriever:
+        """The index at ``path`` with its embedding model (``embedding_model``, else the path the index records; not
+        loaded for lexical search) and, with ``rerank_model``, a reranker."""
         from etalii_dllm.engine import DllmEngine
 
         index = Index.load(path)
-        model_path = embedding_model or index.model.get("path")
-        if not model_path:
-            raise RetrievalError(f"{path}: the index does not record its embedding model; name it")
-        return Retriever(index, DllmEngine.from_model_file(model_path, prompt_cache=0), top)
+        embedder = None
+        if mode != "lexical":
+            model_path = embedding_model or index.model.get("path")
+            if not model_path:
+                raise RetrievalError(f"{path}: the index does not record its embedding model; name it")
+            embedder = DllmEngine.from_model_file(model_path, prompt_cache=0)
+        reranker = None
+        if rerank_model:
+            from etalii_dllm.reranking import Reranker
+
+            reranker = Reranker(DllmEngine.from_model_file(rerank_model, prompt_cache=0))
+        return Retriever(index, embedder, top, mode, reranker)
 
     def search(self, query: str, top: int | None = None) -> list[Hit]:
-        return self.index.search(self.embedder, query, top or self.top)
+        top = top or self.top
+        if self.reranker is None:
+            return self.index.search(self.embedder, query, top, self.mode)
+        candidates = self.index.search(self.embedder, query, RERANK_DEPTH * top, self.mode)
+        ranked = self.reranker.rerank(query, [hit.chunk.text for hit in candidates])
+        return [
+            Hit(rank, score, candidates[i].chunk, candidates[i].index)
+            for rank, (i, score) in enumerate(ranked[:top], 1)
+        ]
 
     def ground(self, messages: Sequence[Any]) -> tuple[list[Any], list[Hit]]:
         """``messages`` with the passages for the last user message added to the system message (a new first

@@ -308,3 +308,36 @@ class EmbeddingsResponse(BaseModel):
     data: list[EmbeddingData]
     model: str
     usage: EmbeddingsUsage
+
+
+class RerankDocument(BaseModel):
+    text: str
+
+
+class RerankRequest(BaseModel):
+    """``POST /v1/rerank`` in the shape Cohere and Jina use (and llama.cpp's server)."""
+
+    query: str
+    documents: list[str | RerankDocument]
+    model: str | None = None
+    top_n: int | None = None
+    return_documents: bool = True
+    instruction: str | None = None
+    """Extension: what makes a document relevant (default: that it answers the query)."""
+
+
+class RerankResult(BaseModel):
+    index: int
+    relevance_score: float
+    document: RerankDocument | None = None
+
+
+class RerankUsage(BaseModel):
+    total_tokens: int
+
+
+class RerankResponse(BaseModel):
+    id: str
+    model: str
+    results: list[RerankResult]
+    usage: RerankUsage

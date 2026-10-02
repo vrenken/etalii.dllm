@@ -576,6 +576,18 @@ time, a resumed run equal to an uninterrupted one, and `dllm replay dpo.json --b
 `dllm eval` on the same file reports how often the model prefers the chosen answer. Details:
 [preference tuning](training.md#preference-tuning).
 
+## 22. Search by words, and rerank
+
+```bash
+dllm index search docs.index "gated model import" --mode hybrid
+dllm --model qwen2.5-1.5b.dllm rerank "Where is Paris?" "Berlin is in Germany." "Paris is in France."
+dllm --model qwen2.5-1.5b.dllm --index docs.index --index-mode hybrid --rerank-model qwen2.5-1.5b.dllm chat "..."
+```
+
+`--mode lexical` searches an index by words (BM25) and `--mode hybrid` combines words and embeddings, which helps
+with names and numbers. `dllm rerank` (and `POST /v1/rerank`) lets a chat model judge which passages answer a
+question. Every ranking is exact, so it is the same on every machine. Details: [retrieval](retrieval.md#lexical-and-hybrid-search).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
