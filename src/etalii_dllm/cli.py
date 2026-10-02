@@ -330,6 +330,13 @@ def main(argv: list[str] | None = None) -> int:
             action="store_true",
             help="take the prompt's (or prefill's) last token back and make the answer start with it",
         )
+        command.add_argument("--stop", action="append", default=[], help="end the answer at this text (repeatable)")
+        command.add_argument("--include-stop", action="store_true", help="keep the --stop text that ended it")
+        command.add_argument("--min-tokens", type=int, default=0, help="no stop token before this many tokens")
+        command.add_argument("--ignore-eos", action="store_true", help="write past the model's end-of-sequence")
+        command.add_argument(
+            "--stop-token-id", type=int, action="append", default=[], help="also end at this token id (repeatable)"
+        )
 
     evaluate = commands.add_parser("eval", help="score the model: perplexity, multiple choice or preference")
     evaluate.add_argument("task", metavar="TASK", help=".jsonl (multiple choice, {'text'} or preference pairs) or .txt")
@@ -639,6 +646,11 @@ def main(argv: list[str] | None = None) -> int:
                 overflow=args.context_overflow,
                 token_healing=args.token_healing,
                 suffix=args.suffix,
+                stop=args.stop,
+                include_stop=args.include_stop,
+                min_tokens=args.min_tokens,
+                ignore_eos=args.ignore_eos,
+                stop_token_ids=args.stop_token_id,
             )
         except ValueError as error:
             print(f"error: {error}", file=sys.stderr)
@@ -672,6 +684,11 @@ def _beam_search(engine: DllmEngine, args: argparse.Namespace, options: Sampling
             context_overflow=args.context_overflow,
             token_healing=args.token_healing,
             suffix=args.suffix,
+            stop=args.stop,
+            include_stop=args.include_stop,
+            min_tokens=args.min_tokens,
+            ignore_eos=args.ignore_eos,
+            stop_token_ids=tuple(args.stop_token_id),
         )
         outcome = beam.search(engine, request, args.beams, args.n_best, args.length_penalty)
     except ValueError as error:
@@ -1276,6 +1293,11 @@ def _chat(engine: DllmEngine, args: argparse.Namespace, options: SamplingOptions
         thinking=args.think,
         max_reasoning_tokens=args.max_reasoning_tokens,
         token_healing=args.token_healing,
+        stop=args.stop,
+        include_stop=args.include_stop,
+        min_tokens=args.min_tokens,
+        ignore_eos=args.ignore_eos,
+        stop_token_ids=tuple(args.stop_token_id),
     )
     if args.mcp_config or args.mcp_server or args.tool:
         return _chat_with_mcp(engine, args, request)

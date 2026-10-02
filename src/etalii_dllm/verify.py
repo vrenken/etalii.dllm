@@ -197,9 +197,9 @@ class ReferenceCheck:
     """``dllm verify --reference``: the engine against the independent reference implementation (issue #162)."""
 
     results: dict[str, str]
-    """``logits``, ``greedy``, ``sampled``, ``controlled``, ``rolled``, ``budgeted``, ``guided``, ``healed``, ``beam``,
-    ``scored`` and, for models with fill-in-the-middle tokens, ``infilled``: ``"equal"``, or where the two first
-    differ."""
+    """``logits``, ``greedy``, ``sampled``, ``controlled``, ``rolled``, ``budgeted``, ``guided``, ``healed``,
+    ``lengthened``, ``beam``, ``scored`` and, for models with fill-in-the-middle tokens, ``infilled``: ``"equal"``,
+    or where the two first differ."""
 
     @property
     def equal(self) -> bool:
@@ -285,6 +285,12 @@ def check_reference(engine: Any, max_tokens: int = MAX_TOKENS) -> ReferenceCheck
     allowed = reference.healing(engine.tokenizer.decode_bytes(context[-1:]), token_bytes)
     tokens, _ = twin.generate(context[:-1], max_tokens, reference.sampler(SAMPLED), stops, allowed=allowed)
     results["healed"] = _first_difference(healed.tokens, tokens)
+    # A sampled answer that may not stop before it has max_tokens tokens
+    # (docs/specification.md#length-and-stop-controls).
+    lengthened = engine.complete_stream(PROMPT, max_tokens, SAMPLED, min_tokens=max_tokens).result()
+    allowed = reference.minimum_length(max_tokens, stops, engine.model.vocabulary_size)
+    tokens, _ = twin.generate(context, max_tokens, reference.sampler(SAMPLED), stops, allowed=allowed)
+    results["lengthened"] = _first_difference(lengthened.tokens, tokens)
     # A middle filled in between the prompt and a suffix (docs/specification.md#fill-in-the-middle), for models with
     # FIM tokens.
     if FimTokens.of(engine.tokenizer) is not None:

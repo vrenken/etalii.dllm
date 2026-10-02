@@ -271,3 +271,9 @@ FIM_FINGERPRINTS = {
     "sampled": "4a335ebbf368ef2d101bc9d8a0b824450bbd93da030447e7d83903cfc9470171",
 }
 """Phase 37: middles filled in between a prompt and a suffix on the tiny FIM model (test_fill_in_the_middle.py)."""
+
+LENGTH_FINGERPRINTS = {
+    "min_tokens": "cc92c237c1f7c6c7a312522baa0d67ffa27b7e9410360a4a025887bd38739513",
+    "ignore_eos": "a2f3db3ac0c51ded0fd2e8e7526a49df6a5b50fb478953d98f4422560727c403",
+}
+"""Phase 38: answers under min_tokens and ignore_eos on the tiny model (test_length_controls.py)."""

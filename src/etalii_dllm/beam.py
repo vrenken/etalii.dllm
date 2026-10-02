@@ -219,6 +219,8 @@ def _check(request: ChatRequest) -> None:
         raise ValueError("beam search cannot heal tokens")
     if request.suffix is not None:
         raise ValueError("beam search cannot fill in the middle (suffix)")
+    if request.min_tokens or request.ignore_eos or request.stop_token_ids or request.include_stop:
+        raise ValueError("beam search cannot be combined with min_tokens, ignore_eos, stop_token_ids or include_stop")
     if request.top_logprobs:
         raise ValueError("beam search reports no alternative tokens (top_logprobs)")
     changed = sorted(name for name, default in _DEFAULTS.items() if getattr(request.options, name) != default)

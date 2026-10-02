@@ -301,6 +301,7 @@ reference implementation repeats bit for bit.
 | Output matching a regex in full | `response_format: {"type": "regex", "regex": ...}` or `guided_regex` | | `--regex` |
 | Output a [GBNF grammar](#grammars) derives | `response_format: {"type": "grammar", "grammar": ...}` or `grammar` | | `--grammar` |
 | [Guided decoding](#guided-decoding): a negative prompt, or contrast against an amateur model | `guidance: {negative_prompt, scale}`, `contrast: {beta, alpha}` (extensions; also on Anthropic messages and completions) | | `--negative-prompt`, `--guidance-scale`, `--contrast BETA`, `--contrast-alpha` |
+| [Length and stop controls](#length-and-stop-controls): a minimum length, writing past the end-of-sequence token, extra stop token ids, the stop string kept | `min_tokens`, `ignore_eos`, `stop_token_ids`, `include_stop_str_in_output` (extensions, as in vLLM; chat completions, completions and Responses) | | `--min-tokens`, `--ignore-eos`, `--stop-token-id`, `--stop`, `--include-stop` |
 | [Token healing](#token-healing) of a prompt or prefill that ends inside a word | `token_healing: true` (extension; also on Responses, Anthropic messages, completions and Ollama) | | `--token-healing` |
 | A keyed [watermark](watermarks.md) | `watermark: {key, gamma, delta}` (extension; also on Anthropic messages) | `watermark_key`, `watermark_gamma`, `watermark_delta` | `--watermark-key`, `--watermark-gamma`, `--watermark-delta` |
 
@@ -338,6 +339,30 @@ work as on chat completions. `suffix` [fills in the middle](#fill-in-the-middle)
 `logprobs: N` returns OpenAI's `logprobs` object (`tokens`, `token_logprobs`, `top_logprobs` with N alternatives,
 `text_offset` in characters). With `echo: true` the prompt comes first in `text` and in `logprobs`, its tokens
 [scored exactly](#scoring) (the first prompt token has `null`, as in OpenAI's API).
+
+## Length and stop controls
+
+Four controls (Phase 38, named as in vLLM) shape where an answer ends, each an exact step that receipts record and
+the reference implementation repeats:
+
+- `min_tokens`: until the answer has that many tokens, no stop token can be chosen. The sampler picks among the
+  other tokens exactly as a grammar restricts its choice, so the answer is the one the restricted distribution gives;
+  stop sequences still end it. `max_tokens` still caps it.
+- `ignore_eos`: the model's own end-of-sequence tokens no longer end the answer. They can be chosen like any token
+  (they add no text), so the answer runs to `max_tokens`, a stop sequence or a `stop_token_ids` token: useful for
+  benchmarks and fixed-length outputs.
+- `stop_token_ids`: token ids that end the answer as well as the model's own stop tokens (not part of the answer).
+  Ids outside the vocabulary are a 400 error.
+- `include_stop_str_in_output`: the stop sequence that ended the answer stays in its text, streamed or not.
+
+Unset, they change nothing (and leave response ids as they were). Beam search refuses them.
+
+```bash
+dllm generate --prompt "Once upon a time" --min-tokens 40 --max-tokens 60 --temperature 0.8 --seed 1
+curl -s localhost:5080/v1/completions -H 'content-type: application/json' -d '{
+  "prompt": "Q: 2 + 2 =", "max_tokens": 20, "stop": ["\n"], "include_stop_str_in_output": true
+}'
+```
 
 ## Fill-in-the-middle
 

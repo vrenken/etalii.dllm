@@ -354,6 +354,14 @@ after `r` to the answer's own constraint (a JSON schema, regex or grammar), if a
 answer's text, which is its decoded bytes without the first `len(b)` bytes; its tokens, including the
 healing ones, count as completion tokens.
 
+### Length and stop controls
+
+An answer ends at the first stop token: the model's own (none with `ignore_eos`) and the request's
+`stop_token_ids`. While it has fewer than `min_tokens` tokens, the stop tokens are taken out of the step's choice, as
+a grammar mask takes out tokens: the sampler of section 4 chooses among the remaining token ids (in ascending order),
+and with a grammar among the grammar's allowed tokens without the stop tokens. A stop sequence ends the answer at its
+first occurrence in the text; the text keeps it with `include_stop_str_in_output` and ends before it otherwise.
+
 ### Fill-in-the-middle
 
 With a suffix ([fill-in-the-middle](api.md#fill-in-the-middle)), each FIM token is the token whose text is `<|name|>`

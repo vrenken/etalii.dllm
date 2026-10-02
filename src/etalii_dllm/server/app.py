@@ -70,6 +70,7 @@ from etalii_dllm.server.contracts import (
     WatermarkDetectRequest,
     guided,
     id_payload,
+    length_controls,
     thinking_switch,
 )
 from etalii_dllm.tools import Tool, ToolChoice
@@ -207,6 +208,7 @@ def _chat_request(request: ChatCompletionRequest, engine: DllmEngine) -> ChatReq
         thinking=thinking_switch(request.reasoning_effort, request.chat_template_kwargs),
         max_reasoning_tokens=request.max_reasoning_tokens,
         token_healing=bool(request.token_healing),
+        **length_controls(request),
     )
 
 
