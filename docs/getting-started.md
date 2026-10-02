@@ -588,6 +588,17 @@ dllm --model qwen2.5-1.5b.dllm --index docs.index --index-mode hybrid --rerank-m
 with names and numbers. `dllm rerank` (and `POST /v1/rerank`) lets a chat model judge which passages answer a
 question. Every ranking is exact, so it is the same on every machine. Details: [retrieval](retrieval.md#lexical-and-hybrid-search).
 
+## 23. Watermark your answers
+
+```bash
+dllm generate --prompt "Write a short story" --temperature 0.8 --seed 1 --watermark-key my-secret > story.txt
+dllm watermark detect story.txt --key my-secret
+```
+
+With a key, the sampler slightly prefers a key-dependent quarter of the vocabulary
+after every token, and `dllm watermark detect` (or `POST /v1/watermark/detect`) counts how many tokens fall in it. The
+same key gives the same text and the same score on every machine. Details: [watermarks](watermarks.md).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,

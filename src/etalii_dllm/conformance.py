@@ -146,6 +146,10 @@ def cases() -> list[tuple[str, str, dict[str, Any], Arrays]]:
         "sample-penalties-greedy": {"temperature": 0.0, "top_k": 0, "top_p": 1.0, "seed": 0,
                                     "repetition_penalty": 1.5, "repeat_last_n": -1, "frequency_penalty": 0.3,
                                     "logit_bias": [[7, 1.0]]},
+        "sample-watermark": {"temperature": 0.9, "top_k": 0, "top_p": 1.0, "seed": 9, "watermark_key": "conformance",
+                             "watermark_gamma": 0.3, "watermark_delta": 3.0},
+        "sample-watermark-greedy": {"temperature": 0.0, "top_k": 0, "top_p": 1.0, "seed": 0, "watermark_key": "k",
+                                    "watermark_delta": 4.0, "logit_bias": [[3, 1.0]]},
     }.items():  # fmt: skip
         items.append((name, "sample_controls", options, {"logits": logits, "prompt": history}))
     tokens = np.array([5, 17, 3, 90, 41, 41, 8, 12, 77], dtype=np.int64)

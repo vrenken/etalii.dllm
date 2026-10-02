@@ -195,7 +195,7 @@ EVAL_FINGERPRINTS = {
 # SHA-256 of the conformance vectors' manifest.json (`dllm conformance write`, Phase 20). It covers every input and
 # output file's SHA-256, so it pins the bits of every kernel case, the sampler and the two small decoders. Phase 21
 # added the two sample-penalties cases (penalties, min-p and logit bias).
-CONFORMANCE_MANIFEST_SHA256 = "78f2307713e42db142b03d6d25eb4f7755d0913f5635f9962bf66f18ea78e081"
+CONFORMANCE_MANIFEST_SHA256 = "5e67de5ae7605aa8a56c56438846486502966d5cc452735a8af7896b8cd93254"
 
 # Phase 21: the placeholder model continuing "Deterministic decoding controls are" with every decoding control set
 # (tests/test_decoding_controls.py::CONTROLLED): penalties, min-p and logit bias.
@@ -218,4 +218,11 @@ SEARCH_FINGERPRINTS = {
     "lexical": "3b519ea98f501a45a49efaf7e0bfaf4e69275dab26b4d914fb6f9391ca908695",
     "hybrid": "6f385ca748bb98c871344bc3d97cd143bc4abc68db89b41402bf2a153bdc866b",
     "reranked": "b99dea3a6c24f9ca202b15d3115c6b02cd5788cd67d1608605b10e77348cf567",
+}
+
+# Phase 27. fingerprint() of tests/test_watermark.py's watermarked generation (tiny model, temperature 0.7, seed 4,
+# key "story", delta 6), and the SHA-256 of its detection result as canonical JSON.
+WATERMARK_FINGERPRINTS = {
+    "generation": "3470b949f942fcbde059fef7380b5a1250992d37fcce73dae0d93ccaf341115a",
+    "detection": "b233101d2d72ef04390bcc609427d20aa19459e833b87e2bf48a529fd0a3490d",
 }

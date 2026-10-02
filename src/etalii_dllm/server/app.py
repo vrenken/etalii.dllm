@@ -67,6 +67,7 @@ from etalii_dllm.server.contracts import (
     RerankUsage,
     ToolCallModel,
     TopLogprob,
+    WatermarkDetectRequest,
     id_payload,
     thinking_switch,
 )
@@ -146,6 +147,7 @@ def _chat_request(request: ChatCompletionRequest, engine: DllmEngine) -> ChatReq
         frequency_penalty=request.frequency_penalty or 0.0,
         presence_penalty=request.presence_penalty or 0.0,
         logit_bias=SamplingOptions.bias(request.logit_bias),
+        **(request.watermark.sampling() if request.watermark else {}),
     )
     functions = [t.function for t in request.tools or ()]
     tools = [Tool(f.name, f.description or "", f.parameters or {}) for f in functions]
@@ -367,6 +369,19 @@ def embeddings(request: EmbeddingsRequest, engine: Engine) -> EmbeddingsResponse
     return EmbeddingsResponse(
         data=data, model=engine.model.id, usage=EmbeddingsUsage(prompt_tokens=tokens, total_tokens=tokens)
     )
+
+
+@app.post("/v1/watermark/detect", response_model=None)
+def detect_watermark(request: WatermarkDetectRequest, engine: Engine) -> JSONResponse:
+    """Extension: counts the green tokens of ``text`` for ``key`` with the served model's tokenizer
+    (:mod:`etalii_dllm.watermark`); the same numbers on every machine."""
+    from etalii_dllm import watermark
+
+    try:
+        result = watermark.detect(engine.tokenizer.encode(request.text), request.key, request.gamma)
+    except ValueError as error:
+        return _error(str(error))
+    return JSONResponse(result.to_json())
 
 
 @app.post("/v1/rerank", response_model=None)

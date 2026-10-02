@@ -71,6 +71,18 @@ class ResponseFormatModel(BaseModel):
     """Extension: the pattern of a ``regex`` response format."""
 
 
+class WatermarkOptions(BaseModel):
+    """Extension: watermark the answer (docs/watermarks.md)."""
+
+    key: str
+    gamma: float = 0.25
+    delta: float = 2.0
+
+    def sampling(self) -> dict[str, Any]:
+        """The :class:`~etalii_dllm.sampling.SamplingOptions` fields."""
+        return {"watermark_key": self.key, "watermark_gamma": self.gamma, "watermark_delta": self.delta}
+
+
 class StreamOptions(BaseModel):
     include_usage: bool | None = None
 
@@ -121,6 +133,8 @@ class ChatCompletionRequest(BaseModel):
     """Extension (as in vLLM): ``{"enable_thinking": false}`` switches thinking off."""
     max_reasoning_tokens: int | None = None
     """Extension: the most tokens a thinking model's ``<think>`` block may take (docs/api.md#reasoning)."""
+    watermark: WatermarkOptions | None = None
+    """Extension: watermark the answer with a key (docs/watermarks.md)."""
 
 
 DECODING_CONTROLS = (
@@ -142,6 +156,10 @@ DECODING_CONTROLS = (
     "reasoning",
     "think",
     "thinking",
+    "watermark",
+    "watermark_key",
+    "watermark_gamma",
+    "watermark_delta",
 )
 """Request fields added since Phase 21: left out of the payloads ids are derived from while unset, so the ids of
 requests without them did not change."""
@@ -308,6 +326,12 @@ class EmbeddingsResponse(BaseModel):
     data: list[EmbeddingData]
     model: str
     usage: EmbeddingsUsage
+
+
+class WatermarkDetectRequest(BaseModel):
+    text: str
+    key: str
+    gamma: float = 0.25
 
 
 class RerankDocument(BaseModel):

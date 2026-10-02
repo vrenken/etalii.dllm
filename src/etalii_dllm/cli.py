@@ -291,6 +291,9 @@ def main(argv: list[str] | None = None) -> int:
             "--logit-bias", action="append", default=[], metavar="TOKEN=BIAS", help="add BIAS to a token (repeatable)"
         )
         command.add_argument("--regex", help="only produce text matching this regular expression in full")
+        command.add_argument("--watermark-key", help="watermark the output with this key (dllm watermark detect)")
+        command.add_argument("--watermark-gamma", type=float, default=0.25, help="share of green tokens")
+        command.add_argument("--watermark-delta", type=float, default=2.0, help="logit boost of green tokens")
         command.add_argument(
             "--context-overflow",
             choices=OVERFLOWS,
@@ -348,6 +351,14 @@ def main(argv: list[str] | None = None) -> int:
     search.add_argument(
         "--mode", choices=("dense", "lexical", "hybrid"), default="dense", help="embeddings, BM25, or both fused"
     )
+
+    mark = commands.add_parser("watermark", help="check a text for a watermark (needs only the tokenizer)")
+    mark_commands = mark.add_subparsers(dest="watermark_command", required=True)
+    detect = mark_commands.add_parser("detect", help="count the green tokens of a text for a key; exact z-score")
+    detect.add_argument("file", help="the text file to check ('-' reads standard input)")
+    detect.add_argument("--key", required=True, help="the watermark key")
+    detect.add_argument("--gamma", type=float, default=0.25, help="the share of green tokens it was made with")
+    detect.add_argument("--json", action="store_true", help="print the result as JSON")
 
     rerank = commands.add_parser("rerank", help="rank documents for a query with the model as a judge (exact)")
     rerank.add_argument("query")
@@ -552,6 +563,8 @@ def main(argv: list[str] | None = None) -> int:
         return _index(args, engine)
     if args.command == "rerank":
         return _rerank(args, engine)
+    if args.command == "watermark":
+        return _watermark(args, engine)
     if args.command == "batch":
         return _batch(args, engine)
 
@@ -608,6 +621,9 @@ def _sampling_options(args: argparse.Namespace) -> SamplingOptions:
         frequency_penalty=args.frequency_penalty,
         presence_penalty=args.presence_penalty,
         logit_bias=SamplingOptions.bias(bias),
+        watermark_key=args.watermark_key,
+        watermark_gamma=args.watermark_gamma,
+        watermark_delta=args.watermark_delta,
     )
 
 
@@ -695,6 +711,23 @@ def _index(args: argparse.Namespace, engine: DllmEngine) -> int:
         print(f"{hit.rank}. {hit.score:.4f}  {hit.chunk.source}:{hit.chunk.start}-{hit.chunk.end}")
         print("   " + hit.chunk.text.replace("\n", "\n   "))
     return 0
+
+
+def _watermark(args: argparse.Namespace, engine: DllmEngine) -> int:
+    from etalii_dllm import watermark
+
+    try:
+        text = sys.stdin.read() if args.file == "-" else Path(args.file).read_text(encoding="utf-8")
+        result = watermark.detect(engine.tokenizer.encode(text), args.key, args.gamma)
+    except (OSError, ValueError) as error:
+        print(f"dllm watermark: {error}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(result.to_json(), indent=2))
+    else:
+        verdict = "watermarked" if result.watermarked else "no watermark found"
+        print(f"tokens: {result.tokens}  green: {result.green}  z: {result.z:.4f}  {verdict}")
+    return 0 if result.watermarked else 1
 
 
 def _rerank(args: argparse.Namespace, engine: DllmEngine) -> int:

@@ -17,6 +17,7 @@ what the CLI and the MCP server use, so all front ends give the same answer for 
 | `POST /v1/rerank`, `POST /rerank` | Cohere/Jina rerank | Documents ranked for a query by the model as a yes/no judge ([reranking](retrieval.md#reranking)) |
 | `GET /api/tags`, `POST /api/show`, `GET /api/ps`, `GET /api/version` | Ollama | The served model, its template and architecture |
 | `POST /v1/receipts/verify` | Extension | Re-runs a [generation receipt](receipts.md) and returns `{"ok", "reasons", "notes", "receipt"}`; a list is a [receipt chain](agents.md#receipt-chains) (`{"ok", "reasons", "notes", "turns"}`) |
+| `POST /v1/watermark/detect` | Extension | Green tokens, z-score and verdict of a text for a watermark key ([watermarks](watermarks.md#detecting)) |
 | `GET /v1/audit` | Extension | What `--audit-every` found, the response cache's counters and how many requests were coalesced. See [serving at scale](serving.md) |
 | `GET /` | Browser | A chat page over the streamed `/v1/chat/completions`, with temperature, seed and system prompt; it marks a regenerated answer that is identical to the earlier one. Self-contained, nothing loaded from elsewhere |
 
@@ -219,6 +220,7 @@ reference implementation repeats bit for bit.
 | Logit bias added to chosen tokens | `logit_bias` | | `--logit-bias TOKEN=BIAS` |
 | Several choices | `n` | | `--n` (`generate`) |
 | Output matching a regex in full | `response_format: {"type": "regex", "regex": ...}` or `guided_regex` | | `--regex` |
+| A keyed [watermark](watermarks.md) | `watermark: {key, gamma, delta}` (extension; also on Anthropic messages) | `watermark_key`, `watermark_gamma`, `watermark_delta` | `--watermark-key`, `--watermark-gamma`, `--watermark-delta` |
 
 - The defaults change nothing: a repetition penalty of 1 (Ollama's own default is 1.1; here it stays off unless asked
   for, so answers equal those of the other endpoints), no bias, `min_p` 0. A `logit_bias` id outside the vocabulary

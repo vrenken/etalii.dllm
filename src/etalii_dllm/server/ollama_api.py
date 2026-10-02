@@ -68,6 +68,10 @@ class Options(BaseModel):
     repeat_last_n: int | None = None
     frequency_penalty: float | None = None
     presence_penalty: float | None = None
+    watermark_key: str | None = None
+    """Extension: watermark the answer with this key (docs/watermarks.md)."""
+    watermark_gamma: float | None = None
+    watermark_delta: float | None = None
 
 
 class OllamaFunctionCall(BaseModel):
@@ -169,6 +173,9 @@ def _options(body: _GenerateBase, engine: DllmEngine) -> tuple[SamplingOptions, 
         repeat_last_n=options.repeat_last_n if options.repeat_last_n is not None else 64,
         frequency_penalty=options.frequency_penalty or 0.0,
         presence_penalty=options.presence_penalty or 0.0,
+        watermark_key=options.watermark_key,
+        watermark_gamma=options.watermark_gamma if options.watermark_gamma is not None else 0.25,
+        watermark_delta=options.watermark_delta if options.watermark_delta is not None else 2.0,
     )
     context = getattr(getattr(engine.model, "config", None), "context_length", 0) or DEFAULT_NUM_PREDICT
     limit = min(DEFAULT_NUM_PREDICT, context)

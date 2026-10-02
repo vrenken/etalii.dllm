@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from etalii_dllm.server.contracts import WatermarkOptions
+
 
 class RequestBlock(BaseModel):
     """A content block of a request message: ``text``, ``tool_use`` or ``tool_result`` (others are refused)."""
@@ -83,6 +85,8 @@ class MessagesRequest(BaseModel):
     thinking: ThinkingConfig | None = None
     """For thinking models: ``enabled`` (with ``budget_tokens``), ``adaptive`` or ``disabled``
     (docs/api.md#reasoning)."""
+    watermark: WatermarkOptions | None = None
+    """Extension: watermark the answer with a key (docs/watermarks.md)."""
 
 
 class CountTokensRequest(BaseModel):
