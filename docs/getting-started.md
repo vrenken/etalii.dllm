@@ -732,6 +732,19 @@ dllm generate --prompt "Q: 2 + 2 =" --stop $'\n' --include-stop
 that ended it. The APIs take the same controls (`min_tokens`, `ignore_eos`, `stop_token_ids`,
 `include_stop_str_in_output`). Details: [length and stop controls](api.md#length-and-stop-controls).
 
+## 35. MCP prompts, resources and sampling
+
+```bash
+dllm chat --mcp-server "notes=python notes_server.py" --mcp-list
+dllm chat --mcp-server "notes=python notes_server.py" --mcp-prompt review --mcp-arg language=Python \
+  --mcp-resource notes://today
+```
+
+`--mcp-list` shows what your MCP servers offer. `--mcp-prompt` starts the chat from one of their prompts,
+`--mcp-resource` puts a resource's text in your message, and servers that ask the client's model to write something
+(sampling) get an answer from the engine that is the same every time for the same request. Details:
+[MCP](mcp.md#sampling-prompts-and-resources).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
@@ -760,9 +773,8 @@ that ended it. The APIs take the same controls (`min_tokens`, `ignore_eos`, `sto
   be negated (such as `not` of an array schema) and keywords like `dependentSchemas` are refused with an error
   (see [HTTP API](api.md#structured-output)). GBNF grammars may not be left-recursive and cannot use llama.cpp's
   token references (`<...>`) ([grammars](api.md#grammars)). No images or audio.
-- MCP servers' own resources and prompts are not offered to the model (only their tools), and servers that ask
-  the client for sampling or elicitation are not supported.
+- MCP servers that ask the client for elicitation or roots are not supported, and image, audio or binary MCP
+  content is refused.
 - Models with Unigram or WordPiece tokenizers, GGUF files with a SentencePiece vocabulary (convert from the
   Hugging Face checkpoint instead), YaRN RoPE scaling or other architectures (including
-  Qwen3's mixture-of-experts models) are refused at import; Phase 9 of the roadmap adds the mainstream ones. Qwen3's thinking
-  is returned as part of the answer text, not split into a separate reasoning field.
+  Qwen3's mixture-of-experts models) are refused at import; Phase 9 of the roadmap adds the mainstream ones.

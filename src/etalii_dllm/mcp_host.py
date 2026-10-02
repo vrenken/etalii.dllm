@@ -10,10 +10,16 @@ listed in (server, tool) order, calls run one at a time in the order the model m
 derived from the conversation. So the same conversation and the same tool results always give the same answer; if
 an external tool returns something different, the answer after it may differ (and :attr:`ToolResult` records what
 was returned, so a run can be replayed with :meth:`DllmEngine.chat_completion` on the transcript).
+
+Given an engine, the host also answers servers' sampling requests (``sampling/createMessage``) with it, exactly: the
+seed derives from the request's content, so an identical request always gets the identical answer
+(:func:`sampling_request`). Prompts and resources are listed in (server, name) and (server, URI) order and turn into
+chat messages (:meth:`McpHost.prompt`, :meth:`McpHost.resource`); docs/mcp.md#sampling-prompts-and-resources.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shlex
 from collections.abc import AsyncIterator, Mapping, Sequence
@@ -24,6 +30,7 @@ from typing import Any
 
 from etalii_dllm.chat import ChatMessage, ToolCall
 from etalii_dllm.engine import ChatEvent, ChatRequest, DllmEngine, Finished, TextDelta, ToolCallEvent
+from etalii_dllm.sampling import SamplingOptions
 from etalii_dllm.tools import AUTO, Tool
 
 DEFAULT_MAX_ROUNDS = 8
@@ -102,7 +109,75 @@ class ToolResult:
     is_error: bool
 
 
+@dataclass(frozen=True)
+class Sampling:
+    """A sampling request a server made and the engine's answer to it."""
+
+    server: str
+    request: ChatRequest
+    content: str
+    stop_reason: str
+    fingerprint: str
+
+
+@dataclass(frozen=True)
+class PromptInfo:
+    """A prompt a server offers: its name as the host exposes it, the server and the prompt's own name."""
+
+    name: str
+    server: str
+    title: str
+    description: str
+    arguments: tuple[str, ...]
+    """The argument names, required ones first in the server's order."""
+
+
+@dataclass(frozen=True)
+class ResourceInfo:
+    """A resource a server offers."""
+
+    uri: str
+    server: str
+    name: str
+    description: str
+    mime_type: str | None
+
+
 HostEvent = ChatEvent | ToolResult
+
+
+def _text_blocks(content: Any, what: str) -> str:
+    """The text of one content block or a list of them; anything but text is refused."""
+    blocks = content if isinstance(content, list) else [content]
+    texts = []
+    for block in blocks:
+        if getattr(block, "type", None) != "text":
+            raise ValueError(f"{what} can only hold text, not {getattr(block, 'type', type(block).__name__)!r}")
+        texts.append(block.text)
+    return "".join(texts)
+
+
+def sampling_request(params: Any) -> ChatRequest:
+    """The engine request for an MCP ``sampling/createMessage`` request: its system prompt and messages, its
+    temperature (0, greedy, when absent), ``max_tokens`` and stop sequences, and a seed from the SHA-256 of the
+    request's canonical JSON, so the same request always gets the same answer. Model preferences, included context
+    and metadata are hints the engine (one model, no other context) leaves aside. Raises ``ValueError`` for what it
+    cannot honour: content other than text and sampling with tools."""
+    if params.tools:
+        raise ValueError("sampling with tools is not supported")
+    messages = [ChatMessage("system", params.system_prompt)] if params.system_prompt else []
+    for message in params.messages:
+        messages.append(ChatMessage(message.role, _text_blocks(message.content, "a sampling message")))
+    canonical = json.dumps(
+        params.model_dump(mode="json", by_alias=True, exclude_none=True, exclude={"meta"}),
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    seed = int(hashlib.sha256(canonical.encode()).hexdigest()[:8], 16)
+    options = SamplingOptions(temperature=params.temperature or 0.0, seed=seed)
+    return ChatRequest(messages, params.max_tokens, options, stop=tuple(params.stop_sequences or ()),
+                       request_id=f"mcp-sampling-{seed:08x}")  # fmt: skip
 
 
 def result_text(content: Sequence[Any], structured: Any = None) -> str:
@@ -126,7 +201,9 @@ class McpHost:
     ``servers`` may also hold in-process ``MCPServer`` objects (by name), which tests use.
     """
 
-    def __init__(self, servers: Sequence[McpServerConfig] | Mapping[str, Any]) -> None:
+    def __init__(
+        self, servers: Sequence[McpServerConfig] | Mapping[str, Any], engine: DllmEngine | None = None
+    ) -> None:
         if isinstance(servers, Mapping):
             self._targets = {name: servers[name] for name in sorted(servers)}
         else:
@@ -139,6 +216,13 @@ class McpHost:
         self._routes: dict[str, tuple[str, str]] = {}
         """Tool name as the model sees it -> (server, the server's own tool name)."""
         self.tools: list[Tool] = []
+        self.prompts: list[PromptInfo] = []
+        self._prompt_routes: dict[str, tuple[str, str]] = {}
+        self.resources: list[ResourceInfo] = []
+        self._engine = engine
+        """Answers the servers' sampling requests; without one, the host does not offer sampling."""
+        self.samplings: list[Sampling] = []
+        """Every sampling request answered, in the order the servers made them."""
 
     async def __aenter__(self) -> McpHost:
         from mcp import Client
@@ -154,11 +238,15 @@ class McpHost:
                         target = StdioServerParameters(
                             command=target.command, args=list(target.args), env=dict(target.env) or None
                         )
+                sampler = self._sampler(name) if self._engine is not None else None
                 try:
-                    self._clients[name] = await self._stack.enter_async_context(Client(target, cache=None))
+                    client = Client(target, cache=None, sampling_callback=sampler)
+                    self._clients[name] = await self._stack.enter_async_context(client)
                 except Exception as error:  # any start-up failure names the server
                     raise McpHostError(f"cannot connect to MCP server {name!r}: {error}") from error
             await self._list_tools()
+            await self._list_prompts()
+            await self._list_resources()
         except BaseException:
             await self._stack.aclose()
             raise
@@ -188,6 +276,124 @@ class McpHost:
             self._routes[exposed] = (server, tool.name)
             schema = dict(tool.input_schema or {}) or {"type": "object", "properties": {}}
             self.tools.append(Tool(exposed, tool.description or "", schema))
+
+    def _sampler(self, server: str) -> Any:
+        from mcp import types
+
+        engine = self._engine
+        assert engine is not None
+
+        async def sample(context: Any, params: types.CreateMessageRequestParams) -> Any:
+            try:
+                request = sampling_request(params)
+                result = engine.chat_completion(request)
+            except ValueError as error:
+                return types.ErrorData(code=types.INVALID_PARAMS, message=str(error))
+            stop_reason = "maxTokens" if result.finish_reason == "length" else "endTurn"
+            if result.stop_sequence is not None:
+                stop_reason = "stopSequence"
+            self.samplings.append(Sampling(server, request, result.content, stop_reason, result.fingerprint))
+            return types.CreateMessageResult(
+                role="assistant",
+                content=types.TextContent(type="text", text=result.content),
+                model=engine.model.id,
+                stop_reason=stop_reason,
+            )
+
+        return sample
+
+    async def _list_prompts(self) -> None:
+        listed: list[tuple[str, Any]] = []
+        for server, client in self._clients.items():
+            if getattr(client.server_capabilities, "prompts", None) is None:
+                continue
+            prompts: list[Any] = []
+            cursor = None
+            while True:
+                page = await client.list_prompts(cursor=cursor)
+                prompts.extend(page.prompts)
+                cursor = page.next_cursor
+                if cursor is None:
+                    break
+            listed.extend((server, prompt) for prompt in sorted(prompts, key=lambda p: p.name))
+        counts: dict[str, int] = {}
+        for _, prompt in listed:
+            counts[prompt.name] = counts.get(prompt.name, 0) + 1
+        for server, prompt in listed:
+            exposed = prompt.name if counts[prompt.name] == 1 else f"{server}.{prompt.name}"
+            self._prompt_routes[exposed] = (server, prompt.name)
+            arguments = sorted(prompt.arguments or [], key=lambda a: not a.required)  # stable: server order kept
+            self.prompts.append(
+                PromptInfo(
+                    exposed, server, prompt.title or "", prompt.description or "", tuple(a.name for a in arguments)
+                )
+            )
+
+    async def _list_resources(self) -> None:
+        for server, client in self._clients.items():
+            if getattr(client.server_capabilities, "resources", None) is None:
+                continue
+            resources: list[Any] = []
+            cursor = None
+            while True:
+                page = await client.list_resources(cursor=cursor)
+                resources.extend(page.resources)
+                cursor = page.next_cursor
+                if cursor is None:
+                    break
+            for resource in sorted(resources, key=lambda r: str(r.uri)):
+                self.resources.append(
+                    ResourceInfo(
+                        str(resource.uri), server, resource.name, resource.description or "", resource.mime_type
+                    )
+                )
+
+    async def prompt(self, name: str, arguments: Mapping[str, str] | None = None) -> list[ChatMessage]:
+        """The messages of the prompt the host exposes as ``name``, filled in with ``arguments``. Raises
+        :class:`McpHostError` for an unknown prompt, a server error or content other than text and text
+        resources."""
+        route = self._prompt_routes.get(name)
+        if route is None:
+            raise McpHostError(f"unknown MCP prompt {name!r}")
+        server, own = route
+        try:
+            result = await self._clients[server].get_prompt(own, dict(arguments or {}))
+        except Exception as error:
+            raise McpHostError(f"MCP prompt {name!r}: {error}") from error
+        messages = []
+        for message in result.messages:
+            content = message.content
+            if getattr(content, "type", None) == "resource":
+                text = getattr(content.resource, "text", None)
+                if text is None:
+                    raise McpHostError(f"MCP prompt {name!r} holds a binary resource")
+            elif getattr(content, "type", None) == "text":
+                text = content.text
+            else:
+                raise McpHostError(f"MCP prompt {name!r} holds {content.type!r} content; only text is supported")
+            messages.append(ChatMessage(message.role, text))
+        return messages
+
+    async def resource(self, uri: str) -> str:
+        """The text of the resource at ``uri`` (from the first server, in name order, that lists it; any server
+        when none does), its text parts joined by newlines. Raises :class:`McpHostError` for a server error or a
+        binary resource."""
+        servers = [info.server for info in self.resources if info.uri == uri] or list(self._clients)
+        error: Exception | None = None
+        for server in servers:
+            try:
+                result = await self._clients[server].read_resource(uri)
+            except Exception as problem:  # the next server may have it
+                error = problem
+                continue
+            texts = []
+            for part in result.contents:
+                text = getattr(part, "text", None)
+                if text is None:
+                    raise McpHostError(f"MCP resource {uri!r} is binary; only text resources are supported")
+                texts.append(text)
+            return "\n".join(texts)
+        raise McpHostError(f"cannot read MCP resource {uri!r}: {error}")
 
     @property
     def servers(self) -> dict[str, str]:

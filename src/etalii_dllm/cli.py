@@ -247,7 +247,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     generate.add_argument("--receipt", metavar="FILE", help="with --beams: write the search's receipt to FILE")
     chat = commands.add_parser("chat", help="answer a message using the model's chat template")
-    chat.add_argument("message")
+    chat.add_argument("message", nargs="?", default="", help="the user message (may be left out with --mcp-prompt)")
     chat.add_argument("--system", help="system message")
     chat.add_argument("--json", action="store_true", help="answer with a JSON object (constrained decoding)")
     chat.add_argument("--json-schema", help="answer with JSON valid under this schema (a file or inline JSON)")
@@ -259,6 +259,14 @@ def main(argv: list[str] | None = None) -> int:
         metavar="[NAME=]COMMAND|URL",
         help="an MCP server whose tools the model may call (repeatable), e.g. 'time=uvx mcp-server-time'",
     )
+    chat.add_argument("--mcp-prompt", metavar="NAME", help="start the conversation from this MCP server prompt")
+    chat.add_argument(
+        "--mcp-arg", action="append", default=[], metavar="KEY=VALUE", help="an argument of --mcp-prompt (repeatable)"
+    )
+    chat.add_argument(
+        "--mcp-resource", action="append", default=[], metavar="URI", help="put this MCP resource's text in the message"
+    )
+    chat.add_argument("--mcp-list", action="store_true", help="list the MCP servers' tools, prompts and resources")
     chat.add_argument(
         "--tool",
         action="append",
@@ -1284,7 +1292,7 @@ def _chat(engine: DllmEngine, args: argparse.Namespace, options: SamplingOptions
     messages = [ChatMessage("system", args.system)] if args.system else []
     prefill = [ChatMessage("assistant", args.prefill)] if args.prefill else []
     request = ChatRequest(
-        [*messages, ChatMessage("user", args.message), *prefill],
+        [*messages, *([ChatMessage("user", args.message)] if args.message or not args.mcp_prompt else []), *prefill],
         args.max_tokens,
         options,
         response_format=response_format,
@@ -1301,6 +1309,11 @@ def _chat(engine: DllmEngine, args: argparse.Namespace, options: SamplingOptions
     )
     if args.mcp_config or args.mcp_server or args.tool:
         return _chat_with_mcp(engine, args, request)
+    if args.mcp_prompt or args.mcp_resource or args.mcp_list:
+        print(
+            "dllm chat: --mcp-prompt, --mcp-resource and --mcp-list need --mcp-config or --mcp-server", file=sys.stderr
+        )
+        return 1
     if args.vote is not None:
         return _chat_vote(engine, args, request)
     try:
@@ -1365,11 +1378,17 @@ def _chat_with_mcp(engine: DllmEngine, args: argparse.Namespace, request: ChatRe
             if len(set(names)) != len(names) or "tools" in names:
                 raise mcp_host.McpHostError("MCP server names must be unique ('tools' is the built-in tools)")
             servers = {**{c.name: c for c in configs}, "tools": builtin_tools.server(args.tool, engine)}
-        async with mcp_host.McpHost(servers) as host:
+        async with mcp_host.McpHost(servers, engine) as host:
+            if args.mcp_list:
+                _list_mcp(host)
+                return 0
             print(f"tools: {', '.join(t.name for t in host.tools) or '(none)'}", file=sys.stderr)
+            nonlocal request
+            request = await _with_mcp_context(host, args, request)
             recorder = None
             if args.transcript:
                 recorder = transcripts.Recorder(engine, request, host.tools, args.max_tool_rounds, host.servers)
+            sampled = 0
             async for event in mcp_host.chat(engine, request, host, args.max_tool_rounds):
                 if recorder is not None:
                     recorder.add(event)
@@ -1382,6 +1401,9 @@ def _chat_with_mcp(engine: DllmEngine, args: argparse.Namespace, request: ChatRe
                 elif isinstance(event, mcp_host.ToolResult):
                     marker = "error" if event.is_error else "result"
                     print(f"<- {marker}: {event.content}", file=sys.stderr)
+                    for sampling in host.samplings[sampled:]:
+                        print(f"   sampled for {sampling.server}: {sampling.fingerprint}", file=sys.stderr)
+                    sampled = len(host.samplings)
                 else:
                     finished = event
         assert finished is not None
@@ -1404,6 +1426,49 @@ def _chat_with_mcp(engine: DllmEngine, args: argparse.Namespace, request: ChatRe
     except (mcp_host.McpHostError, ValueError) as error:
         print(f"dllm chat: {error}", file=sys.stderr)
         return 1
+
+
+def _list_mcp(host: Any) -> None:
+    """``dllm chat --mcp-list``: the tools, prompts and resources the MCP servers offer."""
+    print("tools:")
+    for tool in host.tools:
+        print(f"  {tool.name} ({host.servers[tool.name]}): {tool.description}")
+    print("prompts:")
+    for prompt in host.prompts:
+        arguments = f" [{', '.join(prompt.arguments)}]" if prompt.arguments else ""
+        print(f"  {prompt.name} ({prompt.server}){arguments}: {prompt.description}")
+    print("resources:")
+    for resource in host.resources:
+        print(f"  {resource.uri} ({resource.server}): {resource.name}")
+
+
+async def _with_mcp_context(host: Any, args: argparse.Namespace, request: ChatRequest) -> ChatRequest:
+    """``request`` with the ``--mcp-prompt`` messages after the system message and the ``--mcp-resource`` texts in
+    front of the user message (in the order given) (docs/mcp.md#sampling-prompts-and-resources)."""
+    from dataclasses import replace
+
+    from etalii_dllm import mcp_host
+
+    if not args.mcp_prompt and not args.mcp_resource:
+        return request
+    arguments = {}
+    for item in args.mcp_arg:
+        key, separator, value = item.partition("=")
+        if not separator:
+            raise mcp_host.McpHostError(f"--mcp-arg needs KEY=VALUE, not {item!r}")
+        arguments[key] = value
+    messages = list(request.messages)
+    system = [m for m in messages[:1] if m.role == "system"]
+    rest = messages[len(system) :]
+    if args.mcp_resource:
+        texts = [f"Resource {uri}:\n{await host.resource(uri)}" for uri in args.mcp_resource]
+        user = next((i for i, m in enumerate(rest) if m.role == "user"), None)
+        if user is None:
+            rest.insert(0, ChatMessage("user", "\n\n".join(texts)))
+        else:
+            rest[user] = replace(rest[user], content="\n\n".join([*texts, rest[user].content]))
+    prompt = await host.prompt(args.mcp_prompt, arguments) if args.mcp_prompt else []
+    return replace(request, messages=[*system, *prompt, *rest])
 
 
 if __name__ == "__main__":

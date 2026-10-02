@@ -132,8 +132,9 @@ def test_chat_with_mcp_reports_tool_rounds(monkeypatch, capsys):
     ]
 
     class Host:
-        def __init__(self, servers):
+        def __init__(self, servers, engine=None):
             self.tools = [Tool("get_weather", "", {}), Tool("fail", "", {})]
+            self.samplings: list = []
             seen.append([server.name for server in servers])
 
         async def __aenter__(self):

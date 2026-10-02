@@ -128,9 +128,42 @@ results, and `dllm replay FILE` replays the run offline with those results, roun
 ([reproducible agents](agents.md)). The [built-in tools](agents.md#built-in-tools) (`--tool calculator`,
 `--tool files=DIR`, `--tool documents`) are deterministic themselves, so a run with them repeats on its own.
 
+### Sampling, prompts and resources
+
+Besides tools, the host uses the other things MCP servers offer (Phase 39), all in a fixed order:
+
+- **Sampling.** A server may ask the client's model to write a message (`sampling/createMessage`, embedded in the
+  multi-round-trip results of MCP 2026-07-28; the MCP spec now marks sampling as deprecated, but servers still use
+  it). The host answers with the engine: the request's system prompt and messages become a chat, and its
+  `maxTokens`, `temperature` (greedy when absent) and `stopSequences` become the options. The seed is derived
+  from the request's own content (SHA-256 of its canonical JSON), so the same request gets the same answer, bit for
+  bit, on every run and machine. Model preferences, included context and metadata are hints a single local model
+  leaves aside. Requests with images, audio or tools get an MCP error. `McpHost.samplings` records every exchange
+  (server, engine request, answer, fingerprint), and `dllm chat` prints each fingerprint under the tool result.
+- **Prompts.** `McpHost.prompts` lists the servers' prompts in (server, name) order, with names qualified like
+  tools when two servers share one. `await host.prompt(name, arguments)` returns the prompt's messages as chat
+  messages (text and embedded text resources). `dllm chat --mcp-prompt NAME --mcp-arg KEY=VALUE` starts the
+  conversation from it, after any `--system` message; the message argument is then optional.
+- **Resources.** `McpHost.resources` lists them in (server, URI) order; `await host.resource(uri)` returns a text
+  resource's text, from the first server in name order that lists the URI. `dllm chat --mcp-resource URI` puts
+  `Resource URI:` and the text in front of the user message, in the order given.
+- `dllm chat --mcp-list` prints the tools, prompts (with their arguments) and resources on offer.
+
+```bash
+dllm chat --mcp-server "notes=python notes_server.py" --mcp-list
+dllm chat --mcp-server "notes=python notes_server.py" --mcp-prompt review --mcp-arg language=Python \
+  --mcp-resource notes://today
+```
+
+```python
+async with McpHost(configs, engine) as host:  # with an engine, the host answers sampling requests
+    messages = await host.prompt("review", {"language": "Python"})
+    notes = await host.resource("notes://today")
+```
+
 ### Limits
 
-- Only tools are used from the servers; their resources and prompts are not offered to the model.
-- Servers that ask the client for sampling, elicitation or roots are not supported.
+- Image, audio and binary content (in prompts, resources and sampling requests) is refused with an error.
+- Servers that ask the client for elicitation or roots are not supported.
 - Small models call tools clumsily; Qwen2.5-Instruct is trained on the `<tool_call>` format the engine uses,
   SmolLM2-135M is not.

@@ -179,7 +179,7 @@ AdamW from `grad.hpp`.
 | `training/` | Gradients of the decoder, AdamW, fixed data order and checkpoints that resume bit for bit (`dllm finetune`), for all parameters or LoRA adapters; training receipts that replay a run (`training/receipt.py`). |
 | `server/` | The OpenAI Chat Completions (`app.py`, `contracts.py`), OpenAI Completions (`completions_api.py`), OpenAI Responses (`responses_api.py`), Anthropic (`anthropic_api.py`, `anthropic_contracts.py`) and Ollama (`ollama_api.py`) wire formats, and the chat page `static/chat.html`. |
 | `mcp_server.py` | The model as an MCP server over stdio (tools, prompts, resources). |
-| `mcp_host.py` | The MCP client host: the model calls external MCP tools in a loop over `chat_stream`. |
+| `mcp_host.py` | The MCP client host: the model calls external MCP tools in a loop over `chat_stream`; the engine answers servers' sampling requests, and the servers' prompts and resources feed `dllm chat`. |
 | `cli.py` | The `dllm` command. |
 
 ### C++ kernels `cpp/`
