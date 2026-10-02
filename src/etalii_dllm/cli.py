@@ -237,6 +237,12 @@ def main(argv: list[str] | None = None) -> int:
     generate.add_argument(
         "--n", type=int, default=1, help="generate N choices; choice i samples with seed SEED+i (default 1)"
     )
+    generate.add_argument("--beams", type=int, metavar="WIDTH", help="exact beam search with WIDTH hypotheses")
+    generate.add_argument("--n-best", type=int, default=1, help="with --beams: print the K best answers (default 1)")
+    generate.add_argument(
+        "--length-penalty", type=float, default=1.0, help="with --beams: rank by log-likelihood / length^A (default 1)"
+    )
+    generate.add_argument("--receipt", metavar="FILE", help="with --beams: write the search's receipt to FILE")
     chat = commands.add_parser("chat", help="answer a message using the model's chat template")
     chat.add_argument("message")
     chat.add_argument("--system", help="system message")
@@ -598,6 +604,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.command == "chat":
         return _chat(engine, args, options)
+    if args.beams is not None or args.receipt is not None:
+        return _beam_search(engine, args, options)
     if not 1 <= args.n <= MAX_CHOICES:
         print(f"error: --n must be between 1 and {MAX_CHOICES}", file=sys.stderr)
         return 2
@@ -623,6 +631,37 @@ def main(argv: list[str] | None = None) -> int:
             f"fingerprint: {result.fingerprint}  tokens: {len(result.tokens)}  finish: {result.finish_reason}",
             file=sys.stderr,
         )
+    return 0
+
+
+def _beam_search(engine: DllmEngine, args: argparse.Namespace, options: SamplingOptions) -> int:
+    """``dllm generate --beams WIDTH``: the best answers of an exact beam search, best first
+    (docs/api.md#beam-search)."""
+    from etalii_dllm import beam
+
+    try:
+        if args.beams is None:
+            raise ValueError("--receipt needs --beams")
+        if args.n != 1 or args.regex is not None:
+            raise ValueError("--beams cannot be combined with --n or --regex (use --n-best)")
+        request = ChatRequest([], args.max_tokens, options, prompt=args.prompt, context_overflow=args.context_overflow)
+        outcome = beam.search(engine, request, args.beams, args.n_best, args.length_penalty)
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    for index, hypothesis in enumerate(outcome.hypotheses):
+        if outcome.n_best > 1:
+            print(f"--- answer {index}", file=sys.stderr)
+        _write(hypothesis.text + "\n")
+        print(
+            f"fingerprint: {hypothesis.fingerprint}  tokens: {len(hypothesis.tokens)}  "
+            f"finish: {hypothesis.finish_reason}  log-likelihood: {hypothesis.log_likelihood:.6f}  "
+            f"score: {hypothesis.score:.6f}",
+            file=sys.stderr,
+        )
+    if args.receipt:
+        receipt = beam.record(engine, request, outcome)
+        Path(args.receipt).write_text(json.dumps(receipt, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return 0
 
 
@@ -1094,6 +1133,10 @@ def _replay(engine: DllmEngine, args: argparse.Namespace) -> int:
             from etalii_dllm import scoring
 
             verification = scoring.verify(engine, receipt)
+        elif "beam" in receipt:
+            from etalii_dllm import beam
+
+            verification = beam.verify(engine, receipt)
         elif "vote" in receipt:
             from etalii_dllm import voting
 

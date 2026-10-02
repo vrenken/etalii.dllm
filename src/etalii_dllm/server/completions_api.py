@@ -16,12 +16,19 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
-from etalii_dllm import scoring
+from etalii_dllm import beam, scoring
 from etalii_dllm.engine import MAX_CHOICES, ChatRequest, DllmEngine, Finished, ResponseFormat, TextDelta
 from etalii_dllm.engine import default_engine as _default_engine
 from etalii_dllm.generation import ContextLengthError, TokenLogprobs
 from etalii_dllm.sampling import SamplingOptions
-from etalii_dllm.server.contracts import ContrastOptions, GuidanceOptions, WatermarkOptions, guided, id_payload
+from etalii_dllm.server.contracts import (
+    BeamOptions,
+    ContrastOptions,
+    GuidanceOptions,
+    WatermarkOptions,
+    guided,
+    id_payload,
+)
 
 router = APIRouter()
 Engine = Annotated[DllmEngine, Depends(_default_engine)]
@@ -64,6 +71,8 @@ class CompletionRequest(BaseModel):
     """Extension: classifier-free guidance away from a negative prompt (docs/api.md#guided-decoding)."""
     contrast: ContrastOptions | None = None
     """Extension: contrastive decoding against the server's amateur model."""
+    beam: BeamOptions | None = None
+    """Extension: the best answers of an exact beam search (docs/api.md#beam-search)."""
     receipt: bool | None = None
     """Extension: each choice carries its generation receipt (docs/receipts.md)."""
     user: str | None = None
@@ -92,6 +101,8 @@ class CompletionUsage(BaseModel):
 
 
 class Completion(BaseModel):
+    model_config = ConfigDict(extra="allow")  # ``beam`` for beam searches
+
     id: str
     object: Literal["text_completion"] = "text_completion"
     created: int = 0
@@ -214,6 +225,8 @@ def completions(request: CompletionRequest, engine: Engine) -> Completion | JSON
     n = request.n if request.n is not None else 1
     try:
         chats = _requests(request, engine)
+        if request.beam is not None:
+            return _beam(request, chats, engine)
         if request.stream:
             include_usage = bool(request.stream_options and request.stream_options.include_usage)
             first = engine.chat_stream(chats[0])  # raises for invalid requests before streaming starts
@@ -255,6 +268,45 @@ def completions(request: CompletionRequest, engine: Engine) -> Completion | JSON
             completion_tokens=completion_tokens,
             total_tokens=prompt_tokens + completion_tokens,
         ),
+    )
+
+
+def _beam(request: CompletionRequest, chats: list[ChatRequest], engine: DllmEngine) -> Completion:
+    """Each prompt's best beam search answers as choices (``prompt_index * n_best + i``), best first; ``beam`` holds
+    the searches and, with ``receipt``, every choice carries its search's receipt."""
+    assert request.beam is not None
+    options = request.beam
+    if request.stream or (request.n is not None and request.n != 1) or request.logprobs is not None:
+        raise ValueError("beam search cannot be combined with stream, n or logprobs (use beam.n_best)")
+    choices: list[CompletionChoice] = []
+    searches = []
+    prompt_tokens = completion_tokens = 0
+    for p, chat in enumerate(chats):
+        outcome = beam.search(engine, chat, options.width, options.n_best, options.length_penalty)
+        receipt = beam.record(engine, chat, outcome) if request.receipt else None
+        searches.append(outcome.to_json())
+        prompt_tokens += outcome.prompt_tokens
+        completion_tokens += outcome.completion_tokens
+        for i, hypothesis in enumerate(outcome.hypotheses):
+            choices.append(
+                CompletionChoice(
+                    text=(chat.prompt or "") + hypothesis.text if request.echo else hypothesis.text,
+                    index=p * options.n_best + i,
+                    finish_reason=hypothesis.finish_reason,
+                    **({"receipt": receipt} if receipt is not None else {}),
+                )
+            )
+    return Completion(
+        id=chats[0].request_id,
+        model=engine.model.id,
+        system_fingerprint=engine.system_fingerprint,
+        choices=choices,
+        usage=CompletionUsage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+        ),
+        beam=searches,
     )
 
 

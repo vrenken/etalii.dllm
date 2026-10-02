@@ -955,3 +955,59 @@ class ReferenceTransformer:
                 break
             append(token)
         return tokens, steps
+
+    def beam_search(
+        self,
+        context: Sequence[int],
+        width: int,
+        max_tokens: int,
+        stop_tokens: Sequence[int] = (),
+        *,
+        n_best: int = 1,
+        length_penalty: float = 1.0,
+        window: int | None = None,
+    ) -> list[tuple[list[int], str, float, float]]:
+        """Beam search as the specification defines it (``docs/specification.md#beam-search``): the best ``n_best``
+        finished hypotheses as (tokens without the stop token, finish reason, log-likelihood, score)."""
+        window = window or self.config.context_length
+        stops = {int(t) for t in stop_tokens}
+        self.reset()
+        if len(context) > 1:
+            self.forward(list(context)[:-1])
+        prompt_state = (list(self.keys), list(self.values))
+        # A live hypothesis: (tokens, log-likelihood, scored token count, its decoder state before its last token).
+        live = [([], 0.0, 0, prompt_state, int(context[-1]))]
+        finished: list[tuple[list[int], str, float, int]] = []
+        steps = 0
+        while True:
+            if steps == max_tokens or (window and len(context) + steps >= window):
+                finished += [(tokens, "length", total, count) for tokens, total, count, _, _ in live]
+                break
+            candidates = []
+            for index, (tokens, total, _, state, last) in enumerate(live):
+                self.keys, self.values = list(state[0]), list(state[1])
+                values = log_softmax(self.forward([last]))
+                state_after = (list(self.keys), list(self.values))
+                ranked = sorted(range(len(values)), key=lambda i: (-float(values[i]), i))
+                for token in ranked[: 2 * width]:
+                    candidates.append((total + float(values[token]), [*tokens, token], index, token, state_after))
+            candidates.sort(key=lambda c: (-c[0], c[1]))
+            following = []
+            for rank, (total, extended, index, token, state_after) in enumerate(candidates):
+                if len(following) == width:
+                    break
+                if token in stops:
+                    if rank < width:
+                        finished.append((live[index][0], "stop", total, live[index][2] + 1))
+                    continue
+                following.append((extended, total, live[index][2] + 1, state_after, token))
+            steps += 1
+            live = following
+            if len(finished) >= width or not live:
+                break
+        results = []
+        for tokens, reason, total, count in finished:
+            power = float(exp(float(length_penalty) * float(log(float(count))))) if count > 0 else 1.0
+            results.append((tokens, reason, total, total / power if count > 0 else total))
+        results.sort(key=lambda r: (-r[3], r[0]))
+        return results[:n_best]

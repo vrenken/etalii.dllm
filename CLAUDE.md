@@ -67,9 +67,9 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
   grounded with `--index`, BM25 and hybrid search, embedding-model pooling in `engine.embed`; `docs/retrieval.md`),
   `reranking` (a chat model as a yes/no relevance judge: `dllm rerank`, `/v1/rerank`, `--rerank-model`), `watermark` (keyed green-list watermarks in the sampler, exact detection,
   `dllm watermark detect`, `/v1/watermark/detect`; `docs/watermarks.md`), `scoring` (exact prompt scores, `dllm score`, score
-  receipts) `voting` (self-consistency votes, `vote`/`--vote`, vote receipts; `docs/api.md#voting`) and `guidance` (classifier-free
+  receipts), `voting` (self-consistency votes, `vote`/`--vote`, vote receipts; `docs/api.md#voting`), `guidance` (classifier-free
   guidance, contrastive decoding with `--contrast-model`, logit ensembles with `--ensemble-model`;
-  `docs/api.md#guided-decoding`).
+  `docs/api.md#guided-decoding`) and `beam` (exact beam search, `beam`/`--beams`, beam receipts; `docs/api.md#beam-search`).
   Tests compare against the reference packages `gguf`, `safetensors` and `tokenizers` (dev dependencies).
 - `src/etalii_dllm/server/` (OpenAI `app.py`, `responses_api.py`, `completions_api.py` and `batches_api.py`, Anthropic `anthropic_api.py`, Ollama `ollama_api.py`, the browser chat page `static/chat.html`
   served at `/`; `docs/api.md`), `mcp_server.py`,

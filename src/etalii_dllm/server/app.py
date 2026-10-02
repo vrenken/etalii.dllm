@@ -20,7 +20,7 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
-from etalii_dllm import __version__, receipts, scoring, voting
+from etalii_dllm import __version__, beam, receipts, scoring, voting
 from etalii_dllm.chat import ChatMessage, ToolCall
 from etalii_dllm.engine import (
     MAX_CHOICES,
@@ -228,6 +228,10 @@ def chat_completions(
             if request.stream or (request.n is not None and request.n != 1):
                 raise ValueError("vote cannot be combined with stream or n")
             return _vote(request, chat, engine)
+        if request.beam is not None:
+            if request.stream or (request.n is not None and request.n != 1):
+                raise ValueError("beam search cannot be combined with stream or n (use beam.n_best)")
+            return _beam(request, chat, engine)
         if request.stream:
             if not 1 <= n <= MAX_CHOICES:
                 raise ValueError(f"n must be between 1 and {MAX_CHOICES}")
@@ -314,6 +318,45 @@ def _vote(request: ChatCompletionRequest, chat: ChatRequest, engine: DllmEngine)
         ),
         vote=outcome.to_json(),
         **({"receipt": voting.record(engine, chat, outcome)} if request.receipt else {}),
+    )
+
+
+def _beam(request: ChatCompletionRequest, chat: ChatRequest, engine: DllmEngine) -> ChatCompletionResponse:
+    """The best answers of a beam search as the choices, best first, the search as ``beam`` and its receipt."""
+    assert request.beam is not None
+    options = request.beam
+    outcome = beam.search(engine, chat, options.width, options.n_best, options.length_penalty)
+    choices = [
+        ChatCompletionChoice(
+            index=index,
+            message=AssistantMessage(content=hypothesis.text),
+            logprobs=ChoiceLogprobs(
+                content=[
+                    LogprobEntry(token=text, logprob=logprob, bytes=data, top_logprobs=[])
+                    for token, logprob in zip(hypothesis.tokens, hypothesis.logprobs, strict=False)
+                    for text, data in [_token(engine, token)]
+                ]
+            )
+            if chat.top_logprobs is not None
+            else None,
+            finish_reason=hypothesis.finish_reason,
+        )
+        for index, hypothesis in enumerate(outcome.hypotheses)
+    ]
+    return ChatCompletionResponse(
+        id=chat.request_id,
+        created=0,
+        model=engine.model.id,
+        system_fingerprint=engine.system_fingerprint,
+        choices=choices,
+        usage=ChatCompletionUsage(
+            prompt_tokens=outcome.prompt_tokens,
+            completion_tokens=outcome.completion_tokens,
+            total_tokens=outcome.prompt_tokens + outcome.completion_tokens,
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=0),
+        ),
+        beam=outcome.to_json(),
+        **({"receipt": beam.record(engine, chat, outcome)} if request.receipt else {}),
     )
 
 
@@ -471,6 +514,8 @@ def verify_receipt(receipt: dict[str, Any] | list[dict[str, Any]], engine: Engin
             return JSONResponse(receipts.verify_chain(engine, receipt).to_json())
         if "score" in receipt:
             verification = scoring.verify(engine, receipt)
+        elif "beam" in receipt:
+            verification = beam.verify(engine, receipt)
         elif "vote" in receipt:
             verification = voting.verify(engine, receipt)
         else:
