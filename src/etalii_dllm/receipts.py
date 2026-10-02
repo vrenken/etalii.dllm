@@ -82,6 +82,7 @@ def request_record(request: ChatRequest) -> dict[str, Any]:
         **({"context_overflow": request.context_overflow} if request.context_overflow != "stop" else {}),
         **({"thinking": request.thinking} if request.thinking is not None else {}),
         **({"max_reasoning_tokens": request.max_reasoning_tokens} if request.max_reasoning_tokens is not None else {}),
+        **({"token_healing": True} if request.token_healing else {}),
     }
 
 
@@ -119,6 +120,7 @@ def request_from_record(record: Mapping[str, Any]) -> ChatRequest:
         context_overflow=record.get("context_overflow", "stop"),
         thinking=record.get("thinking"),
         max_reasoning_tokens=record.get("max_reasoning_tokens"),
+        token_healing=record.get("token_healing", False),
     )
 
 

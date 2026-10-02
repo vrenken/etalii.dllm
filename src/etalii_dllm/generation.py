@@ -14,7 +14,7 @@ from typing import Any
 import numpy as np
 
 from etalii_dllm.batching import Batcher
-from etalii_dllm.grammar import TokenConstraint
+from etalii_dllm.grammar import HealingConstraint, TokenConstraint
 from etalii_dllm.guidance import Guide
 from etalii_dllm.models import LanguageModel
 from etalii_dllm.numerics import fingerprint, log_softmax
@@ -23,6 +23,8 @@ from etalii_dllm.reasoning import Tracker, closing_text
 from etalii_dllm.sampling import Sampler, SamplingOptions
 from etalii_dllm.speculative import Drafter, DraftModel, PromptLookup
 from etalii_dllm.tokenization import Tokenizer
+
+Constraint = TokenConstraint | HealingConstraint
 
 MAX_TOP_LOGPROBS = 20
 OVERFLOWS = ("stop", "roll")
@@ -112,14 +114,17 @@ class Generation:
         max_tokens: int,
         options: SamplingOptions,
         stop: Sequence[str],
-        constraint: TokenConstraint | None,
+        constraint: Constraint | None,
         top_logprobs: int | None,
         new_text: bool = False,
         overflow: str = "stop",
         reasoning: Tracker | None = None,
         guide: Guide | None = None,
+        healed: int = 0,
     ) -> None:
         self.prompt_tokens = len(context)
+        self._healed = healed
+        """Bytes of a prompt token taken back for token healing: the output's first bytes, left out of its text."""
         self._guide = guide
         """Combines the logits with another context or model before decoding (:mod:`etalii_dllm.guidance`)."""
         self._overflow = overflow
@@ -148,7 +153,10 @@ class Generation:
         """The stop sequence that ended the generation, if any."""
         # A new text (a chat message) drops the leading space SentencePiece-style tokens start words with, as the
         # tokenizer's own decoder does; a completion keeps it, since it continues the prompt's text.
-        self._strip_leading_space = new_text and bool(getattr(generator.tokenizer, "strips_leading_space", False))
+        # A healed output continues a prompt token, so it keeps its space too.
+        self._strip_leading_space = (
+            new_text and not healed and bool(getattr(generator.tokenizer, "strips_leading_space", False))
+        )
         self._cache = cache
         self._steps = self._run(generator, context, max_tokens, options, stop, constraint, top_logprobs)
 
@@ -170,7 +178,7 @@ class Generation:
         max_tokens: int,
         options: SamplingOptions,
         stop: Sequence[str],
-        constraint: TokenConstraint | None,
+        constraint: Constraint | None,
         top_logprobs: int | None,
     ) -> Iterator[Step]:
         try:
@@ -186,7 +194,7 @@ class Generation:
         max_tokens: int,
         options: SamplingOptions,
         stop: Sequence[str],
-        constraint: TokenConstraint | None,
+        constraint: Constraint | None,
         top_logprobs: int | None,
     ) -> Iterator[Step]:
         model, tokenizer = generator.model, generator.tokenizer
@@ -196,6 +204,7 @@ class Generation:
         sampler = Sampler(options, context)
         data = bytearray()
         strip_leading_space = self._strip_leading_space
+        healed = self._healed
         emitted = ""
         finish_reason = "length"
         guide = self._guide
@@ -210,7 +219,7 @@ class Generation:
 
         def emit(token: int, logprobs: TokenLogprobs | None) -> tuple[Step, bool]:
             """Appends ``token`` to the output; the step to yield, and whether a stop sequence ended the output."""
-            nonlocal strip_leading_space, emitted
+            nonlocal strip_leading_space, emitted, healed
             if constraint is not None:
                 constraint.accept(token)
             sampler.accept(token)
@@ -219,6 +228,10 @@ class Generation:
             if logprobs is not None:
                 self._logprobs.append(logprobs)
             data.extend(tokenizer.decode_bytes([token]))
+            if healed:  # the healed bytes are the prompt's, not the answer's
+                dropped = min(healed, len(data))
+                del data[:dropped]
+                healed -= dropped
             if strip_leading_space and data:
                 if data[0] == 0x20:
                     del data[0]
@@ -325,7 +338,7 @@ class Generation:
 
     @staticmethod
     def _choose(
-        sampler: Sampler, logits: np.ndarray, stop_tokens: frozenset[int], constraint: TokenConstraint | None
+        sampler: Sampler, logits: np.ndarray, stop_tokens: frozenset[int], constraint: Constraint | None
     ) -> int | None:
         if constraint is None or not constraint.active:
             return sampler.sample(logits)
@@ -407,12 +420,13 @@ class Generator:
         options: SamplingOptions,
         *,
         stop: Sequence[str] = (),
-        constraint: TokenConstraint | None = None,
+        constraint: Constraint | None = None,
         top_logprobs: int | None = None,
         new_text: bool = False,
         overflow: str = "stop",
         reasoning: Tracker | None = None,
         guide: Callable[[list[int]], Guide] | None = None,
+        healed: int = 0,
     ) -> Generation:
         """Starts a generation. ``stop`` ends it at the first occurrence of any of the strings (which are not part
         of the text); ``constraint`` restricts the tokens (structured output, tool calls); ``top_logprobs``
@@ -420,7 +434,9 @@ class Generator:
         starts a new text (a chat message) rather than continuing the prompt, so a SentencePiece-style tokenizer's
         leading space is dropped from it. ``overflow`` says what happens when the sequence fills the model's
         context window: the generation ends with ``length`` (``stop``), or the context rolls (``roll``, see
-        :meth:`Generation._roll`). A prompt that leaves no room raises :class:`ContextLengthError`. ``reasoning``
+        :meth:`Generation._roll`). A prompt that leaves no room raises :class:`ContextLengthError`. ``healed``: the
+        output's first bytes are a prompt token taken back for token healing (a :class:`HealingConstraint` makes
+        the output start with them), left out of its text. ``reasoning``
         follows a thinking model's ``<think>`` block and closes it when its budget is spent
         (:mod:`etalii_dllm.reasoning`). ``guide`` makes the guide (:mod:`etalii_dllm.guidance`) for the prompt's
         tokens; guided generations do not roll."""
@@ -445,7 +461,18 @@ class Generator:
             raise ValueError("guided decoding cannot roll the context")
         made = guide(list(context)) if guide is not None else None
         return Generation(
-            self, context, max_tokens, options, stop, constraint, top_logprobs, new_text, overflow, reasoning, made
+            self,
+            context,
+            max_tokens,
+            options,
+            stop,
+            constraint,
+            top_logprobs,
+            new_text,
+            overflow,
+            reasoning,
+            made,
+            healed,
         )
 
     def generate(
@@ -455,7 +482,7 @@ class Generator:
         options: SamplingOptions,
         *,
         stop: Sequence[str] = (),
-        constraint: TokenConstraint | None = None,
+        constraint: Constraint | None = None,
         top_logprobs: int | None = None,
         overflow: str = "stop",
         reasoning: Tracker | None = None,

@@ -572,7 +572,8 @@ class Sampler:
     ordered by (probability descending, id ascending), top-k, top-p (the shortest prefix reaching ``top_p``),
     min-p (candidates below ``min_p`` times the first are dropped), then one ``next_double()`` scaled by the kept
     mass picks the first candidate whose running sum exceeds it. :meth:`begin` sets the prompt, :meth:`accept`
-    records each generated token."""
+    records each generated token. Constrained decoding passes the allowed ids (ascending): the adjusted logits are
+    restricted to them before the steps after the penalties."""
 
     def __init__(
         self,
@@ -639,8 +640,13 @@ class Sampler:
                     values[token] = F32(values[token] + delta)
         return values
 
-    def sample(self, logits: npt.ArrayLike) -> int:
+    def sample(self, logits: npt.ArrayLike, allowed: Sequence[int] | None = None) -> int:
         logits = self._adjusted(logits)
+        if allowed is not None:
+            return int(allowed[self._choose(logits[np.asarray(allowed, dtype=np.int64)])])
+        return self._choose(logits)
+
+    def _choose(self, logits: np.ndarray) -> int:
         if self.temperature == 0:
             return argmax(logits)
         scaled = np.asarray(logits, dtype=F32) / F32(self.temperature)
@@ -688,6 +694,21 @@ def sampler(options: Any) -> Sampler:
         watermark_gamma=options.watermark_gamma,
         watermark_delta=options.watermark_delta,
     )
+
+
+def healing(prefix: bytes, token_bytes: Sequence[bytes]) -> Callable[[list[int]], list[int] | None]:
+    """Token healing (docs/specification.md#token-healing): until the output's bytes hold ``prefix`` (the bytes of
+    the prompt token taken back), the next token's bytes must be a non-empty prefix of what is left of it or start
+    with all of it; stop tokens (which have no bytes) are not allowed. After that, any token."""
+
+    def allowed(generated: list[int]) -> list[int] | None:
+        written = b"".join(token_bytes[token] for token in generated)
+        if len(written) >= len(prefix):
+            return None
+        left = prefix[len(written) :]
+        return [t for t, data in enumerate(token_bytes) if data and (left.startswith(data) or data.startswith(left))]
+
+    return allowed
 
 
 # -- the decoder --------------------------------------------------------------------------------------------------
@@ -899,6 +920,7 @@ class ReferenceTransformer:
         window: int | None = None,
         thinking: ThinkingBudget | None = None,
         guide: Callable[[np.ndarray, list[int]], np.ndarray] | None = None,
+        allowed: Callable[[list[int]], list[int] | None] | None = None,
     ) -> tuple[list[int], list[np.ndarray]]:
         """Generates from ``context`` (a fresh context) until a stop token or ``max_tokens``; returns the tokens
         (without the stop token) and the logits each was chosen from.
@@ -908,7 +930,8 @@ class ReferenceTransformer:
         latest half window are kept and computed afresh, while the sampler keeps the whole history. ``thinking``
         closes a ``<think>`` block that has spent its budget with fixed tokens (:class:`ThinkingBudget`). ``guide``
         maps the logits after the tokens so far to the logits decoding uses (:func:`guided`, :func:`contrasted`,
-        :func:`ensembled`)."""
+        :func:`ensembled`). ``allowed`` gives the ids the next token may take after the tokens so far (``None``:
+        any), as constrained decoding does (:func:`healing`)."""
         window = window or self.config.context_length
         sequence = list(context)
         if window and len(sequence) >= window:
@@ -949,7 +972,8 @@ class ReferenceTransformer:
                     continue
             logits = self.forward(unfed)
             unfed = []
-            token = sampler.sample(guide(logits, tokens) if guide is not None else logits)
+            mask = allowed(tokens) if allowed is not None else None
+            token = sampler.sample(guide(logits, tokens) if guide is not None else logits, mask)
             steps.append(logits)
             if token in stop_tokens:
                 break

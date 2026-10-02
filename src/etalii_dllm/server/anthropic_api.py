@@ -158,6 +158,7 @@ def _chat_request(request: MessagesRequest, engine: DllmEngine) -> ChatRequest:
         previous_receipt=request.previous_receipt,
         thinking=thinking,
         max_reasoning_tokens=budget,
+        token_healing=bool(request.token_healing),
     )
 
 

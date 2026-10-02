@@ -180,6 +180,8 @@ class ChatCompletionRequest(BaseModel):
     """Extension (as in vLLM): ``{"enable_thinking": false}`` switches thinking off."""
     max_reasoning_tokens: int | None = None
     """Extension: the most tokens a thinking model's ``<think>`` block may take (docs/api.md#reasoning)."""
+    token_healing: bool | None = None
+    """Extension: take the prompt's last token back and make the answer start with it (docs/api.md#token-healing)."""
     watermark: WatermarkOptions | None = None
     """Extension: watermark the answer with a key (docs/watermarks.md)."""
     vote: VoteOptions | None = None
@@ -209,6 +211,7 @@ DECODING_CONTROLS = (
     "reasoning_effort",
     "chat_template_kwargs",
     "max_reasoning_tokens",
+    "token_healing",
     "reasoning",
     "think",
     "thinking",

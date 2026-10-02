@@ -142,6 +142,8 @@ class ResponsesRequest(BaseModel):
     reasoning: ReasoningConfig | None = None
     max_reasoning_tokens: int | None = None
     """Extension: the most tokens a thinking model's ``<think>`` block may take (docs/api.md#reasoning)."""
+    token_healing: bool | None = None
+    """Extension: take the prompt's last token back and make the answer start with it (docs/api.md#token-healing)."""
 
 
 def error(message: str, status: int = 400) -> JSONResponse:
@@ -292,6 +294,7 @@ def _prepare(request: ResponsesRequest, engine: DllmEngine) -> tuple[ChatRequest
         context_overflow=request.context_overflow or "stop",
         thinking=thinking_switch(request.reasoning.effort if request.reasoning else None, None),
         max_reasoning_tokens=request.max_reasoning_tokens,
+        token_healing=bool(request.token_healing),
     )
     return chat, conversation
 

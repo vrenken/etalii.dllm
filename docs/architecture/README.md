@@ -138,13 +138,13 @@ AdamW from `grad.hpp`.
 | `chat.py` | Chat messages and the fixed prompt format for models without a chat template. |
 | `chat_template.py` | Renders a model's own Jinja chat template the way `transformers` does. |
 | `tools.py` | Tool calling in the Hermes `<tool_call>` format: presenting tools, constraining and parsing calls. |
-| `grammar.py` | Constrained decoding: byte-level JSON and regex grammars and the token masks they induce over a token trie; string patterns, formats, lengths and integer bounds compile to byte automata; the object and array automata track property counts, tuples, property names, pattern properties, unique choices and `contains` counts. |
+| `grammar.py` | Constrained decoding: byte-level JSON and regex grammars and the token masks they induce over a token trie; string patterns, formats, lengths and integer bounds compile to byte automata; the object and array automata track property counts, tuples, property names, pattern properties, unique choices and `contains` counts; `HealingConstraint` makes a healed answer start with the taken-back token's bytes. |
 | `numeric_automata.py` | Byte automata of decimal number texts under bounds and `multipleOf`, compared in exact decimal arithmetic, for schema constraints. |
 | `schema_algebra.py` | `allOf`, `not` and `if`/`then`/`else` rewritten exactly before compiling: schemas merged keyword by keyword and negated keyword by keyword. |
 | `gbnf.py` | GBNF grammars parsed and compiled to grammar rules of the same pushdown automaton; left recursion refused, alternatives that cannot finish dropped. |
 | `batch_jobs.py` | `dllm batch`: OpenAI batch files run concurrently with output in input order and content-derived ids, exact resume, digests and `--verify`. |
 | `regexp.py` | Regular expressions compiled to byte-level DFAs (UTF-8 ranges included) for regex-constrained output; trimmed intersections, differences and code point counting for schema constraints. |
-| `generation.py` | The autoregressive loop: forward pass, sample, append, repeat; stop sequences, logprobs, result fingerprint. |
+| `generation.py` | The autoregressive loop: forward pass, sample, append, repeat; stop sequences, logprobs, result fingerprint; token healing strips the healed bytes from the text. |
 | `speculative.py` | Drafters for speculative decoding (prompt lookup, a draft model); the loop in `generation.py` keeps only drafted tokens it would have chosen. |
 | `prompt_cache.py` | KV caches of earlier requests, lent to the next prompt that shares their prefix; saves work, never changes tokens. |
 | `batching.py` | Continuous batching: concurrent generations share one `forward_batch` per step, each keeping its solo bits. |

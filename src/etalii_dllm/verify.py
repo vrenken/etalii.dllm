@@ -194,8 +194,8 @@ class ReferenceCheck:
     """``dllm verify --reference``: the engine against the independent reference implementation (issue #162)."""
 
     results: dict[str, str]
-    """``logits``, ``greedy``, ``sampled``, ``controlled``, ``rolled``, ``budgeted``, ``guided`` and ``scored``:
-    ``"equal"``, or where the two first differ."""
+    """``logits``, ``greedy``, ``sampled``, ``controlled``, ``rolled``, ``budgeted``, ``guided``, ``healed``, ``beam``
+    and ``scored``: ``"equal"``, or where the two first differ."""
 
     @property
     def equal(self) -> bool:
@@ -274,6 +274,13 @@ def check_reference(engine: Any, max_tokens: int = MAX_TOKENS) -> ReferenceCheck
     negative.reset()
     tokens, _ = twin.generate(context, max_tokens, reference.sampler(GUIDED), stops, guide=guide)
     results["guided"] = _first_difference(answer.tokens, tokens)
+    # A healed answer (docs/specification.md#token-healing): the prompt's last token taken back, the answer made to
+    # start with its bytes.
+    healed = engine.complete_stream(PROMPT, max_tokens, SAMPLED, token_healing=True).result()
+    token_bytes = [engine.tokenizer.decode_bytes([t]) for t in range(engine.model.vocabulary_size)]
+    allowed = reference.healing(engine.tokenizer.decode_bytes(context[-1:]), token_bytes)
+    tokens, _ = twin.generate(context[:-1], max_tokens, reference.sampler(SAMPLED), stops, allowed=allowed)
+    results["healed"] = _first_difference(healed.tokens, tokens)
     # The prompt scored token by token (docs/specification.md#prompt-scoring), as /v1/completions echoes it.
     from etalii_dllm import scoring
 

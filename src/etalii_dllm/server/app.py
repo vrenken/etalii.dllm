@@ -206,6 +206,7 @@ def _chat_request(request: ChatCompletionRequest, engine: DllmEngine) -> ChatReq
         context_overflow=request.context_overflow or "stop",
         thinking=thinking_switch(request.reasoning_effort, request.chat_template_kwargs),
         max_reasoning_tokens=request.max_reasoning_tokens,
+        token_healing=bool(request.token_healing),
     )
 
 
