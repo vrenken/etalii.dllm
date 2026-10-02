@@ -190,6 +190,7 @@ module map), with Mermaid diagrams.
 | 30. Exact beam search ✅ | ✅ Beam search with a total order on hypotheses (#211); ✅ length penalties and fixed stopping rules (#212); ✅ n-best lists as choices (#213); ✅ beam receipts, the specification, the reference check, golden values and docs (#214). See [beam search](docs/api.md#beam-search) |
 | 31. Exact JSON Schema constraints ✅ | ✅ String patterns and formats (#216); ✅ string lengths in code points (#217); ✅ integer bounds (#218); ✅ docs, tests and golden values (#219). See [structured output](docs/api.md#structured-output) |
 | 32. Exact context-free grammars ✅ | ✅ GBNF grammars compiled to the byte pushdown automaton, recursion included and left recursion refused (#221); ✅ grammar output in every API and the CLI (#222); ✅ grammars in receipts, replay and the specification (#223); ✅ docs, examples and golden values (#224). See [grammars](docs/api.md#grammars) |
+| 33. Exact numeric and object constraints ✅ | ✅ Bounds on decimal numbers, compared exactly (#226); ✅ `multipleOf` on integers and decimals (#227); ✅ property counts and typed map objects (#228); ✅ docs, tests and golden values (#229). See [structured output](docs/api.md#structured-output) |
 
 ## Working with Claude Code
 

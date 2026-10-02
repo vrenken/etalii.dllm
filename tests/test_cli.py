@@ -68,7 +68,7 @@ def test_chat_json_schema_errors(tmp_path, capsys, source):
 
 
 def test_chat_reports_unsupported_schemas(capsys):
-    assert main(["chat", "Hi", "--json-schema", '{"type": "string", "multipleOf": 2}']) == 1
+    assert main(["chat", "Hi", "--json-schema", '{"type": "string", "uniqueItems": true}']) == 1
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err.startswith("dllm chat: ") and "--json-schema" not in captured.err
