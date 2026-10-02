@@ -18,12 +18,14 @@ from typing import Any
 # normalises both the inputs and the outputs of attention and the MLP with (1 + weight) RMSNorms, gates with GELU
 # (tanh), scales the embeddings and gives its sliding-window layers a RoPE base of their own; "gemma2" is the same
 # without QK-norm or the second RoPE base, and soft-caps the attention scores and the logits. The mixture-of-experts
-# families replace the MLP with experts and a router: "mixtral" is "mistral", "qwen3_moe" is "qwen3" and "olmoe" is
-# "llama" with OLMo's QK-norm over the whole projections.
+# families replace the MLP with experts and a router: "mixtral" is "mistral", "qwen3_moe" is "qwen3", "olmoe" is
+# "llama" with OLMo's QK-norm over the whole projections, "qwen2_moe" is "qwen2" with a gated shared expert and
+# "granitemoe" is "granite" (with or without a shared expert).
 FAMILIES = (
     "gemma2",
     "gemma3",
     "granite",
+    "granitemoe",
     "llama",
     "mistral",
     "mixtral",
@@ -31,6 +33,7 @@ FAMILIES = (
     "olmoe",
     "phi3",
     "qwen2",
+    "qwen2_moe",
     "qwen3",
     "qwen3_moe",
 )
@@ -101,6 +104,12 @@ class TransformerConfig:
     """Whether the chosen experts' probabilities are divided by their total (Mixtral; ``norm_topk_prob``)."""
     dense_layers: tuple[int, ...] | None = None
     """The layers of a mixture-of-experts model that keep a dense MLP of ``intermediate_size``; ``None`` means none."""
+    shared_expert_intermediate_size: int | None = None
+    """The hidden size of the shared expert every token of a sparse layer runs next to its routed experts (Qwen2-MoE,
+    Granite MoE shared); ``None`` means there is none."""
+    shared_expert_gate: bool = False
+    """Whether the shared expert's output is scaled by ``sigmoid(h . w)`` with a gate weight ``[1, hidden]``
+    (Qwen2-MoE)."""
 
     def __post_init__(self) -> None:
         if self.family not in FAMILIES:
@@ -138,6 +147,12 @@ class TransformerConfig:
             raise ValueError("expert_intermediate_size must be positive")
         if self.dense_layers is not None and any(not 0 <= layer < self.layers for layer in self.dense_layers):
             raise ValueError("dense_layers must be layer indices")
+        if self.shared_expert_intermediate_size is not None and (
+            not self.experts or self.shared_expert_intermediate_size < 1
+        ):
+            raise ValueError("a shared expert needs experts and a positive shared_expert_intermediate_size")
+        if self.shared_expert_gate and self.shared_expert_intermediate_size is None:
+            raise ValueError("shared_expert_gate needs a shared expert")
         kind = self.rope_scaling.get("rope_type") if self.rope_scaling else None
         if kind == "longrope":
             pairs = self.rotary_dimension // 2
@@ -218,6 +233,7 @@ class TransformerConfig:
             "local_rope_theta",
             "expert_intermediate_size",
             "dense_layers",
+            "shared_expert_intermediate_size",
         )
         for name in (*optional, "attention_softcap", "logits_softcap"):  # likewise
             if values[name] is None:
@@ -233,6 +249,7 @@ class TransformerConfig:
             ("experts", 0),
             ("experts_per_token", 0),
             ("normalize_expert_weights", False),
+            ("shared_expert_gate", False),
         )
         for name, default in defaults:
             if values[name] == default:
@@ -283,6 +300,13 @@ class TransformerConfig:
                     shapes[p + f"mlp.experts.{e}.gate.weight"] = (self.expert_size, self.hidden_size)
                     shapes[p + f"mlp.experts.{e}.up.weight"] = (self.expert_size, self.hidden_size)
                     shapes[p + f"mlp.experts.{e}.down.weight"] = (self.hidden_size, self.expert_size)
+                if self.shared_expert_intermediate_size is not None:
+                    size = self.shared_expert_intermediate_size
+                    shapes[p + "mlp.shared.gate.weight"] = (size, self.hidden_size)
+                    shapes[p + "mlp.shared.up.weight"] = (size, self.hidden_size)
+                    shapes[p + "mlp.shared.down.weight"] = (self.hidden_size, size)
+                    if self.shared_expert_gate:
+                        shapes[p + "mlp.shared_gate.weight"] = (1, self.hidden_size)
                 continue
             shapes[p + "mlp.gate.weight"] = (self.intermediate_size, self.hidden_size)
             shapes[p + "mlp.up.weight"] = (self.intermediate_size, self.hidden_size)

@@ -37,6 +37,7 @@ from etalii_dllm.numerics import (
     rms_norm,
     rope,
     rope_inv_freq,
+    sigmoid_elementwise,
     softcap,
     swiglu,
 )
@@ -224,10 +225,10 @@ def fold_scales(config: TransformerConfig, weights: Mapping[str, Tensor]) -> dic
     code path (CPU, GPU and the training forward pass)."""
     folded = dict(weights)
     if config.residual_multiplier != 1.0:
-        # Granite scales the outputs of attention and the MLP before the residual add; scaling the two output
-        # projections once is the same map.
+        # Granite scales the outputs of attention and the MLP before the residual add; scaling the output
+        # projections once (every expert's down projection in a mixture of experts) is the same map.
         residual = np.float32(config.residual_multiplier)
-        scaled = ("attention.o.weight", "mlp.down.weight")
+        scaled = ("attention.o.weight", "down.weight")
         folded = {
             name: Tensor(tensor.numpy() * residual) if name.endswith(scaled) else tensor
             for name, tensor in folded.items()
@@ -291,7 +292,7 @@ class Transformer:
         # GPU they are uploaded too); the embedding table stays on the host, which looks up the rows.
         self._w: dict[str, Tensor | Weight | CudaTensor] = {}
         for name, tensor in weights.items():
-            if name.endswith(".router.weight"):  # routers stay float32, as in llama.cpp
+            if name.endswith((".router.weight", ".shared_gate.weight")):  # routers and gates stay float32 (llama.cpp)
                 self._w[name] = _prepare(tensor, None, self.device)
             elif name.endswith(_MATRICES):
                 self._w[name] = _prepare(tensor, quantize, self.device)
@@ -589,7 +590,31 @@ class Transformer:
                 up = linear(x, self._w[q + "up.weight"])  # type: ignore[arg-type]
                 y = linear(swiglu(gate, up, config.activation), self._w[q + "down.weight"]).numpy()  # type: ignore[arg-type]
             out[rows] += y * weights[rows, ranks][:, None]
+        if config.shared_expert_intermediate_size is not None:
+            out = out + self._shared_expert(h, layer)
         return out
+
+    def _shared_expert(self, h: np.ndarray, layer: int) -> np.ndarray:
+        """The shared expert's output ``[rows, hidden]`` for every row, times ``sigmoid(h . gate)`` (rounded once)
+        when it is gated."""
+        config = self.config
+        q = f"layers.{layer}.mlp.shared."
+        if self.device == "cuda":
+            x = CudaTensor.upload(h)
+            gate = cuda.linear(x, self._w[q + "gate.weight"])  # type: ignore[arg-type]
+            up = cuda.linear(x, self._w[q + "up.weight"])  # type: ignore[arg-type]
+            y = cuda.linear(cuda.swiglu(gate, up, config.activation), self._w[q + "down.weight"]).numpy()  # type: ignore[arg-type]
+            if config.shared_expert_gate:
+                score = cuda.linear(x, self._w[f"layers.{layer}.mlp.shared_gate.weight"]).numpy()  # type: ignore[arg-type]
+        else:
+            gate = linear(h, self._w[q + "gate.weight"])  # type: ignore[arg-type]
+            up = linear(h, self._w[q + "up.weight"])  # type: ignore[arg-type]
+            y = linear(swiglu(gate, up, config.activation), self._w[q + "down.weight"]).numpy()  # type: ignore[arg-type]
+            if config.shared_expert_gate:
+                score = linear(h, self._w[f"layers.{layer}.mlp.shared_gate.weight"]).numpy()  # type: ignore[arg-type]
+        if config.shared_expert_gate:
+            y = y * sigmoid_elementwise(score)
+        return y
 
     def mlp_activation(self, middle: npt.ArrayLike, layer: int, expert: int | None = None) -> FloatArray:
         """The MLP hidden activation ``act(gate(h)) * up(h)`` of ``layer`` for residual stream rows ``middle`` (after

@@ -118,6 +118,12 @@ def reference_logits(
                     q = f"{p}mlp.experts.{e}."
                     gate = h[row] @ w[q + "gate.weight"].T
                     mlp[row] += weight * ((act(gate) * (h[row] @ w[q + "up.weight"].T)) @ w[q + "down.weight"].T)
+            if config.shared_expert_intermediate_size is not None:  # every row's shared expert, maybe gated
+                q = f"{p}mlp.shared."
+                shared = (act(h @ w[q + "gate.weight"].T) * (h @ w[q + "up.weight"].T)) @ w[q + "down.weight"].T
+                if config.shared_expert_gate:
+                    shared = shared / (1.0 + np.exp(-(h @ w[p + "mlp.shared_gate.weight"].T)))
+                mlp = mlp + shared
         else:
             gate = h @ w[p + "mlp.gate.weight"].T
             mlp = (act(gate) * (h @ w[p + "mlp.up.weight"].T)) @ w[p + "mlp.down.weight"].T

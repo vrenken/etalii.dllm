@@ -368,7 +368,7 @@ class DecoderGradients:
         if config.residual_multiplier != 1.0:
             residual = np.float32(config.residual_multiplier)
             for name in grads:
-                if name.endswith(("attention.o.weight", "mlp.down.weight")):
+                if name.endswith(("attention.o.weight", "down.weight")):
                     grads[name] = grads[name] * residual
         if config.rope_attention_factor != 1.0:
             for name, values in grads.items():
