@@ -202,10 +202,30 @@ are ranked: the sampler's (probability, token id) order and its random stream ar
 Supported schema keywords: `type` (also as a list), `properties`, `required`, `additionalProperties` (no extra
 properties are generated; a schema without `properties` is a free-form object), `items`, `minItems`, `maxItems`,
 `enum`, `const`, `anyOf`, `oneOf` (as `anyOf`), single-schema `allOf`, local `$ref` (`#/$defs/...`,
-`#/definitions/...`, recursion allowed) and `nullable`. Annotations such as `title`, `description` and `format` are
-ignored. Keywords that constrain values in ways the automaton does not check (`pattern`, `minLength`, `minimum`,
+`#/definitions/...`, recursion allowed) and `nullable`. Annotations such as `title` and `description` are ignored.
+Keywords the automaton does not check (`multipleOf`, `uniqueItems`, `minProperties`, bounds on non-integer numbers,
 ...) are refused with a 400 error rather than silently ignored. Properties are generated in schema order; optional
 ones may be skipped. At most 16 whitespace bytes may appear between JSON tokens.
+
+Value constraints are exact too (Phase 31), each compiled to a byte automaton:
+
+| Keyword | Rule |
+| --- | --- |
+| `pattern` | The [regex syntax](#decoding-controls) of `guided_regex`, found anywhere in the string as JSON Schema says, unless a leading `^` or trailing `$` anchors it. `^a\|b` is refused as ambiguous: group the alternation. |
+| `format` | `date` (`YYYY-MM-DD`, month 01 to 12, day 01 to 31), `time` (`hh:mm:ss`, optional fraction, `Z` or an offset), `date-time` (both, joined by `T`), `uuid` and `ipv4`. Other formats stay annotations. |
+| `minLength`, `maxLength` | Counted in code points. |
+| `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum` | On integers, as numbers (or the draft 4 booleans). The answer is the decimal text of an integer in the range, never `-0`. |
+
+A constrained string is written without escape sequences, so it holds no quote, backslash or control character. Its
+automaton is the intersection of the automata of each keyword, with every state that cannot reach a match removed, so
+decoding never runs into a dead end; a schema no string can satisfy is refused with a 400 error. Tool parameters only
+guide the model, so their value constraints are ignored.
+
+```bash
+dllm chat "Book a flight" --json-schema '{"type": "object", "properties": {"from": {"type": "string", "pattern": "^[A-Z]{3}$"},
+  "date": {"type": "string", "format": "date"}, "seats": {"type": "integer", "minimum": 1, "maximum": 9}},
+  "required": ["from", "date", "seats"]}'
+```
 
 ## Decoding controls
 

@@ -188,6 +188,7 @@ module map), with Mermaid diagrams.
 | 28. Reproducible scoring and voting ✅ | ✅ The OpenAI completions API, equal to `dllm generate` bit for bit (#201); ✅ exact prompt scoring with `echo` and `logprobs`, and `dllm score` (#202); ✅ self-consistency voting with a fixed rule, `vote` and `--vote` (#203); ✅ score and vote receipts, the specification, the reference check, golden values and docs (#204). See [scoring](docs/api.md#scoring) and [voting](docs/api.md#voting) |
 | 29. Exact guided decoding ✅ | ✅ Classifier-free guidance with a negative prompt (#206); ✅ contrastive decoding against a smaller amateur model (#207); ✅ logit ensembles of models that share a tokenizer (#208); ✅ guided answers in receipts, the specification, the reference check, conformance vectors, golden values and docs (#209). See [guided decoding](docs/api.md#guided-decoding) |
 | 30. Exact beam search ✅ | ✅ Beam search with a total order on hypotheses (#211); ✅ length penalties and fixed stopping rules (#212); ✅ n-best lists as choices (#213); ✅ beam receipts, the specification, the reference check, golden values and docs (#214). See [beam search](docs/api.md#beam-search) |
+| 31. Exact JSON Schema constraints ✅ | ✅ String patterns and formats (#216); ✅ string lengths in code points (#217); ✅ integer bounds (#218); ✅ docs, tests and golden values (#219). See [structured output](docs/api.md#structured-output) |
 
 ## Working with Claude Code
 

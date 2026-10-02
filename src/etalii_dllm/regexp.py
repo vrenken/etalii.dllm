@@ -440,6 +440,156 @@ class Dfa:
         return self.accepting(state)
 
 
+def _trimmed(pattern: str, table: list[dict[int, int]], accepting: list[bool]) -> Dfa:
+    """The automaton of ``table`` without the states that cannot reach a match, renumbered in the order a
+    breadth-first walk over the bytes 0..255 reaches them; raises when nothing matches."""
+    reverse: list[list[int]] = [[] for _ in table]
+    for state, row in enumerate(table):
+        for target in row.values():
+            reverse[target].append(state)
+    live = {state for state, accepts in enumerate(accepting) if accepts}
+    pending = sorted(live)
+    while pending:
+        for source in reverse[pending.pop()]:
+            if source not in live:
+                live.add(source)
+                pending.append(source)
+    if 0 not in live:
+        raise _error(f"no text satisfies {pattern}")
+    ids = {0: 0}
+    order = [0]
+    index = 0
+    while index < len(order):
+        for _, target in sorted(table[order[index]].items()):
+            if target in live and target not in ids:
+                ids[target] = len(order)
+                order.append(target)
+        index += 1
+    dfa = Dfa.__new__(Dfa)
+    dfa.pattern = pattern
+    dfa._table = [{b: ids[t] for b, t in sorted(table[old].items()) if t in live} for old in order]
+    dfa._accepting = [accepting[old] for old in order]
+    return dfa
+
+
+def intersect(first: Dfa, second: Dfa) -> Dfa:
+    """The automaton of the texts both match (the product automaton, trimmed: every state can still reach a match)."""
+    ids = {(0, 0): 0}
+    pairs = [(0, 0)]
+    table: list[dict[int, int]] = []
+    index = 0
+    while index < len(pairs):
+        a, b = pairs[index]
+        index += 1
+        row: dict[int, int] = {}
+        for byte in sorted(first._table[a]):
+            target = (first._table[a][byte], second.step(b, byte))
+            if target[1] < 0:
+                continue
+            if target not in ids:
+                if len(pairs) >= MAX_DFA_STATES:
+                    raise _error("the combined string constraints are too large")
+                ids[target] = len(pairs)
+                pairs.append(target)
+            row[byte] = ids[target]
+        table.append(row)
+    accepting = [first.accepting(a) and second.accepting(b) for a, b in pairs]
+    return _trimmed(f"({first.pattern}) and ({second.pattern})", table, accepting)
+
+
+class Counted:
+    """An automaton that also counts code points: the texts ``dfa`` matches with ``minimum`` to ``maximum``
+    (``None``: no limit) characters. A state is a pair (``dfa`` state, characters so far), interned to an integer
+    (0 is the start); a byte is only allowed when a match within the bounds can still follow, so constrained
+    decoding never runs into a dead end."""
+
+    def __init__(self, dfa: Dfa, minimum: int, maximum: int | None) -> None:
+        self.dfa, self.minimum, self.maximum = dfa, minimum, maximum
+        self.pattern = f"({dfa.pattern}) with {minimum} to {'any' if maximum is None else maximum} characters"
+        # Per state: the distinct (target, whether the byte starts a character) moves.
+        self._moves = [
+            tuple(dict.fromkeys((target, not 0x80 <= byte <= 0xBF) for byte, target in sorted(row.items())))
+            for row in dfa._table
+        ]
+        self._viable: dict[tuple[int, int], bool] = {}
+        self._pairs: list[tuple[int, int]] = [(0, 0)]
+        self._ids = {(0, 0): 0}
+        self._steps: dict[tuple[int, int], int] = {}
+        if not self._can_finish(0, 0):
+            raise _error(f"no text satisfies {self.pattern}")
+
+    def _count(self, count: int) -> int:
+        """Counts past ``minimum`` are alike when there is no maximum."""
+        return min(count, self.minimum) if self.maximum is None else count
+
+    def _can_finish(self, state: int, count: int) -> bool:
+        """Whether a match within the bounds can follow (pairs form an acyclic graph below the cap)."""
+        pending = [(state, count)]
+        while pending:
+            key = pending[-1]
+            if key in self._viable:
+                pending.pop()
+                continue
+            current, characters = key
+            if self.maximum is None and characters >= self.minimum:
+                self._viable[key] = True  # every state of a trimmed automaton can reach a match
+                pending.pop()
+                continue
+            children = [
+                (target, self._count(characters + starts))
+                for target, starts in self._moves[current]
+                if self.maximum is None or characters + starts <= self.maximum
+            ]
+            unresolved = [child for child in children if child not in self._viable]
+            if unresolved:
+                pending += unresolved
+                continue
+            done = self.dfa.accepting(current) and characters >= self.minimum
+            self._viable[key] = done or any(self._viable[child] for child in children)
+            pending.pop()
+        return self._viable[(state, count)]
+
+    def step(self, state: int, byte: int) -> int:
+        key = (state, byte)
+        cached = self._steps.get(key)
+        if cached is not None:
+            return cached
+        current, characters = self._pairs[state]
+        target = self.dfa.step(current, byte)
+        result = -1
+        if target >= 0:
+            count = characters + (not 0x80 <= byte <= 0xBF)
+            if self.maximum is None or count <= self.maximum:
+                pair = (target, self._count(count))
+                if self._can_finish(*pair):
+                    if pair not in self._ids:
+                        self._ids[pair] = len(self._pairs)
+                        self._pairs.append(pair)
+                    result = self._ids[pair]
+        self._steps[key] = result
+        return result
+
+    def accepting(self, state: int) -> bool:
+        current, characters = self._pairs[state]
+        return self.dfa.accepting(current) and characters >= self.minimum
+
+    def reads(self, state: int) -> bool:
+        current, characters = self._pairs[state]
+        return any(
+            (self.maximum is None or characters + starts <= self.maximum)
+            and self._can_finish(target, self._count(characters + starts))
+            for target, starts in self._moves[current]
+        )
+
+    def matches(self, data: bytes) -> bool:
+        state = 0
+        for byte in data:
+            state = self.step(state, byte)
+            if state < 0:
+                return False
+        return self.accepting(state)
+
+
 def compile_regex(pattern: str) -> Dfa:
     """The automaton of ``pattern``; raises :class:`etalii_dllm.grammar.GrammarError` for unsupported syntax."""
     return Dfa(pattern)

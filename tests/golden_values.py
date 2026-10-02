@@ -246,3 +246,6 @@ BEAM_FINGERPRINTS = {
     "raw": "4a17e38917e5ee70296ca38876925d7fd2be6a62b3550208ec8d184cb51abe9d",
 }
 """Fingerprints of the best beam search answers on the test model (tests/test_beam.py)."""
+
+SCHEMA_FINGERPRINTS = {"person": "f830d3b634b6f3b57323df3a05a72809757dd1393c510ea7f2a14ade7e894aaa"}
+"""Fingerprint of an answer constrained by patterns, formats, lengths and bounds (tests/test_schema_constraints.py)."""
