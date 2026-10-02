@@ -194,6 +194,7 @@ module map), with Mermaid diagrams.
 | 34. Exact tuples, key names and unique items ✅ | ✅ Tuples with `prefixItems` (#231); ✅ constrained property names (#232); ✅ `uniqueItems` over finite item sets (#233); ✅ docs, tests and golden values (#234). See [structured output](docs/api.md#structured-output) |
 | 35. Exact schema combinators ✅ | ✅ `allOf` over several schemas (#236); ✅ `not` and `if`/`then`/`else` over decidable conditions (#237); ✅ `patternProperties` (#238); ✅ `contains` with `minContains`/`maxContains` (#239); ✅ docs, tests and golden values (#240). See [structured output](docs/api.md#structured-output) |
 | 36. Exact token healing ✅ | ✅ Token healing for raw prompts (#242); ✅ for chat prefills (#243); ✅ in receipts, the specification and the reference implementation (#244); ✅ docs, tests and golden values (#245). See [token healing](docs/api.md#token-healing) |
+| 37. Exact fill-in-the-middle ✅ | ✅ Fill-in-the-middle prompts from the model's FIM tokens (#247); ✅ `suffix` on the completions API, Ollama and `dllm generate` (#248); ✅ in receipts, the specification and the reference implementation (#249); ✅ docs, tests and golden values (#250). See [fill-in-the-middle](docs/api.md#fill-in-the-middle) |
 
 ## Working with Claude Code
 

@@ -23,6 +23,7 @@ from typing import Any
 import numpy as np
 
 from etalii_dllm import __version__, numerics, unicode
+from etalii_dllm.infill import FimTokens
 from etalii_dllm.sampling import GREEDY, SamplingOptions
 
 PROMPT = "The capital of France is"
@@ -33,6 +34,8 @@ THINKING_BUDGET = 2
 """Tokens the rolled check's context window holds beyond the prompt."""
 SAMPLED = SamplingOptions(temperature=0.8, seed=7)
 NEGATIVE_PROMPT = "The capital of Germany is"
+SUFFIX = ", and its largest city too."
+"""The text after the gap ``dllm verify --reference`` fills in, for models with fill-in-the-middle tokens."""
 GUIDED = SamplingOptions(temperature=0.8, seed=7, negative_prompt=NEGATIVE_PROMPT, guidance_scale=2.0)
 """The guided check: a sampled answer with classifier-free guidance (docs/specification.md#guided-decoding)."""
 BEAM_WIDTH = 3
@@ -194,8 +197,9 @@ class ReferenceCheck:
     """``dllm verify --reference``: the engine against the independent reference implementation (issue #162)."""
 
     results: dict[str, str]
-    """``logits``, ``greedy``, ``sampled``, ``controlled``, ``rolled``, ``budgeted``, ``guided``, ``healed``, ``beam``
-    and ``scored``: ``"equal"``, or where the two first differ."""
+    """``logits``, ``greedy``, ``sampled``, ``controlled``, ``rolled``, ``budgeted``, ``guided``, ``healed``, ``beam``,
+    ``scored`` and, for models with fill-in-the-middle tokens, ``infilled``: ``"equal"``, or where the two first
+    differ."""
 
     @property
     def equal(self) -> bool:
@@ -281,6 +285,14 @@ def check_reference(engine: Any, max_tokens: int = MAX_TOKENS) -> ReferenceCheck
     allowed = reference.healing(engine.tokenizer.decode_bytes(context[-1:]), token_bytes)
     tokens, _ = twin.generate(context[:-1], max_tokens, reference.sampler(SAMPLED), stops, allowed=allowed)
     results["healed"] = _first_difference(healed.tokens, tokens)
+    # A middle filled in between the prompt and a suffix (docs/specification.md#fill-in-the-middle), for models with
+    # FIM tokens.
+    if FimTokens.of(engine.tokenizer) is not None:
+        middle = engine.complete_stream(PROMPT, max_tokens, SAMPLED, suffix=SUFFIX).result()
+        token_id = engine.tokenizer.token_to_id  # type: ignore[attr-defined]
+        prompt, ends = reference.fill_in_the_middle(token_id, context, engine.tokenizer.encode(SUFFIX))
+        tokens, _ = twin.generate(prompt, max_tokens, reference.sampler(SAMPLED), [*stops, *ends])
+        results["infilled"] = _first_difference(middle.tokens, tokens)
     # The prompt scored token by token (docs/specification.md#prompt-scoring), as /v1/completions echoes it.
     from etalii_dllm import scoring
 

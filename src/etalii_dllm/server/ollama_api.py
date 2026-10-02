@@ -264,8 +264,8 @@ def _chat_request(body: ChatBody, engine: DllmEngine) -> ChatRequest:
 def _generate_request(body: GenerateBody, engine: DllmEngine) -> ChatRequest:
     if body.images:
         raise ValueError("images are not supported")
-    if body.suffix or body.template or body.context:
-        raise ValueError("suffix, template and context are not supported")
+    if body.template or body.context:
+        raise ValueError("template and context are not supported")
     options, max_tokens, stop = _options(body, engine)
     messages = [ChatMessage("system", body.system)] if body.system else []
     messages.append(ChatMessage("user", body.prompt or ""))
@@ -281,7 +281,9 @@ def _generate_request(body: GenerateBody, engine: DllmEngine) -> ChatRequest:
         top_logprobs=_top_logprobs(body),
         request_id=request_id,
         previous_receipt=body.previous_receipt,
-        prompt=(body.prompt or "") if body.raw else None,
+        # A suffix fills in the middle between the prompt and it, with the model's own FIM tokens, as Ollama does.
+        prompt=(body.prompt or "") if body.raw or body.suffix else None,
+        suffix=body.suffix or None,
         truncation="auto" if body.truncate else "disabled",
         context_overflow="roll" if body.shift else "stop",
         thinking=None if body.think is None else body.think is not False,

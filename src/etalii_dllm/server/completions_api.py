@@ -125,8 +125,8 @@ def _error(message: str, code: str | None = None) -> JSONResponse:
 
 def _requests(request: CompletionRequest, engine: DllmEngine) -> list[ChatRequest]:
     """One engine request per prompt; raises ``ValueError`` for invalid requests."""
-    if request.suffix:
-        raise ValueError("suffix is not supported")
+    if request.suffix and request.echo:
+        raise ValueError("echo cannot be combined with suffix")
     n = request.n if request.n is not None else 1
     if not 1 <= n <= MAX_CHOICES:
         raise ValueError(f"n must be between 1 and {MAX_CHOICES}")
@@ -178,6 +178,7 @@ def _requests(request: CompletionRequest, engine: DllmEngine) -> list[ChatReques
             request_id=request_id,
             prompt=prompt,
             token_healing=bool(request.token_healing),
+            suffix=request.suffix or None,  # an empty suffix is no suffix, as in OpenAI's API
         )
         for prompt in prompts
     ]
