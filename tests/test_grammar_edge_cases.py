@@ -12,12 +12,12 @@ from etalii_dllm.grammar import Grammar, GrammarError, Matcher, TokenConstraint,
 @pytest.mark.parametrize(
     ("schema", "message"),
     [
-        ({"type": "string", "multipleOf": 1}, "not supported by constrained decoding: multipleOf"),
-        ({"type": "number", "maximum": 3, "minimum": 0}, "supported on integers only"),
+        ({"type": "string", "propertyNames": {}}, "not supported by constrained decoding: propertyNames"),
+        ({"type": "number", "multipleOf": 0}, "'multipleOf' must be greater than 0"),
         ({"type": "object", "patternProperties": {}}, "patternProperties"),
         ({"type": "array", "uniqueItems": True}, "uniqueItems"),
         ({"not": {"type": "null"}}, "not supported by constrained decoding: not"),
-        ({"type": "array", "items": {"type": "string", "format": "x", "minProperties": 1}}, "minProperties"),  # nested
+        ({"type": "array", "items": {"type": "string", "format": "x", "contains": {}}}, "contains"),  # nested
         ("string", "a schema must be an object, got 'string'"),
         ({"type": "array", "items": 5}, "a schema must be an object, got 5"),
         ({"enum": []}, "'enum' must not be empty"),

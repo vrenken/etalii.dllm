@@ -45,7 +45,7 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
   `batching` (concurrent generations share `forward_batch` steps), `chat`, `engine` (`DllmEngine`, the facade shared by every front
   end; `DLLM_MODEL`/`--model` selects a `model.dllm`), `transformer` (Llama/Qwen2/Qwen3 decoder + KV cache), `bpe`, `unicode` (Unicode tables pinned to one version) and
   `chat_template` (the model's own tokenizer and Jinja template), `sampling` (logit bias, penalties, top-k/top-p/
-  min-p, choice seeds; `docs/api.md#decoding-controls`), `regexp` (regexes compiled to byte DFAs for `grammar`), `gbnf` (GBNF grammars for `grammar`; `docs/api.md#grammars`), `cuda` (the GPU backend: NVRTC discovery, `CudaTensor`, device
+  min-p, choice seeds; `docs/api.md#decoding-controls`), `regexp` (regexes compiled to byte DFAs for `grammar`), `numeric_automata` (number bounds and `multipleOf` as byte DFAs, exact decimals), `gbnf` (GBNF grammars for `grammar`; `docs/api.md#grammars`), `cuda` (the GPU backend: NVRTC discovery, `CudaTensor`, device
   ops; `--device cuda`/`DLLM_DEVICE`), `architecture` (`TransformerConfig`), `modelfile`
   (the `model.dllm` container, `docs/model-format.md`), `importing` (safetensors/GGUF readers and `dllm import`),
   `training` (gradients, AdamW, data order, checkpoints and `dllm finetune`, DPO on preference pairs in

@@ -247,8 +247,12 @@ BEAM_FINGERPRINTS = {
 }
 """Fingerprints of the best beam search answers on the test model (tests/test_beam.py)."""
 
-SCHEMA_FINGERPRINTS = {"person": "f830d3b634b6f3b57323df3a05a72809757dd1393c510ea7f2a14ade7e894aaa"}
-"""Fingerprint of an answer constrained by patterns, formats, lengths and bounds (tests/test_schema_constraints.py)."""
+SCHEMA_FINGERPRINTS = {
+    "person": "f830d3b634b6f3b57323df3a05a72809757dd1393c510ea7f2a14ade7e894aaa",
+    "measurement": "b9d85221c7cbf5a8f166528ffa20f15626856ae7787571089aaaaf4e75c5a5c3",
+}
+"""Fingerprints of answers constrained by patterns, formats, lengths and bounds (tests/test_schema_constraints.py)
+and by decimal bounds, multipleOf, property counts and map objects (tests/test_numeric_constraints.py)."""
 
 GRAMMAR_FINGERPRINTS = {"colours": "6c3e9ca969a5eb689cbf60668385e0136883735a8059c831ddf4328efe2515af"}
 """Fingerprint of an answer constrained by a GBNF grammar (tests/test_gbnf.py)."""

@@ -200,25 +200,28 @@ needed when the model wants something the schema forbids. Masking changes which 
 are ranked: the sampler's (probability, token id) order and its random stream are unchanged.
 
 Supported schema keywords: `type` (also as a list), `properties`, `required`, `additionalProperties` (no extra
-properties are generated; a schema without `properties` is a free-form object), `items`, `minItems`, `maxItems`,
+properties are generated; a schema without `properties` is a free-form object, whose values follow
+`additionalProperties` when that is a schema), `minProperties`, `maxProperties`, `items`, `minItems`, `maxItems`,
 `enum`, `const`, `anyOf`, `oneOf` (as `anyOf`), single-schema `allOf`, local `$ref` (`#/$defs/...`,
 `#/definitions/...`, recursion allowed) and `nullable`. Annotations such as `title` and `description` are ignored.
-Keywords the automaton does not check (`multipleOf`, `uniqueItems`, `minProperties`, bounds on non-integer numbers,
-...) are refused with a 400 error rather than silently ignored. Properties are generated in schema order; optional
-ones may be skipped. At most 16 whitespace bytes may appear between JSON tokens.
+Keywords the automaton does not check (`uniqueItems`, `patternProperties`, `propertyNames`, `not`, ...) are refused
+with a 400 error rather than silently ignored. Properties are generated in schema order; optional ones may be skipped.
+At most 16 whitespace bytes may appear between JSON tokens.
 
-Value constraints are exact too (Phase 31), each compiled to a byte automaton:
+Value constraints are exact too (Phases 31 and 33), each compiled to a byte automaton:
 
 | Keyword | Rule |
 | --- | --- |
 | `pattern` | The [regex syntax](#decoding-controls) of `guided_regex`, found anywhere in the string as JSON Schema says, unless a leading `^` or trailing `$` anchors it. `^a\|b` is refused as ambiguous: group the alternation. |
 | `format` | `date` (`YYYY-MM-DD`, month 01 to 12, day 01 to 31), `time` (`hh:mm:ss`, optional fraction, `Z` or an offset), `date-time` (both, joined by `T`), `uuid` and `ipv4`. Other formats stay annotations. |
 | `minLength`, `maxLength` | Counted in code points. |
-| `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum` | On integers, as numbers (or the draft 4 booleans). The answer is the decimal text of an integer in the range, never `-0`. |
+| `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum` | On integers and numbers, as numbers (or the draft 4 booleans). The answer is a decimal text in the range, compared exactly with the bound as written (a float bound as its shortest decimal, so `0.1` means 0.1), never with an exponent and never `-0`. |
+| `multipleOf` | An integer or a decimal such as `0.01`: the answer's decimal value divided by it is an integer, in exact decimal arithmetic. Divisors with too many digits (more than the automaton's 10,000 states) are refused. |
+| `minProperties`, `maxProperties` | The number of members. On an object without `properties` (whose names may repeat), `minProperties` above 1 is refused. |
 
 A constrained string is written without escape sequences, so it holds no quote, backslash or control character. Its
 automaton is the intersection of the automata of each keyword, with every state that cannot reach a match removed, so
-decoding never runs into a dead end; a schema no string can satisfy is refused with a 400 error. Tool parameters only
+decoding never runs into a dead end; a schema no string (or number) can satisfy is refused with a 400 error. Tool parameters only
 guide the model, so their value constraints are ignored.
 
 ```bash

@@ -659,6 +659,19 @@ A GBNF grammar (the format llama.cpp uses) can describe answers JSON schemas and
 expressions. Every answer follows the grammar, and the same request gives the same answer on every machine. The
 server takes it as a `grammar` field on chat completions and completions. Details: [grammars](api.md#grammars).
 
+## 29. Numbers within bounds, multiples and maps
+
+```bash
+dllm chat "Price a laptop" --json-schema '{"type": "object", "properties": {
+  "price": {"type": "number", "minimum": 0, "maximum": 5000, "multipleOf": 0.01},
+  "ratings": {"type": "object", "additionalProperties": {"type": "number", "minimum": 0, "maximum": 5}, "maxProperties": 3}},
+  "required": ["price", "ratings"]}'
+```
+
+Bounds on decimal numbers, `multipleOf` (such as cents), the number of properties and the values of map-like objects
+are now enforced exactly too, checked in decimal arithmetic rather than floating point. Details:
+[structured output](api.md#structured-output).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
@@ -681,8 +694,8 @@ server takes it as a `grammar` field on chat completions and completions. Detail
 - Tool calling works best with models trained for it (Qwen2.5-Instruct uses the same `<tool_call>` format the
   engine asks for). SmolLM2-135M does not know tools, so expect clumsy calls from it; constrained decoding still
   guarantees that every call names a real tool with arguments that fit its schema.
-- Structured output supports the common JSON-schema keywords, including `pattern`, `format`, string lengths and
-  integer bounds; `multipleOf`, `uniqueItems`, bounds on non-integer numbers and similar are refused with an error
+- Structured output supports the common JSON-schema keywords, including `pattern`, `format`, string lengths, number
+  bounds, `multipleOf` and property counts; `uniqueItems`, `patternProperties`, `not` and similar are refused with an error
   (see [HTTP API](api.md#structured-output)). GBNF grammars may not be left-recursive and cannot use llama.cpp's
   token references (`<...>`) ([grammars](api.md#grammars)). No images or audio.
 - MCP servers' own resources and prompts are not offered to the model (only their tools), and servers that ask

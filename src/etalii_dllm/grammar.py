@@ -15,16 +15,18 @@ Determinism: the automaton is a pure function of the grammar and the bytes; stac
 (never in set iteration order), and the allowed tokens are returned in ascending id order.
 
 Supported JSON schema keywords: ``type`` (a name or a list of names), ``properties``, ``required``,
-``additionalProperties`` (``false``, or a free-form object when there are no ``properties``), ``items``,
-``minItems``, ``maxItems``, ``enum``, ``const``, ``anyOf``, ``oneOf`` (treated as ``anyOf``), ``allOf`` with a
-single schema, ``$ref`` to ``#/$defs/...`` or ``#/definitions/...``, and ``nullable``. Value constraints are
-compiled to byte automata (:mod:`etalii_dllm.regexp`): on strings ``pattern`` (found anywhere unless anchored by a
-leading ``^`` or trailing ``$``), the :data:`FORMATS` and ``minLength``/``maxLength`` in code points (such strings are
-written without escape sequences, so they hold no quote, backslash or control character); on integers ``minimum``,
-``maximum``, ``exclusiveMinimum`` and ``exclusiveMaximum``. Annotations (``title``, ``description``, ``default``,
-``examples``, other ``format`` values, ``$schema``, ``$id``, ``strict``) are ignored. Keywords the automaton does not
-check (``multipleOf``, ``uniqueItems``, bounds on non-integer numbers, ...) are rejected with a :class:`GrammarError`
-rather than silently ignored; ``lenient`` grammars (tool parameters) ignore them and the value constraints.
+``additionalProperties`` (``false``, or, when there are no ``properties``, a free-form object whose values follow
+the schema it gives), ``minProperties``/``maxProperties``, ``items``, ``minItems``, ``maxItems``, ``enum``,
+``const``, ``anyOf``, ``oneOf`` (treated as ``anyOf``), ``allOf`` with a single schema, ``$ref`` to ``#/$defs/...``
+or ``#/definitions/...``, and ``nullable``. Value constraints are compiled to byte automata
+(:mod:`etalii_dllm.regexp`): on strings ``pattern`` (found anywhere unless anchored by a leading ``^`` or trailing
+``$``), the :data:`FORMATS` and ``minLength``/``maxLength`` in code points (such strings are written without escape
+sequences, so they hold no quote, backslash or control character); on numbers ``minimum``, ``maximum``,
+``exclusiveMinimum``, ``exclusiveMaximum`` and ``multipleOf``, compared in exact decimal arithmetic
+(:mod:`etalii_dllm.numeric_automata`). Annotations (``title``, ``description``, ``default``, ``examples``, other
+``format`` values, ``$schema``, ``$id``, ``strict``) are ignored. Keywords the automaton does not check
+(``uniqueItems``, ``patternProperties``, ``not``, ...) are rejected with a :class:`GrammarError` rather than silently
+ignored; ``lenient`` grammars (tool parameters) ignore them and the value constraints.
 
 Object properties are generated in the order the schema lists them; optional properties may be left out. Between
 tokens the model may write up to :data:`MAX_WHITESPACE` whitespace bytes, enough for pretty-printed JSON but not
@@ -57,8 +59,9 @@ _STRUCTURE = frozenset(
 )  # fmt: skip
 _STRING_KEYWORDS = ("pattern", "minLength", "maxLength")
 _BOUNDS = ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum")
-_CONSTRAINTS = frozenset({*_STRING_KEYWORDS, *_BOUNDS})
-"""Value constraints compiled to byte automata (:func:`string_automaton`, :func:`integer_automaton`)."""
+_CONSTRAINTS = frozenset({*_STRING_KEYWORDS, *_BOUNDS, "multipleOf", "minProperties", "maxProperties"})
+"""Value constraints compiled to byte automata (:func:`string_automaton`, :func:`integer_automaton`,
+:func:`etalii_dllm.numeric_automata.number_automaton`) or checked by the object automaton (property counts)."""
 
 _CONTENT = r'[^"\\\x00-\x1f]*'
 """JSON string content written without escapes: no quote, backslash or control character."""
@@ -115,13 +118,25 @@ class _Union(_Node):
 
 
 class _Object(_Node):
-    """``properties`` as ``(json-encoded name, schema, required)``; ``free`` objects take any members."""
+    """``properties`` as ``(json-encoded name, schema, required)``; ``free`` objects take any names, with values
+    valid under ``values``. ``minimum``/``maximum`` bound the number of members."""
 
-    __slots__ = ("free", "properties")
+    __slots__ = ("free", "maximum", "minimum", "properties", "values")
 
-    def __init__(self, properties: Sequence[tuple[bytes, _Node, bool]], free: bool) -> None:
+    def __init__(
+        self,
+        properties: Sequence[tuple[bytes, _Node, bool]],
+        free: bool,
+        *,
+        values: _Node | None = None,
+        minimum: int = 0,
+        maximum: int | None = None,
+    ) -> None:
         self.properties = tuple(properties)
         self.free = free
+        self.values = values
+        self.minimum = minimum
+        self.maximum = maximum
 
 
 class _Array(_Node):
@@ -143,7 +158,7 @@ class _Text(_Node):
 
 
 class _Digits(_Node):
-    """An integer whose JSON text the automaton ``dfa`` matches."""
+    """A number whose JSON text the automaton ``dfa`` matches."""
 
     __slots__ = ("dfa",)
 
@@ -170,7 +185,7 @@ class _Rule(_Node):
 
 _ANY = _Any()
 _STRING = _String()
-_FREE_OBJECT = _Object((), free=True)
+_FREE_OBJECT = _Object((), free=True, values=_ANY)
 _ANY_ARRAY = _Array(_ANY, 0, None)
 _ANY_SCALARS = (_STRING, _Number(integer=False), _Literals([b"true", b"false", b"null"]))
 
@@ -377,11 +392,14 @@ class _SchemaCompiler:
             maximum = None if max_length is None else int(max_length)
             return _Text(string_automaton(pattern, text_format, min_length, maximum))
         if kind in ("number", "integer"):
-            if self._lenient or not any(k in schema for k in _BOUNDS):
+            if self._lenient or not any(k in schema for k in (*_BOUNDS, "multipleOf")):
                 return _Number(integer=kind == "integer")
-            if kind == "number":
-                raise GrammarError("minimum, maximum and their exclusive forms are supported on integers only")
-            return _Digits(integer_automaton(*_bounds(schema)))
+            from etalii_dllm.numeric_automata import decimal_bounds, exact, number_automaton
+
+            if kind == "integer" and "multipleOf" not in schema:
+                return _Digits(integer_automaton(*_bounds(schema)))
+            multiple = exact(schema["multipleOf"], "multipleOf") if "multipleOf" in schema else None
+            return _Digits(number_automaton(*decimal_bounds(schema), multiple, kind == "integer"))
         if kind == "boolean":
             return _Literals([b"true", b"false"])
         if kind == "null":
@@ -399,16 +417,39 @@ class _SchemaCompiler:
             unknown = sorted(required - set(properties))
             if unknown and properties:
                 raise GrammarError(f"required properties without a schema: {', '.join(unknown)}")
+            minimum, maximum = self._counts(schema)
+            additional = schema.get("additionalProperties", True)
             if not properties:
-                if schema.get("additionalProperties", True) is False:
+                if additional is False:
+                    if minimum:
+                        raise GrammarError("no object without properties has 'minProperties' members")
                     return _Object((), free=False)
-                return _FREE_OBJECT
+                if minimum > 1:
+                    # Free names may repeat, and a repeated name counts once: only one member is certain.
+                    raise GrammarError("'minProperties' above 1 needs declared 'properties'")
+                values = _ANY if self._lenient or additional is True else self.compile(additional)
+                if values is _ANY and (minimum, maximum) == (0, None):
+                    return _FREE_OBJECT
+                return _Object((), free=True, values=values, minimum=minimum, maximum=maximum)
             # With declared properties the model writes exactly those (``additionalProperties`` is not used).
-            return _Object(
-                [(_encode(str(name)), self.compile(sub), name in required) for name, sub in properties.items()],
-                free=False,
-            )
+            members = [(_encode(str(name)), self.compile(sub), name in required) for name, sub in properties.items()]
+            if minimum > len(members) or (maximum is not None and len(required) > maximum):
+                raise GrammarError(
+                    "no object of the declared properties has between 'minProperties' and 'maxProperties' members"
+                )
+            return _Object(members, free=False, minimum=minimum, maximum=maximum)
         raise GrammarError(f"unknown JSON schema type {kind!r}")
+
+    def _counts(self, schema: Mapping[str, Any]) -> tuple[int, int | None]:
+        if self._lenient:
+            return 0, None
+        minimum, maximum = schema.get("minProperties", 0), schema.get("maxProperties")
+        for name, value in (("minProperties", minimum), ("maxProperties", maximum)):
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+                raise GrammarError(f"'{name}' must be a non-negative integer")
+        if maximum is not None and maximum < minimum:
+            raise GrammarError("'maxProperties' is smaller than 'minProperties'")
+        return minimum, maximum
 
     def _reference(self, reference: str) -> _Node:
         node = self._refs.get(reference)
@@ -482,7 +523,7 @@ def _expand(node: _Node, rest: Stack) -> list[Stack]:
     if isinstance(node, _Union):
         return [s for option in node.options for s in _expand(option, rest)]
     if isinstance(node, _Object):
-        return [_push(rest, [_literal(b"{"), _WS_ITEM, (_OBJ, node, 0, False)])]
+        return [_push(rest, [_literal(b"{"), _WS_ITEM, (_OBJ, node, 0, 0)])]
     if isinstance(node, _Array):
         return [_push(rest, [_literal(b"["), _WS_ITEM, (_ARR, node, 0)])]
     if isinstance(node, _Rule):
@@ -494,21 +535,33 @@ def _expand(node: _Node, rest: Stack) -> list[Stack]:
 
 
 def _object_steps(item: tuple[Any, ...], rest: Stack) -> list[Stack]:
-    _, node, index, written = item
-    lead = [_COMMA, _WS_ITEM] if written else []
+    """The ways on from an object after ``count`` members, the last of them declared property ``index - 1``."""
+    _, node, index, count = item
+    lead = [_COMMA, _WS_ITEM] if count else []
     close = _push(rest, [_literal(b"}")])
     if node.free:
-        member = [*lead, _value(_STRING), _WS_ITEM, _COLON, _WS_ITEM, _value(_ANY), _WS_ITEM, (_OBJ, node, 0, True)]
-        return [close, _push(rest, member)]
+        stacks = [close] if count >= node.minimum else []
+        if node.maximum is None or count < node.maximum:
+            # Counts past what the bounds tell apart are alike, so states stay few.
+            following = min(count + 1, node.maximum if node.maximum is not None else max(node.minimum, 1))
+            value = _value(node.values)
+            member = [*lead, _value(_STRING), _WS_ITEM, _COLON, _WS_ITEM, value, _WS_ITEM, (_OBJ, node, 0, following)]
+            stacks.append(_push(rest, member))
+        return stacks
     stacks: list[Stack] = []
     properties = node.properties
     for position in range(index, len(properties)):
         name, schema, required = properties[position]
-        member = [*lead, _literal(name), _WS_ITEM, _COLON, _WS_ITEM, _value(schema), _WS_ITEM]
-        stacks.append(_push(rest, [*member, (_OBJ, node, position + 1, True)]))
+        later_required = sum(1 for p in properties[position + 1 :] if p[2])
+        fits = node.maximum is None or count + 1 + later_required <= node.maximum
+        reaches = count + len(properties) - position >= node.minimum  # this one and every later one
+        if fits and reaches:
+            member = [*lead, _literal(name), _WS_ITEM, _COLON, _WS_ITEM, _value(schema), _WS_ITEM]
+            stacks.append(_push(rest, [*member, (_OBJ, node, position + 1, count + 1)]))
         if required:
             return stacks
-    stacks.append(close)
+    if count >= node.minimum:
+        stacks.append(close)
     return stacks
 
 
