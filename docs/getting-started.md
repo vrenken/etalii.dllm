@@ -563,6 +563,19 @@ A thinking model's `<think>` block is kept apart from its answer: on the command
 APIs return it in their own reasoning fields. `--max-reasoning-tokens` closes the thinking after exactly that many
 tokens and lets the model answer, and the result is the same on every machine. Details: [reasoning](api.md#reasoning).
 
+## 21. Teach the model your preferences
+
+```bash
+dllm finetune smollm2-135m.dllm --dpo --data pairs.jsonl -o smollm2-135m-dpo.dllm --steps 100 --receipt dpo.json
+dllm --model smollm2-135m-dpo.dllm eval pairs.jsonl
+```
+
+Each line of `pairs.jsonl` holds a prompt (or chat `messages`), a `chosen` answer and a `rejected` one. `--dpo`
+trains with direct preference optimization, and the run is as reproducible as any fine-tune: the same file every
+time, a resumed run equal to an uninterrupted one, and `dllm replay dpo.json --base smollm2-135m.dllm` to check it.
+`dllm eval` on the same file reports how often the model prefers the chosen answer. Details:
+[preference tuning](training.md#preference-tuning).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,

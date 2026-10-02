@@ -87,6 +87,55 @@ permutation drawn with the project's own random generator from `--seed` and the 
 samples `s * batch_size ..` of that epoch-after-epoch sequence. Because the data read at a step follows from the
 step number alone, resuming needs no data-loader state.
 
+## Preference tuning
+
+`--dpo` trains on preference pairs instead of text, with direct preference optimization (DPO): the model learns to
+make the chosen answer more likely and the rejected one less likely, relative to the model it started from.
+
+```bash
+dllm finetune smollm2-135m.dllm --dpo --data pairs.jsonl --beta 0.1 -o smollm2-135m-dpo.dllm \
+    --steps 200 --batch-size 8 --sequence-length 256 --learning-rate 5e-6 --receipt dpo.json
+dllm --model smollm2-135m-dpo.dllm eval pairs.jsonl     # preference accuracy and mean margin (docs/evaluation.md)
+dllm replay dpo.json --base smollm2-135m.dllm           # trains again and checks every loss and the weights
+```
+
+The data file is JSON lines, one pair per line:
+
+```json
+{"prompt": "Q: What is 2+2?\nA:", "chosen": " 4", "rejected": " 5"}
+{"messages": [{"role": "user", "content": "Hi"}], "chosen": "Hello! How can I help?", "rejected": "Go away."}
+```
+
+A `messages` prompt is rendered with the model's chat template and its generation prompt; a `prompt` is used as
+written. The prompt and each answer are tokenized separately, and each answer gets the end-of-sequence token, so a
+pair's tokens do not depend on the rest of the file. A side holds at most `sequence-length + 1` tokens: a longer
+answer is cut at its end, and a prompt must leave room for at least one answer token. Only the answer tokens are
+scored. Pairs are visited in the same seeded per-epoch order as windows; `--batch-size` counts pairs.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--dpo` | off | `--data` holds preference pairs; train with the DPO loss |
+| `--beta` | 0.1 | How far the model may move from the reference: larger keeps it closer |
+
+The loss of a pair is `-log sigmoid(z)` with `z = beta * ((log p(chosen) - ref_chosen) - (log p(rejected) -
+ref_rejected))`, where the reference log-probabilities come from the base weights and are computed once, when the run
+starts. Determinism:
+
+- Log-probabilities are minus the summed cross-entropy of the answer tokens: the same fixed-order kernel and double
+  accumulator as the language-model loss. The reference values are stored in checkpoints as exact hexadecimal
+  doubles, so a resumed run uses the same ones rather than recomputing them from half-trained weights.
+- `log sigmoid` and `sigmoid` use the portable `exp`/`log` kernels in double, without overflow for either sign. At
+  step 0 the model is its own reference, so `z` is exactly 0 and the first loss is exactly `log 2` (tested).
+- A pair's gradient is `w * grad CE(chosen) - w * grad CE(rejected)` with `w = beta * (1 - sigmoid(z)) / batch_size`
+  computed in double and applied as one elementwise float32 multiply; pairs are added in batch order, chosen first.
+  The step's loss is the mean over pairs, summed in batch order.
+- LoRA works the same way (`--lora-rank` with `--dpo`); the reference is the frozen base.
+
+The model file's `fine_tuning.run` and the training receipt record `"objective": "dpo"` and `beta`, the receipt
+counts `"pairs"` instead of `"windows"`, and the lineage step carries `"objective": "dpo"`. Language-model runs leave
+those fields out, so their files and receipts are byte for byte what they were. `tests/test_preference.py` checks
+byte-identical runs, bit-exact resumption, the step formula, LoRA, receipts and golden hashes of a short DPO run.
+
 ## What makes it reproducible
 
 - **Gradients** come from C++ backward kernels with the same rules as the forward kernels (`docs/kernels.md`):
@@ -129,8 +178,8 @@ resulting weights, so that `dllm replay FILE --base BASE` can train again and co
 | 20 | `H` | Canonical JSON header, padded with spaces so the data starts at a multiple of 64 |
 | 20 + `H` | rest | Tensors: `param/<name>`, then `adam_m/<name>` and `adam_v/<name>` per tensor, each 64-byte aligned float32 |
 
-The header holds the architecture, run settings, step, loss history, base model and data fingerprints, the base
-model's metadata (so the checkpoint alone can be exported) and a SHA-256 of the data section that is checked on
+The header holds the architecture, run settings, step, loss history, base model and data fingerprints (and for DPO
+runs the reference log-probabilities of every pair), the base model's metadata (so the checkpoint alone can be exported) and a SHA-256 of the data section that is checked on
 load. A checkpoint refuses to resume with data whose fingerprint differs.
 
 ## Cost

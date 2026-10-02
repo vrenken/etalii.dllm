@@ -131,6 +131,9 @@ def _finetune(args: argparse.Namespace) -> int:
         print("dllm finetune: pass -o/--output, --adapter-output, or both", file=sys.stderr)
         return 1
     distillation = None
+    if args.dpo and (args.command == "distill" or args.teacher):
+        print("dllm finetune: --dpo trains on preference pairs, not on a teacher's answers", file=sys.stderr)
+        return 1
     if args.command == "distill" or args.teacher:
         if not args.teacher or not args.prompts:
             print("dllm distill: pass --teacher MODEL and --prompts FILE", file=sys.stderr)
@@ -151,7 +154,7 @@ def _finetune(args: argparse.Namespace) -> int:
     try:
         base = ModelFile(args.base)
         engine = DllmEngine.from_model_file(args.base, verify=False)
-        data = load_data(engine, base, args.data, args.sequence_length)
+        data = load_data(engine, base, args.data, args.sequence_length, "dpo" if args.dpo else "lm")
         if args.resume:
             tuner = FineTuner.load_checkpoint(args.resume, data, base)
         else:
@@ -168,14 +171,23 @@ def _finetune(args: argparse.Namespace) -> int:
                 targets = tuple(t.strip() for t in args.lora_targets.split(",") if t.strip())
                 alpha = args.lora_alpha if args.lora_alpha is not None else float(args.lora_rank)
                 lora = LoraConfig(args.lora_rank, alpha, targets)
-            run = RunConfig(args.steps, args.batch_size, args.sequence_length, args.seed, optimizer, lora)
+            run = RunConfig(
+                args.steps,
+                args.batch_size,
+                args.sequence_length,
+                args.seed,
+                optimizer,
+                lora,
+                **({"objective": "dpo", "beta": args.beta} if args.dpo else {}),
+            )
             tuner = FineTuner.from_model_file(base, data, run)
         tuner.distillation = distillation
     except (ModelFileError, TrainingDataError, CheckpointError, OSError, ValueError) as error:
         print(f"dllm finetune: {error}", file=sys.stderr)
         return 1
 
-    print(f"data:               {len(data)} windows of up to {data.sequence_length} tokens, {data.fingerprint[:16]}")
+    unit = "pairs" if args.dpo else "windows"
+    print(f"data:               {len(data)} {unit} of up to {data.sequence_length} tokens, {data.fingerprint[:16]}")
     total = tuner.run.steps
 
     def report(result: StepResult) -> None:
@@ -286,8 +298,8 @@ def main(argv: list[str] | None = None) -> int:
             help="at a full context window: stop (finish 'length') or roll (keep the start and the recent half)",
         )
 
-    evaluate = commands.add_parser("eval", help="score the model on a task file: perplexity or multiple choice")
-    evaluate.add_argument("task", metavar="TASK", help=".jsonl ({'context','choices','answer'} or {'text'}) or .txt")
+    evaluate = commands.add_parser("eval", help="score the model: perplexity, multiple choice or preference")
+    evaluate.add_argument("task", metavar="TASK", help=".jsonl (multiple choice, {'text'} or preference pairs) or .txt")
     evaluate.add_argument("--max-length", type=int, help="longest window for perplexity texts (default: 1024)")
     evaluate.add_argument("--json", action="store_true", help="print the full report, per-item results included")
     evaluate.add_argument("-o", "--output", help="also write the full report (JSON) to this file")
@@ -387,6 +399,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     finetune.add_argument("--adapter-output", help="LoRA runs: write the adapters as a PEFT directory here")
     finetune.add_argument("--receipt", metavar="FILE", help="write a training receipt (dllm replay trains again)")
+    finetune.add_argument(
+        "--dpo", action="store_true", help="preference tuning: --data holds prompt/chosen/rejected pairs (JSONL)"
+    )
+    finetune.add_argument("--beta", type=float, default=0.1, help="DPO: how close to stay to the base model")
 
     sign = commands.add_parser("sign", help="sign a receipt, chain, transcript or model file with an Ed25519 key")
     sign.add_argument("file", nargs="?", help="the JSON document or model.dllm file to sign")

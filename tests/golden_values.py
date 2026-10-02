@@ -204,3 +204,10 @@ DECODING_CONTROLS_FINGERPRINT = "469d2f4cf54e7b6659fa2b1c34b3a6ae3039be211bb5162
 # Phase 22: SHA-256 of the `dllm batch` output for tests/test_batch_jobs.py's six chat requests and one embedding on
 # the placeholder model. The same at every --workers count, on every platform, and after any resume.
 BATCH_OUTPUT_SHA256 = "3901563bd7af75cfae606f18f14f0961093583bea2f2963723e778284c5bd934"
+
+# Phase 25. Fingerprint of the model.dllm exported after tests/test_preference.py::RUN (5 DPO steps, beta 0.5, on
+# the five preference pairs of that file).
+DPO_FINETUNE_FINGERPRINT = {
+    "llama": "69d5ef4720169229deed88b5e753d99b2dd145b6fef9be5fc795ae35e8095d7d",
+    "qwen3": "06bd4f073a3d8530c1fbbb47002f00e2def08b56f36d158fe0b1b9e1579591ee",
+}

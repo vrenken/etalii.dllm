@@ -16,6 +16,9 @@ trains again and reports the first step whose loss differs, or confirms the same
       "output": {"fingerprint": "...", "steps": 100}
     }
 
+A preference run (``dllm finetune --dpo``) records ``"pairs"`` instead of ``"windows"``; its ``run`` holds the
+objective and ``beta``.
+
 ``data.file`` is the path as given, for convenience; ``data.sha256`` (the file) and ``data.fingerprint`` (the token
 windows, which also depend on the tokenizer and chat template) decide.
 """
@@ -31,6 +34,7 @@ from typing import TYPE_CHECKING, Any
 from etalii_dllm import receipts
 from etalii_dllm.modelfile import ModelFile, data_fingerprint
 from etalii_dllm.training.data import TrainingData, read_documents
+from etalii_dllm.training.preference import PreferenceData, read_pairs
 from etalii_dllm.training.trainer import FineTuner, RunConfig, StepResult
 
 if TYPE_CHECKING:
@@ -40,14 +44,21 @@ FORMAT = "dllm-train/1"
 """The training receipt format; a reader refuses others."""
 
 
-def load_data(engine: DllmEngine, base: ModelFile, path: str | Path, sequence_length: int) -> TrainingData:
+def load_data(
+    engine: DllmEngine, base: ModelFile, path: str | Path, sequence_length: int, objective: str = "lm"
+) -> TrainingData | PreferenceData:
     """The training windows of ``path`` as ``dllm finetune`` builds them: chats rendered with the model's own
-    template, documents separated by its end-of-sequence token."""
+    template, documents separated by its end-of-sequence token. For ``objective="dpo"``, the preference pairs of
+    ``path`` (chat prompts rendered with the generation prompt, answers ended by the end-of-sequence token)."""
     render: Callable[[Any], str] | None = None
+    prompt = objective == "dpo"
     if engine.chat_template is not None:
         template = engine.chat_template
-        render = lambda messages: template.render(messages, add_generation_prompt=False)  # noqa: E731
+        render = lambda messages: template.render(messages, add_generation_prompt=prompt)  # noqa: E731
     separator = base.config.eos_token_ids[0] if base.config.eos_token_ids else None
+    if prompt:
+        pairs = read_pairs(path, render)
+        return PreferenceData.from_records(pairs, engine.tokenizer.encode, sequence_length, separator)
     documents = read_documents(path, render)
     return TrainingData.from_documents(documents, engine.tokenizer.encode, sequence_length, separator)
 
@@ -73,7 +84,7 @@ def make_receipt(tuner: FineTuner, data_file: str | Path) -> dict[str, Any]:
             "file": str(data_file),
             "sha256": _file_sha256(data_file),
             "fingerprint": tuner.data.fingerprint,
-            "windows": len(tuner.data),
+            ("pairs" if isinstance(tuner.data, PreferenceData) else "windows"): len(tuner.data),
         },
         "run": tuner.run.to_dict(),
         "losses": [float(loss).hex() for loss in tuner.losses],
@@ -139,9 +150,9 @@ def verify(
         notes.append("the teacher's answers were not regenerated (pass --teacher to check them too)")
     run = RunConfig.from_dict(receipt["run"])
     engine = DllmEngine.from_model_file(base_path, verify=False, prompt_cache=0)
-    data = load_data(engine, base, data_file, run.sequence_length)
+    data = load_data(engine, base, data_file, run.sequence_length, run.objective)
     if data.fingerprint != receipt["data"]["fingerprint"]:
-        reasons.append("the training windows differ (the data, tokenizer or chat template changed)")
+        reasons.append("the training data differ (the data, tokenizer or chat template changed)")
     tuner = FineTuner.from_model_file(base, data, run)
     recorded = receipt["losses"]
     diverged_at = None

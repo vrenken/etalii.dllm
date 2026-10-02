@@ -110,6 +110,25 @@ flowchart TB
   `adapter_model.safetensors`) that PEFT loads as it is. PEFT adapters import the same way, as described in
   [model import](models.md#lora-adapters).
 
+## Preference tuning
+
+`RunConfig.objective = "dpo"` (`--dpo`) trains on `PreferenceData` (`training/preference.py`) instead of windows.
+When the run starts, `FineTuner` scores every pair's chosen and rejected answer with the frozen base weights (minus
+the summed cross-entropy of the answer tokens) and keeps those reference log-probabilities for the whole run.
+
+```mermaid
+flowchart LR
+    pairs["preference pairs<br/>prompt, chosen, rejected<br/>(seeded per-epoch order)"] --> ref["reference log-probs<br/>from the base, once"]
+    pairs --> step
+    ref --> step["per pair: CE and gradients of both answers,<br/>z = beta * (margin - reference margin) in double"]
+    step --> w["w = beta * (1 - sigmoid(z)) / batch<br/>g += w * g_chosen; g -= w * g_rejected<br/>(float32, batch order)"]
+    w --> adam["AdamW, as for any run"]
+```
+
+The reference values go into checkpoints as exact hexadecimal doubles, so a resumed run reads them instead of
+recomputing them from trained weights. Receipts, `dllm replay` and the model file record the objective and `beta`;
+language-model runs omit them and keep their old bytes.
+
 ## Checkpoints and resume
 
 ```mermaid

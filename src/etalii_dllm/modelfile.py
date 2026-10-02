@@ -169,6 +169,8 @@ def fine_tune_step(fine_tuning: Mapping[str, Any]) -> dict[str, Any]:
         "steps": fine_tuning["steps_completed"],
         "run": _digest(fine_tuning["run"]),
     }
+    if fine_tuning["run"].get("objective", "lm") != "lm":  # preference tuning; language-model steps keep their bytes
+        step["objective"] = fine_tuning["run"]["objective"]
     if fine_tuning.get("distillation"):  # the data are a teacher's answers
         step["teacher"] = fine_tuning["distillation"]["teacher"]
     return step

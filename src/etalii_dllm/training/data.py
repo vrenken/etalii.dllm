@@ -35,6 +35,28 @@ class TrainingDataError(ValueError):
     """The data file cannot be read or holds no usable text."""
 
 
+def epoch_order(count: int, seed: int, epoch: int) -> list[int]:
+    """The order of ``count`` examples in ``epoch``: a Fisher-Yates shuffle driven by ``DeterministicRandom``."""
+    random = DeterministicRandom((seed + (epoch + 1) * _EPOCH_MIX) & _MASK64)
+    order = list(range(count))
+    for i in range(len(order) - 1, 0, -1):
+        j = random.next_u64() % (i + 1)
+        order[i], order[j] = order[j], order[i]
+    return order
+
+
+def batch_indices(count: int, step: int, batch_size: int, seed: int) -> list[int]:
+    """The examples of step ``step`` (0-based): samples ``step * batch_size ..`` of the epoch-by-epoch order."""
+    orders: dict[int, list[int]] = {}
+    result = []
+    for sample in range(step * batch_size, (step + 1) * batch_size):
+        epoch, index = divmod(sample, count)
+        if epoch not in orders:
+            orders[epoch] = epoch_order(count, seed, epoch)
+        result.append(orders[epoch][index])
+    return result
+
+
 def read_documents(path: str | Path, render_chat: Callable[[Sequence[Mapping[str, Any]]], str] | None) -> list[str]:
     """The documents of a ``.txt`` or ``.jsonl`` file, in file order."""
     path = Path(path)
@@ -107,21 +129,8 @@ class TrainingData:
 
     def epoch_order(self, seed: int, epoch: int) -> list[int]:
         """The window order of ``epoch``: a Fisher-Yates shuffle driven by ``DeterministicRandom``."""
-        random = DeterministicRandom((seed + (epoch + 1) * _EPOCH_MIX) & _MASK64)
-        order = list(range(len(self.windows)))
-        for i in range(len(order) - 1, 0, -1):
-            j = random.next_u64() % (i + 1)
-            order[i], order[j] = order[j], order[i]
-        return order
+        return epoch_order(len(self.windows), seed, epoch)
 
     def batch(self, step: int, batch_size: int, seed: int) -> list[tuple[int, ...]]:
         """The windows of step ``step`` (0-based): samples ``step * batch_size ..`` of the epoch-by-epoch order."""
-        count = len(self.windows)
-        orders: dict[int, list[int]] = {}
-        result = []
-        for sample in range(step * batch_size, (step + 1) * batch_size):
-            epoch, index = divmod(sample, count)
-            if epoch not in orders:
-                orders[epoch] = self.epoch_order(seed, epoch)
-            result.append(self.windows[orders[epoch][index]])
-        return result
+        return [self.windows[index] for index in batch_indices(len(self.windows), step, batch_size, seed)]
