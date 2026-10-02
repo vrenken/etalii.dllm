@@ -3,6 +3,7 @@ with a golden sampling answer (#260)."""
 
 from __future__ import annotations
 
+import shlex
 import sys
 import textwrap
 
@@ -245,7 +246,7 @@ def test_resources_are_read_as_text():
 def notes_server(tmp_path):
     path = tmp_path / "notes_server.py"
     path.write_text(SERVER_SOURCE, encoding="utf-8")
-    return f"notes={sys.executable} {path}"
+    return f"notes={shlex.quote(sys.executable)} {shlex.quote(str(path))}"  # keeps Windows backslashes
 
 
 def test_cli_lists_and_uses_prompts_and_resources(notes_server, capsys):
