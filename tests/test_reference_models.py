@@ -104,9 +104,13 @@ EMBEDDING_MODELS = {
     "bge-small": ReferenceModel("BAAI/bge-small-en-v1.5", "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a", "MIT"),
     # RoBERTa (Phase 57): positions past the padding token, byte-level BPE; and a multilingual BERT encoder with
     # XLM-RoBERTa's Unigram tokenizer (SentencePiece's precompiled normaliser).
-    "distilroberta": ReferenceModel("sentence-transformers/all-distilroberta-v1", "main", "Apache-2.0"),
+    "distilroberta": ReferenceModel(
+        "sentence-transformers/all-distilroberta-v1", "842eaed40bee4d61673a81c92d5689a8fed7a09f", "Apache-2.0"
+    ),
     "multilingual-minilm": ReferenceModel(
-        "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2", "main", "Apache-2.0"
+        "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        "e8f8c211226b894fcb81acc59f3b34ba3efd5f42",
+        "Apache-2.0",
     ),
 }
 # A BERT cross-encoder (Phase 56): a query and a passage scored together by a sequence-classification head.
@@ -115,7 +119,9 @@ CROSS_ENCODERS = {
         "cross-encoder/ms-marco-MiniLM-L6-v2", "233902d25c440f23af6f7d6e94d2946bac0bee0a", "Apache-2.0"
     ),
     # An XLM-RoBERTa cross-encoder (Phase 57): a multilingual reranker with a Unigram tokenizer.
-    "mmarco": ReferenceModel("cross-encoder/mmarco-mMiniLMv2-L12-H384-v1", "main", "Apache-2.0"),
+    "mmarco": ReferenceModel(
+        "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1", "1427fd652930e4ba29e8149678df786c240d8825", "Apache-2.0"
+    ),
 }
 _ALL_MODELS = {**REFERENCE_MODELS, **EMBEDDING_MODELS, **CROSS_ENCODERS}
 TOOL_FORMATS = {"qwen2.5": "hermes", "qwen2.5-1.5b": "hermes", "qwen3": "hermes", "llama3.2": "llama3"}
@@ -547,7 +553,10 @@ def test_embeddings_match_reference(embedding_imported):
         with torch.no_grad():
             states = reference.eval()(torch.tensor([tokens])).last_hidden_state[0]
         pooled = {"mean": states.mean(dim=0), "cls": states[0]}.get(pooling, states[-1])
-        expected.append(torch.nn.functional.normalize(pooled, dim=0).numpy())
+        # Without a Normalize module (paraphrase-multilingual-MiniLM) sentence-transformers keeps the pooled length.
+        expected.append(
+            (torch.nn.functional.normalize(pooled, dim=0) if engine.embedding["normalize"] else pooled).numpy()
+        )
     actual = _embeddings(engine)
     np.testing.assert_allclose(actual, np.stack(expected), rtol=0, atol=1e-4)
     # Retrieval works: the query is closest to the passage that answers it.

@@ -221,6 +221,21 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "import": "84d2ca3b329c8b989747b0b376b3e97d45b11c8e3da3a14b2b7b8c513f1eb559",
         "embedding": "a3bbe46df62036ce3971d37fd7eebfe87b5ea17e8d4a48975911200770c456d5",
     },
+    # RoBERTa (all-distilroberta-v1) and a multilingual BERT with XLM-RoBERTa's Unigram tokenizer (paraphrase-
+    # multilingual-MiniLM-L12-v2, not normalised), mean pooling.
+    "distilroberta": {
+        "import": "350bfd40ef91bb9b49fc12909f7ad8219b746e1f2a16b28aa379589939873f9d",
+        "embedding": "6666a10c96037884855dcca84304aa3228fce89ca2a06da0175bff053db8dc60",
+    },
+    "multilingual-minilm": {
+        "import": "adc45ca582a927546297163feb97f4f4faf26bf901eebe358f6de5cc83d896a9",
+        "embedding": "7142acb9c2e387439d92913549a4c3d64c0b9b89746c4a67e6878e1b61aeb053",
+    },
+    # XLM-RoBERTa cross-encoder (mmarco-mMiniLMv2-L12-H384-v1): its logits for the RERANK_QUERY pairs.
+    "mmarco": {
+        "import": "acbe05ef5b6247c91e89a418ffd644d86899db3658a7d5e3c1dd5be612282781",
+        "scores": "78beff3c340ffd07b03d655f102a39c7f9021d16a9fe764370cb2399595536d2",
+    },
     # BERT cross-encoder: the float32 bits of its logits for RERANK_QUERY paired with each of RERANK_PASSAGES.
     "ms-marco": {
         "import": "3d2e2103d4067e9b5a9d8b2c98a6be6967a1fd28b82d1cb03ebd906c16a27f2b",
