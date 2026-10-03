@@ -101,9 +101,7 @@ def test_unsupported_normalizer_fails_at_load():
         BpeTokenizer(minimal_spec(normalizer={"type": "ByteLevel"}))
     # Also when nested inside a sequence.
     with pytest.raises(TokenizerError, match="normalizer 'Nmt' is not supported"):
-        BpeTokenizer(
-            minimal_spec(normalizer={"type": "Sequence", "normalizers": [{"type": "NFC"}, {"type": "Nmt"}]})
-        )
+        BpeTokenizer(minimal_spec(normalizer={"type": "Sequence", "normalizers": [{"type": "NFC"}, {"type": "Nmt"}]}))
 
 
 # --- Split pre-tokenizer -----------------------------------------------------------------------------------------
