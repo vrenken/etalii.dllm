@@ -42,8 +42,8 @@ gives the same bits on every machine: the encoder's forward pass and pooling are
 [specification](specification.md#6-the-encoder) and `dllm verify --reference` checks them against the reference
 implementation. A plain BERT checkpoint without sentence-transformers files pools the mean over all positions.
 
-[Qwen3-Embedding-0.6B](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B) (Apache 2.0) is checked against
-`transformers` in CI (`tests/test_reference_models.py`):
+all-MiniLM-L6-v2, bge-small-en-v1.5 and [Qwen3-Embedding-0.6B](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B)
+(Apache 2.0) are checked against `transformers` in CI (`tests/test_reference_models.py`):
 
 ```bash
 dllm import hf:Qwen/Qwen3-Embedding-0.6B -o qwen3-embedding.dllm
@@ -134,6 +134,32 @@ recipe, and any chat model can run it:
 - The score is `sigmoid(logit(yes) - logit(no))` for the next token, in double with the portable kernel, where `yes`
   and `no` are the first tokens of those words. A model whose two words start with the same token is refused.
 - Documents are ranked by the higher score first, the earlier document on a tie.
+
+### Cross-encoder rerankers
+
+A cross-encoder is a small BERT model trained to score a query and a passage read together, which is what
+rerankers built for search do. [ms-marco-MiniLM-L6-v2](https://huggingface.co/cross-encoder/ms-marco-MiniLM-L6-v2)
+(22M parameters, Apache 2.0) reranks far faster than a chat model judge:
+
+```bash
+dllm import hf:cross-encoder/ms-marco-MiniLM-L6-v2 -o ms-marco.dllm
+dllm --model ms-marco.dllm rerank "How many people live in Berlin?" "Berlin has 3.5 million people." "Berlin has museums."
+dllm --rerank-model ms-marco.dllm index search docs.index "How do I import a gated model?" --mode hybrid
+```
+
+- The import keeps the sequence-classification head (the pooler and the classifier on the `[CLS]` state) and
+  records its labels, the activation sentence-transformers' `CrossEncoder` applies (`Sigmoid` or none) and the
+  longest pair the model takes (`max_length`, else the tokenizer's `model_max_length`).
+- The query and the passage are encoded as one pair, `[CLS] query [SEP] passage [SEP]` with token types 0 and 1,
+  truncated longest first exactly as `tokenizers` truncates it, so the tokens are those transformers feeds the model.
+- The score is the classifier's logit (or its sigmoid when the model says so); the instruction does not apply.
+  Documents are ranked as above, the higher score first and the earlier document on a tie.
+- `dllm rerank`, `/v1/rerank`, `--rerank-model` with `index search` and grounded chats all use it when the model is
+  a cross-encoder. A classifier with several labels is not a reranker and is refused. In Python,
+  `engine.classify(query, passage)` returns the logits, the scores and the labels.
+
+The pair encoding and the head are in the [specification](specification.md#6-the-encoder), and
+`dllm verify --reference` checks a cross-encoder's scores against the reference implementation bit for bit.
 
 `POST /v1/rerank` (also `/rerank`) takes the request shape of Cohere and Jina: `query`, `documents` (strings or
 `{"text": ...}`), `top_n` and `return_documents` (default true), and the extension `instruction`. It returns

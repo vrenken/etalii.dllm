@@ -959,12 +959,27 @@ sentence-transformers pooling (mean or CLS) and truncation. They embed only, on 
 `/v1/embeddings`, `dllm index` and `--embedding-model`, with the same bits on every machine (`dllm verify
 --reference` checks them). Details: [encoder models](retrieval.md#encoder-models).
 
+## 52. Cross-encoder rerankers
+
+```bash
+dllm import hf:cross-encoder/ms-marco-MiniLM-L6-v2 -o ms-marco.dllm
+dllm --model ms-marco.dllm rerank "How many people live in Berlin?" "Berlin has 3.5 million people." "Berlin has museums."
+dllm --model minilm.dllm --rerank-model ms-marco.dllm index search docs.index "Where is Berlin?" --mode hybrid
+```
+
+Rerankers built for search, small BERT cross-encoders that read the query and the passage together, now import with
+their classification head and rerank in `dllm rerank`, `/v1/rerank`, `--rerank-model` searches and grounded chats.
+The pair is tokenized and truncated exactly as `tokenizers` does it, so the scores match transformers', and they are
+the same bits on every machine (`dllm verify --reference` checks them). Details:
+[cross-encoder rerankers](retrieval.md#cross-encoder-rerankers).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
   Qwen2.5-0.5B-Instruct, Qwen2.5-1.5B-Instruct, Qwen3-0.6B, TinyLlama-1.1B-Chat, OLMo-2-1B-Instruct,
   Llama-3.2-1B-Instruct and gemma-3-270m-it (tokenizer, chat template, logits within 1e-3 and the
-  same greedy answer; see `tests/test_reference_models.py`), and so is the embedding model Qwen3-Embedding-0.6B. Other Llama/Qwen2/Qwen3 models should work but are not
+  same greedy answer; see `tests/test_reference_models.py`), and so are the embedding models Qwen3-Embedding-0.6B,
+  all-MiniLM-L6-v2 and bge-small-en-v1.5 and the cross-encoder ms-marco-MiniLM-L6-v2. Other Llama/Qwen2/Qwen3 models should work but are not
   checked. Mistral, Granite, Phi-3 and Gemma 2 are checked against `transformers` only on tiny synthetic models (their real
   checkpoints are gated or too large for a CI runner in float32). Fine-tuning is checked on tiny synthetic models
   of every family, not on the real checkpoints. Phi-3/Phi-4-mini with LongRoPE run up to their original context

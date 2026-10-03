@@ -250,7 +250,7 @@ EVAL_FINGERPRINTS = {
 # output file's SHA-256, so it pins the bits of every kernel case, the sampler and the two small decoders. Phase 21
 # added the two sample-penalties cases (penalties, min-p and logit bias); Phase 41 the YaRN and LongRoPE long-factor
 # rope-inv-freq cases; Phase 44 the sigmoid case and the qwen2_moe decoder (a gated shared expert).
-CONFORMANCE_MANIFEST_SHA256 = "f7533cd097b237a484c1153f7a6504587628849ce5b6858012af93380b449ffb"
+CONFORMANCE_MANIFEST_SHA256 = "b3a484ba0628933d3f3202c28616eac7556b8db083ea6f63d467d64a950c08b6"
 
 # Phase 21: the placeholder model continuing "Deterministic decoding controls are" with every decoding control set
 # (tests/test_decoding_controls.py::CONTROLLED): penalties, min-p and logit bias.
@@ -401,3 +401,6 @@ REMAINING_TOOL_FORMAT_CALLS = "a34dfdaddbb1ada0f8051184367cce5fb1ba1a81f28fdc960
 # Phase 55: the float32 bits of the tiny BERT encoder's embeddings of tests/test_encoders.py TEXTS (mean pooling,
 # normalised).
 ENCODER_EMBEDDINGS = "10d1c4b9b1f7efe88100ad9797bd25dfaba1e8b11bdc8dca38caefa4f51946b9"
+
+# Phase 56: the float32 bits of the tiny cross-encoder's logits for tests/test_cross_encoders.py PAIRS.
+CROSS_ENCODER_SCORES = "66f0ff950da621c1128b07409d0654f1c1e7a38b4d937153dc4064f5f2a082ac"

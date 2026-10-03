@@ -1391,14 +1391,14 @@ class ReferenceEncoder:
         model = engine.model
         return cls(model.config, model.tensors, quantize=model.quantization, embedding=engine.embedding)
 
-    def hidden_states(self, tokens: Sequence[int]) -> np.ndarray:
-        """``LayerNorm((word + type 0) + position)``, then per layer ``h = LayerNorm(h + o(attention))`` (every key
-        visible) and ``h = LayerNorm(h + down(gelu(up(h))))``; additions in float32."""
+    def hidden_states(self, tokens: Sequence[int], types: Sequence[int] | None = None) -> np.ndarray:
+        """``LayerNorm((word + type) + position)``, then per layer ``h = LayerNorm(h + o(attention))`` (every key
+        visible) and ``h = LayerNorm(h + down(gelu(up(h))))``; additions in float32. ``types`` default to 0."""
         config, w = self.config, self.w
         count = len(tokens)
-        x = (w["token_embedding.weight"][np.asarray(tokens, dtype=np.int64)] + w["token_type_embedding.weight"][0]) + w[
-            "position_embedding.weight"
-        ][:count]
+        kinds = np.zeros(count, dtype=np.int64) if types is None else np.asarray(types, dtype=np.int64)
+        words = w["token_embedding.weight"][np.asarray(tokens, dtype=np.int64)]
+        x = (words + w["token_type_embedding.weight"][kinds]) + w["position_embedding.weight"][:count]
 
         def norm(values: np.ndarray, name: str) -> np.ndarray:
             return layer_norm(values, w[name + ".weight"], w[name + ".bias"], config.rms_norm_eps)
@@ -1417,6 +1417,13 @@ class ReferenceEncoder:
             activated = gelu(up, "tanh" if config.activation == "gelu_tanh" else "none")
             x = norm(x + project(activated, p + "mlp.down"), p + "mlp_norm")
         return x
+
+    def classify(self, tokens: Sequence[int], types: Sequence[int] | None = None) -> np.ndarray:
+        """A cross-encoder's logits: ``classifier(tanh(pooler(h[0])))``, tanh in double rounded to float32."""
+        w = self.w
+        first = self.hidden_states(tokens, types)[:1]
+        pooled = _round(tanh(linear(first, w["pooler.weight"], w["pooler.bias"])))
+        return linear(pooled, w["classifier.weight"], w["classifier.bias"]).reshape(-1)
 
     def embed(self, tokens: Sequence[int]) -> np.ndarray:
         """The pooled embedding of ``tokens`` (already truncated, special tokens included): the first state for

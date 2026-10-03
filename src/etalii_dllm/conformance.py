@@ -88,8 +88,15 @@ ENCODERS: dict[str, dict[str, Any]] = {
         "rope_theta": 0.0, "tie_word_embeddings": True, "attention_bias": True, "activation": "gelu",
         "type_vocabulary_size": 2,
     },
+    "bert-classifier": {
+        "family": "bert", "vocabulary_size": 96, "hidden_size": 64, "intermediate_size": 96, "layers": 2,
+        "heads": 4, "kv_heads": 4, "head_dim": 16, "context_length": 16, "rms_norm_eps": 1e-12,
+        "rope_theta": 0.0, "tie_word_embeddings": True, "attention_bias": True, "activation": "gelu",
+        "type_vocabulary_size": 2, "classifier_labels": 2,
+    },
 }  # fmt: skip
-"""A small BERT encoder: absolute positions, token types, LayerNorms with biases, bidirectional attention."""
+"""A small BERT encoder: absolute positions, token types, LayerNorms with biases, bidirectional attention; and a
+cross-encoder with a two-label classification head, run on a pair (token types 0 and 1)."""
 
 
 def _decoder_tensors(name: str) -> Arrays:
@@ -219,7 +226,10 @@ def cases() -> list[tuple[str, str, dict[str, Any], Arrays]]:
         for quantize in (None, "q8_0"):
             params = {"config": ENCODERS[name], "quantize": quantize}
             label = f"encoder-{name}" + (f"-{quantize}" if quantize else "")
-            items.append((label, "encoder", params, {"tokens": tokens, **_decoder_tensors(name)}))
+            inputs = {"tokens": tokens, **_decoder_tensors(name)}
+            if ENCODERS[name].get("classifier_labels"):
+                inputs["types"] = np.array([0, 0, 0, 0, 0, 1, 1, 1, 1], dtype=np.int64)
+            items.append((label, "encoder", params, inputs))
     return items
 
 
@@ -339,7 +349,12 @@ def _kernels(kernel: str, params: Mapping[str, Any], inputs: Arrays) -> Arrays:
         config = TransformerConfig.from_dict(params["config"])
         tensors = {name[len("tensor.") :]: v for name, v in inputs.items() if name.startswith("tensor.")}
         encoder = Encoder(config, tensors, quantize=params["quantize"])
-        return {"states": array(encoder.hidden_states([int(t) for t in inputs["tokens"]]))}
+        tokens = [int(t) for t in inputs["tokens"]]
+        types = [int(t) for t in inputs["types"]] if "types" in inputs else None
+        result = {"states": array(encoder.hidden_states(tokens, types))}
+        if config.classifier_labels:
+            result["logits"] = array(encoder.classify(tokens, types))
+        return result
     raise ValueError(f"unknown kernel {kernel!r}")
 
 
@@ -436,7 +451,12 @@ def _reference(kernel: str, params: Mapping[str, Any], inputs: Arrays) -> Arrays
         config = TransformerConfig.from_dict(params["config"])
         tensors = {name[len("tensor.") :]: v for name, v in inputs.items() if name.startswith("tensor.")}
         encoder = r.ReferenceEncoder(config, tensors, quantize=params["quantize"])
-        return {"states": encoder.hidden_states([int(t) for t in inputs["tokens"]])}
+        tokens = [int(t) for t in inputs["tokens"]]
+        types = [int(t) for t in inputs["types"]] if "types" in inputs else None
+        result = {"states": encoder.hidden_states(tokens, types)}
+        if config.classifier_labels:
+            result["logits"] = encoder.classify(tokens, types)
+        return result
     raise ValueError(f"unknown kernel {kernel!r}")
 
 

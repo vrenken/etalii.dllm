@@ -199,11 +199,17 @@ def _is_encoder(engine: Any) -> bool:
 
 def run(engine: Any) -> Report:
     """Runs the workload with ``engine`` (its model, tokenizer and sampler); for an encoder model, the embeddings of
-    the corpus take the place of the logits and the answers."""
+    the corpus take the place of the logits and the answers, and for a cross-encoder the logits of the first corpus
+    text paired with every corpus text."""
     parts = {"kernels": kernels_fingerprint(), "unicode": unicode_fingerprint()}
     parts["tokenizer"] = numerics.fingerprint(
         [t for text in CORPUS for t in [*engine.tokenizer.encode(text), -1]], dtype="<i4"
     )
+    if _is_encoder(engine) and getattr(engine, "classifier", None) is not None:
+        logits = [engine.classify(CORPUS[0], text).logits for text in CORPUS]
+        parts["scores"] = numerics.fingerprint(np.asarray(logits, dtype=np.float32))
+        mismatches = [name for name, value in REFERENCE.items() if value and parts[name] != value]
+        return Report(parts, environment(engine), mismatches)
     if _is_encoder(engine):
         parts["embeddings"] = numerics.fingerprint(np.concatenate([engine.embed(text).vector for text in CORPUS]))
         mismatches = [name for name, value in REFERENCE.items() if value and parts[name] != value]
@@ -222,7 +228,8 @@ class ReferenceCheck:
     results: dict[str, str]
     """``logits``, ``greedy``, ``sampled``, ``controlled``, ``modern``, ``adaptive``, ``rolled``, ``budgeted``,
     ``guided``, ``healed``, ``lengthened``, ``beam``, ``scored`` and, for models with fill-in-the-middle tokens,
-    ``infilled`` (for encoder models ``states`` and ``embeddings``): ``"equal"``, or where the two first differ."""
+    ``infilled`` (for encoder models ``states`` and ``embeddings``, for cross-encoders ``states`` and ``scores``):
+    ``"equal"``, or where the two first differ."""
 
     @property
     def equal(self) -> bool:
@@ -234,7 +241,7 @@ class ReferenceCheck:
 
 def _check_encoder(engine: Any) -> ReferenceCheck:
     """An encoder model against the reference: the hidden states of the verify prompt and the embedding of every
-    corpus text, bit for bit."""
+    corpus text (a cross-encoder: the logits of every corpus pair), bit for bit."""
     from etalii_dllm import reference
 
     twin = reference.ReferenceEncoder.from_engine(engine)
@@ -243,6 +250,15 @@ def _check_encoder(engine: Any) -> ReferenceCheck:
     states = np.asarray(engine.model.hidden_states(tokens), dtype=np.float32)
     expected = twin.hidden_states(tokens)
     results = {"states": "equal" if states.tobytes() == expected.tobytes() else "differ"}
+    if getattr(engine, "classifier", None) is not None:
+        differing = []
+        for number, text in enumerate(CORPUS):
+            pair_tokens, types = engine.classification_tokens(CORPUS[0], text)
+            mine = np.asarray(engine.classify(CORPUS[0], text).logits, dtype=np.float32)
+            if mine.tobytes() != twin.classify(pair_tokens, types).tobytes():
+                differing.append(number)
+        results["scores"] = "equal" if not differing else f"pairs {differing} differ"
+        return ReferenceCheck(results)
     differing = [
         number
         for number, text in enumerate(CORPUS)
