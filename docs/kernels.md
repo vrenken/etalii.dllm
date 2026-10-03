@@ -79,6 +79,9 @@ uses the first, API `logprobs` the second.
 
 - **`rms_norm(x, weight, eps, add_unit_offset)`**: per row, `sum x^2` ascending in double, `inv = 1 / sqrt(sum/dim +
   eps)` (IEEE `sqrt` is correctly rounded), `out = x * inv * w` (or `* (1 + w)` for Gemma), rounded once.
+- **`layer_norm(x, weight, bias, eps)`** (BERT encoders): per row, `mean = sum x / dim` ascending in double, then
+  `var = sum (x - mean)^2 / dim` ascending in double, `inv = 1 / sqrt(var + eps)`, `out = (x - mean) * inv * w + b`
+  in double, rounded once. One thread; CPU only (encoders run on the CPU).
 - **`silu`**: `x * sigmoid(x)`. **`gelu`**: exact `0.5 x (1 + erf(x / sqrt 2))` (evaluated as `0.5 x erfc(-x / sqrt 2)` so the negative tail does not cancel), or with `approximate="tanh"` the
   GPT-2 form. All elementwise in double, rounded once.
 - **`swiglu(gate, up, activation)`**: the gated MLP activation `act(gate) * up` in one pass. `act(gate)` is

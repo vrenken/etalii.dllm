@@ -434,6 +434,29 @@ class DllmEngine:
         if file.tokenizer is None:
             raise ValueError(f"{path}: the model file has no tokenizer")
         model_id = str(file.source.get("repository") or Path(path).stem)
+        if file.config.is_encoder:
+            from etalii_dllm.encoder import Encoder
+
+            decoding = {"adapter": adapter, "steer": steer, "index": index, "draft_model": draft_model}
+            decoding |= {"contrast_model": contrast_model, "ensemble": ensemble, "speculate": speculate}
+            used = [name for name, value in decoding.items() if value]
+            if used:
+                raise ValueError(f"{path} is an encoder model, which embeds only; {', '.join(used)} need a decoder")
+            encoder = Encoder(
+                file.config,
+                file.tensors,
+                model_id=model_id,
+                weights_fingerprint=file.fingerprint,
+                quantize=quantize,
+                device=device,
+                release=file.release,
+            )
+            return DllmEngine(
+                encoder,  # type: ignore[arg-type]
+                from_model_header(file.tokenizer),
+                "fp_" + encoder.weights_fingerprint[:12],
+                embedding=file.embedding,
+            )
         tensors: Mapping[str, np.ndarray] = file.tensors
         weights_fingerprint = file.fingerprint
         if adapter:
@@ -996,29 +1019,38 @@ class DllmEngine:
 
     # -- embeddings ---------------------------------------------------------------------------------------------
 
-    def embed(
-        self, text: str | Sequence[int], dimensions: int | None = None, input_type: str | None = None
-    ) -> Embedding:
-        """The embedding of ``text``, L2-normalised; ``dimensions`` keeps the first components and normalises again.
-
-        Models imported from sentence-transformers use their own recipe: the text is prefixed with the prompt named
-        ``input_type`` (e.g. ``"query"``; default: the model's default prompt), encoded with the tokenizer's special
-        tokens, and pooled as the model says (``last_token``: the last position's final hidden state; ``mean``).
-        Other models take the mean of the final hidden states over all positions. The mean sums each column over
-        positions ascending in double, through the ``linear`` kernel."""
+    def embedding_tokens(self, text: str | Sequence[int], input_type: str | None = None) -> list[int]:
+        """The tokens :meth:`embed` runs for ``text``: with the prompt named ``input_type`` and the tokenizer's
+        special tokens for models imported from sentence-transformers, and truncated to the encoder's
+        ``max_seq_length`` as sentence-transformers truncates (the special tokens kept). Token lists pass as given."""
         settings = self.embedding or {}
         prompts: Mapping[str, str] = settings.get("prompts") or {}
         name = input_type or settings.get("default_prompt_name")
         if name is not None and prompts and name not in prompts:
             raise ValueError(f"unknown input_type {name!r}; this model has {', '.join(sorted(prompts))}")
-        if isinstance(text, str):
-            if settings:
-                text = prompts.get(name, "") + text if name else text
-                tokens = self.tokenizer.encode(text, add_special_tokens=True)  # type: ignore[call-arg]
-            else:
-                tokens = self.tokenizer.encode(text)
-        else:
-            tokens = list(text)
+        if not isinstance(text, str):
+            return list(text)
+        if not settings:
+            return self.tokenizer.encode(text)
+        text = prompts.get(name, "") + text if name else text
+        if not settings.get("max_tokens"):
+            return self.tokenizer.encode(text, add_special_tokens=True)  # type: ignore[call-arg]
+        specials = len(self.tokenizer.encode("", add_special_tokens=True))  # type: ignore[call-arg]
+        plain = self.tokenizer.encode(text)[: max(int(settings["max_tokens"]) - specials, 0)]
+        return self.tokenizer.with_special_tokens(plain)  # type: ignore[attr-defined,no-any-return]
+
+    def embed(
+        self, text: str | Sequence[int], dimensions: int | None = None, input_type: str | None = None
+    ) -> Embedding:
+        """The embedding of ``text``, L2-normalised; ``dimensions`` keeps the first components and normalises again.
+
+        Models imported from sentence-transformers use their own recipe (:meth:`embedding_tokens`: the prompt named
+        ``input_type``, the tokenizer's special tokens, truncation for encoders) and are pooled as the model says
+        (``last_token``: the last position's final hidden state; ``cls``: the first; ``mean``). Other models take the
+        mean of the final hidden states over all positions. The mean sums each column over positions ascending in
+        double, through the ``linear`` kernel."""
+        settings = self.embedding or {}
+        tokens = self.embedding_tokens(text, input_type)
         if not tokens:
             raise ValueError("cannot embed an empty input")
         hidden_states = getattr(self.model, "hidden_states", None)
@@ -1027,6 +1059,8 @@ class DllmEngine:
         states = np.asarray(hidden_states(tokens), dtype=np.float32)
         if settings.get("pooling") == "last_token":
             vector = states[-1].copy()
+        elif settings.get("pooling") == "cls":
+            vector = states[0].copy()
         else:
             ones = np.ones((1, states.shape[0]), dtype=np.float32)
             total = linear(ones, np.ascontiguousarray(states.T)).numpy().reshape(-1)

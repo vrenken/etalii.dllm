@@ -30,7 +30,7 @@ same source twice gives byte-identical files (`tests/test_import.py`).
 | Key | Content |
 | --- | --- |
 | `format`, `format_version` | `"dllm"`, `1` |
-| `architecture` | `TransformerConfig` (`src/etalii_dllm/architecture.py`): family (`gemma2`, `gemma3`, `granite`, `llama`, `mistral`, `olmo2`, `phi3`, `qwen2`, `qwen3`), sizes, heads and KV heads, head dim, context length, RMSNorm epsilon, RoPE theta and scaling, attention bias, `qk_norm` (written only when true), `qk_norm_scope` (`head` or `all`), `norm_placement` (`pre`, `post` or `sandwich`) and `norm_unit_offset` (RMSNorms scale by `1 + weight`, Gemma), each written only when not the default, `activation` (`silu` or `gelu_tanh`), `local_rope_theta` (the RoPE base of the sliding-window layers, Gemma 3; written only when set), the Granite multipliers `embedding_multiplier`, `attention_multiplier` (the attention score scale), `residual_multiplier` and `logits_scaling` (each written only when not the plain value), tied embeddings, BOS/EOS token ids, `sliding_window` and `sliding_window_layers` (written only when set; no layer list means every layer), `rotary_dim` (partial rotary, written only when set), `attention_softcap` and `logits_softcap` (Gemma 2 soft-capping, written only when set) |
+| `architecture` | `TransformerConfig` (`src/etalii_dllm/architecture.py`): family (`bert`, `gemma2`, `gemma3`, `granite`, `llama`, `mistral`, `olmo2`, `phi3`, `qwen2`, `qwen3` and the mixtures of experts), sizes, heads and KV heads, head dim, context length, RMSNorm epsilon, RoPE theta and scaling, attention bias, `qk_norm` (written only when true), `qk_norm_scope` (`head` or `all`), `norm_placement` (`pre`, `post` or `sandwich`) and `norm_unit_offset` (RMSNorms scale by `1 + weight`, Gemma), each written only when not the default, `activation` (`silu` or `gelu_tanh`; `gelu` for BERT), `type_vocabulary_size` (BERT only), `local_rope_theta` (the RoPE base of the sliding-window layers, Gemma 3; written only when set), the Granite multipliers `embedding_multiplier`, `attention_multiplier` (the attention score scale), `residual_multiplier` and `logits_scaling` (each written only when not the plain value), tied embeddings, BOS/EOS token ids, `sliding_window` and `sliding_window_layers` (written only when set; no layer list means every layer), `rotary_dim` (partial rotary, written only when set), `attention_softcap` and `logits_softcap` (Gemma 2 soft-capping, written only when set) |
 | `tensors` | List of `{name, shape, dtype: "F32", offset, nbytes, source_dtype}`; `source_dtype` is what the source stored (`BF16`, `F16`, `Q8_0`, ...) |
 | `fingerprint` | SHA-256 of the data section (hex) |
 | `source` | `format` (`safetensors`/`gguf`), `repository` and `revision` (the commit hash for `hf:` imports), `url` when known, and `files`: path, SHA-256 and size of every source file read |
@@ -39,7 +39,7 @@ same source twice gives byte-identical files (`tests/test_import.py`).
 | `chat_template` | The model's Jinja chat template, or `null` |
 | `fine_tuning` | Only in models written by `dllm finetune`: base model fingerprint, data fingerprint, run settings, steps completed and final loss (see [training](training.md)) |
 | `adapter` | Only in models written by `dllm import ADAPTER --base BASE`: the base model fingerprint, the LoRA settings (`rank`, `alpha`, `targets`, `rslora`), the adapter's licence and its source files (see [training](training.md#lora-adapters)) |
-| `embedding` | Only in models imported from sentence-transformers: `pooling` (`last_token` or `mean`), `normalize`, `prompts` (name to the text put in front of the input, such as `query`) and `default_prompt_name` (see [retrieval](retrieval.md#embedding-models)) |
+| `embedding` | Only in models imported from sentence-transformers (and in every BERT encoder): `pooling` (`last_token`, `cls` or `mean`), `normalize`, `prompts` (name to the text put in front of the input, such as `query`), `default_prompt_name` and, for encoders, `max_tokens` (sentence-transformers' `max_seq_length`, else the model's positions; longer inputs are truncated) (see [retrieval](retrieval.md#embedding-models)) |
 | `lineage` | How the weights were made, oldest step first: `import`, then every `adapter`, `fine_tune` (naming the `teacher` for a distillation), `edit` and `merge`, each with the weights it started from (`input`) and, except the last, those it gave (`output`); details are digests of the matching sections (see [verifiable models](provenance.md#lineage)). Files written before Phase 17 have none; readers derive it from the other sections |
 | `merge` | Only in merged models (`dllm merge`): the method (`linear`, `slerp`, `ties`), the weights, `t` or `density` and `base`, and every input's fingerprint and lineage (see [building models](model-building.md#merging)) |
 | `edits` | Only in edited models (`dllm edit`): a list, oldest first, of the edits applied to the weights: method (`rome`), layer, prompt, subject, target, contexts, base model fingerprint, covariance and optimiser settings, the norm of the value change and the target probability before and after (see [interpretability](interpretability.md#model-editing-rome)) |
@@ -64,6 +64,13 @@ Every import maps onto one naming scheme, and weight matrices use the `[out, in]
 | `final_norm.weight` | `[hidden]` |
 | `lm_head.weight` | `[vocab, hidden]`, absent when embeddings are tied |
 
+A BERT encoder (family `bert`, with `type_vocabulary_size` in the architecture and `activation` `gelu`) has its own
+set: `token_embedding.weight` `[vocab, hidden]`, `position_embedding.weight` `[context_length, hidden]`,
+`token_type_embedding.weight` `[type_vocabulary_size, hidden]`, `embedding_norm.{weight,bias}`, and per layer
+`layers.N.attention.{q,k,v,o}.{weight,bias}`, `layers.N.attention_norm.{weight,bias}`,
+`layers.N.mlp.up.{weight,bias}` `[intermediate, hidden]`, `layers.N.mlp.down.{weight,bias}` `[hidden, intermediate]`
+and `layers.N.mlp_norm.{weight,bias}` (LayerNorms after attention and the MLP). It has no final norm or LM head.
+
 Rotary embeddings pair dimensions `(i, i + head_dim/2)` as in Hugging Face checkpoints. llama.cpp permutes the Q and
 K rows of Llama models to pair `(2i, 2i+1)`; the importer undoes that reindexing, so an F32/F16/BF16 GGUF and the
 original checkpoint import to the same bytes and the same fingerprint.
@@ -77,7 +84,12 @@ original checkpoint import to the same bytes and the same fingerprint.
   import is deterministic, but a quantised source is of course only as precise as its quantisation.
   Running quantised (`--quantize q8_0` or `q4_0`) requantises the float32 tensors at load time; the file itself
   stays float32, so one file serves every precision.
-- **Fail loudly.** Unknown tensors, unsupported families (anything but Gemma 2, Gemma 3 text, Granite, Granite MoE, Llama, Mistral, Mixtral, OLMo 2, OLMoE, Phi-3, Qwen2, Qwen2-MoE, Qwen3 and Qwen3-MoE),
+- **BERT.** `model_type` `bert` (`BertModel` or a pre-training checkpoint, with or without the `bert.` prefix;
+  sentence-transformers encoders such as all-MiniLM-L6-v2 and bge-small-en-v1.5) maps to family `bert`. The pooler
+  and the pre-training heads are dropped, old `gamma`/`beta` LayerNorm names are read as `weight`/`bias`,
+  `layer_norm_eps` becomes the norm epsilon and `max_position_embeddings` the context length. `hidden_act` `gelu`
+  (or `gelu_new`/`gelu_pytorch_tanh`, the tanh form) is supported; relative position embeddings are refused.
+- **Fail loudly.** Unknown tensors, unsupported families (anything but BERT, Gemma 2, Gemma 3 text, Granite, Granite MoE, Llama, Mistral, Mixtral, OLMo 2, OLMoE, Phi-3, Qwen2, Qwen2-MoE, Qwen3 and Qwen3-MoE),
   activations other than SiLU and GELU (tanh), MLP biases and RoPE scaling other than `linear`/`llama3`/`longrope`/`yarn` stop the import. Sliding-window
   attention comes from `sliding_window` (Mistral: every layer; Qwen2/Qwen3 with `use_sliding_window`: the layers from
   `max_window_layers` on; a `layer_types` list names them explicitly); a window at least as long as the context is

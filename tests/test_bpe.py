@@ -199,14 +199,14 @@ def test_merges_resolve_by_rank_then_position():
 
 def test_unsupported_components_fail_loudly():
     base = {"model": {"type": "BPE", "vocab": {"a": 0}, "merges": []}, "decoder": {"type": "ByteLevel"}}
-    with pytest.raises(TokenizerError, match="WordPiece"):
-        BpeTokenizer({**base, "model": {"type": "WordPiece", "vocab": {}}})
+    with pytest.raises(TokenizerError, match="Unigram"):
+        BpeTokenizer({**base, "model": {"type": "Unigram", "vocab": []}})
     with pytest.raises(TokenizerError, match="byte-level"):
         BpeTokenizer(base)
     with pytest.raises(TokenizerError, match="Metaspace"):
         BpeTokenizer({**base, "pre_tokenizer": {"type": "Metaspace", "prepend_scheme": "sometimes"}})
-    with pytest.raises(TokenizerError, match="WordPiece"):
-        BpeTokenizer({**base, "decoder": {"type": "WordPiece"}})
+    with pytest.raises(TokenizerError, match="CTC"):
+        BpeTokenizer({**base, "decoder": {"type": "CTC"}})
 
 
 def test_sentencepiece_decoding_drops_one_leading_space_of_the_text_only():

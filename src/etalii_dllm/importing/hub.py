@@ -38,6 +38,7 @@ WANTED = (
     # sentence-transformers embedding models: the module list, pooling and query prompts
     "modules.json",
     "config_sentence_transformers.json",
+    "sentence_bert_config.json",
 )
 # Files in subdirectories an import reads (exact paths).
 WANTED_NESTED = ("1_Pooling/config.json",)

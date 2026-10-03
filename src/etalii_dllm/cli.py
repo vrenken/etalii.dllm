@@ -479,6 +479,12 @@ def main(argv: list[str] | None = None) -> int:
     scorer.add_argument("--json", action="store_true", help="print the scores (and a receipt) as JSON")
     scorer.add_argument("--receipt", metavar="FILE", help="write a score receipt to FILE (dllm replay checks it)")
 
+    embed = commands.add_parser("embed", help="the exact embedding of a text (embedding and encoder models)")
+    embed.add_argument("text", help="the text to embed ('-' reads standard input)")
+    embed.add_argument("--input-type", help="the model's prompt to use, e.g. query or document")
+    embed.add_argument("--dimensions", type=int, help="keep the first N components (normalised again)")
+    embed.add_argument("--json", action="store_true", help="print the vector, token count and fingerprint as JSON")
+
     rerank = commands.add_parser("rerank", help="rank documents for a query with the model as a judge (exact)")
     rerank.add_argument("query")
     rerank.add_argument("documents", nargs="*", help="the documents (or --file)")
@@ -707,6 +713,8 @@ def main(argv: list[str] | None = None) -> int:
         return _index(args, engine)
     if args.command == "rerank":
         return _rerank(args, engine)
+    if args.command == "embed":
+        return _embed(args, engine)
     if args.command == "watermark":
         return _watermark(args, engine)
     if args.command == "score":
@@ -978,6 +986,26 @@ def _watermark(args: argparse.Namespace, engine: DllmEngine) -> int:
         verdict = "watermarked" if result.watermarked else "no watermark found"
         print(f"tokens: {result.tokens}  green: {result.green}  z: {result.z:.4f}  {verdict}")
     return 0 if result.watermarked else 1
+
+
+def _embed(args: argparse.Namespace, engine: DllmEngine) -> int:
+    from etalii_dllm.numerics import fingerprint
+
+    try:
+        text = sys.stdin.read() if args.text == "-" else args.text
+        embedding = engine.embed(text, args.dimensions, args.input_type)
+    except ValueError as error:
+        print(f"dllm embed: {error}", file=sys.stderr)
+        return 2
+    vector = [float(v) for v in embedding.vector]
+    digest = fingerprint(embedding.vector)
+    if args.json:
+        result = {"embedding": vector, "tokens": embedding.tokens, "fingerprint": digest}
+        print(json.dumps({**result, "system_fingerprint": engine.system_fingerprint}))
+    else:
+        print(" ".join(repr(v) for v in vector))
+        print(f"{len(vector)} dimensions from {embedding.tokens} tokens, fingerprint {digest}", file=sys.stderr)
+    return 0
 
 
 def _rerank(args: argparse.Namespace, engine: DllmEngine) -> int:

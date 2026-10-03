@@ -610,6 +610,21 @@ NB_MODULE(_kernels, module) {
         nb::arg("x"), nb::arg("weight").none() = nb::none(), nb::arg("eps") = 1e-6,
         nb::arg("add_unit_offset") = false, "RMSNorm over the last dimension, fixed order, double accumulator.");
 
+    m.def(
+        "layer_norm",
+        [](FloatTensor x, FloatVector weight, FloatVector bias, double eps) {
+            require(x.ndim() >= 1, "x must have at least one dimension");
+            const std::size_t dim = x.shape(x.ndim() - 1);
+            require(weight.shape(0) == dim && bias.shape(0) == dim,
+                    "weight and bias lengths must equal the last dimension of x");
+            float* out;
+            auto result = make_array(shape_of(x), &out);
+            dllm::layer_norm(x.data(), weight.data(), bias.data(), out, leading_rows(x), dim, eps);
+            return result;
+        },
+        nb::arg("x"), nb::arg("weight"), nb::arg("bias"), nb::arg("eps") = 1e-12,
+        "LayerNorm over the last dimension, fixed order, double accumulators.");
+
     m.def("silu", &elementwise<dllm::silu>, nb::arg("x"), "Elementwise x * sigmoid(x).");
     m.def("sigmoid_elementwise", &elementwise<dllm::sigmoid_float>, nb::arg("x"),
           "Elementwise logistic sigmoid, in double, rounded once.");

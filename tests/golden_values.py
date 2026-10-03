@@ -118,7 +118,7 @@ CONSTRAINED_FINGERPRINT = "979b6d7e752cd5b30ba187fd03c7919367f6494b05b0cdb537f0e
 EMBEDDING_FINGERPRINT = "6cea233a8a650a422c82e849cd5d0c77d223c38d1e9b92f3d84603a3ba4db177"
 
 # Phase 10 (#100): `dllm verify` with the placeholder model; the same on every machine.
-VERIFY_FINGERPRINT = "3ffd534d1fadce8a267c510806baa2fc"
+VERIFY_FINGERPRINT = "a964930c9d11b0bbb66c8cd70d30f44a"
 
 # Phase 2 real models (tests/test_reference_models.py): the import fingerprint of the pinned checkpoint, and
 # GenerationResult.fingerprint of the greedy chat answer to test_reference_models.CHAT. Phase 10 (#99) adds the
@@ -241,7 +241,7 @@ EVAL_FINGERPRINTS = {
 # output file's SHA-256, so it pins the bits of every kernel case, the sampler and the two small decoders. Phase 21
 # added the two sample-penalties cases (penalties, min-p and logit bias); Phase 41 the YaRN and LongRoPE long-factor
 # rope-inv-freq cases; Phase 44 the sigmoid case and the qwen2_moe decoder (a gated shared expert).
-CONFORMANCE_MANIFEST_SHA256 = "8e409440d354e738cd287ef67448aafb49fd7463fb8452d38e712088096359a1"
+CONFORMANCE_MANIFEST_SHA256 = "f7533cd097b237a484c1153f7a6504587628849ce5b6858012af93380b449ffb"
 
 # Phase 21: the placeholder model continuing "Deterministic decoding controls are" with every decoding control set
 # (tests/test_decoding_controls.py::CONTROLLED): penalties, min-p and logit bias.
@@ -388,3 +388,7 @@ COMPLETE_GRAMMAR_FINGERPRINTS = {
 MORE_TOOL_FORMAT_CALLS = "4d90f8d241a325da69aff67e9f35022319f4562477b706ecbd3d3097044f8d6d"
 TOOL_CONTROL_CALLS = "73f6df860b9a1dcd14178e62c23b4366566bb71f581147533ada9882a742a65e"
 REMAINING_TOOL_FORMAT_CALLS = "a34dfdaddbb1ada0f8051184367cce5fb1ba1a81f28fdc9602f894a47c021845"
+
+# Phase 55: the float32 bits of the tiny BERT encoder's embeddings of tests/test_encoders.py TEXTS (mean pooling,
+# normalised).
+ENCODER_EMBEDDINGS = "10d1c4b9b1f7efe88100ad9797bd25dfaba1e8b11bdc8dca38caefa4f51946b9"

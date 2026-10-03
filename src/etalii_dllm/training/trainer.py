@@ -160,6 +160,8 @@ class FineTuner:
         metadata: Mapping[str, Any],
         reference: Sequence[tuple[float, float]] | None = None,
     ) -> None:
+        if config.is_encoder:
+            raise ValueError("fine-tuning is for decoders; encoder models cannot be fine-tuned yet")
         if isinstance(data, PreferenceData) != (run.objective == "dpo"):
             raise ValueError("a DPO run trains on preference pairs, a language-model run on text windows")
         if data.sequence_length != run.sequence_length:

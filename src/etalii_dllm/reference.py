@@ -4,7 +4,7 @@ EtAlii.Dllm promises the same bits on every machine because every operation has 
 operations (``docs/specification.md``). This module states that sequence a second time, in Python and elementwise
 NumPy only, sharing no code with the C++ kernels or :mod:`etalii_dllm.numerics`: the transcendentals, the linear
 layers (float32, Q8_0 and Q4_0), RMSNorm, RoPE, attention, softmax, the activations, the random number generator,
-the sampler and the forward pass of every supported architecture.
+the sampler and the forward pass of every supported architecture (decoders and the BERT encoder).
 
 Every reduction is a Python loop over the reduced index, vectorised only across outputs that are independent of each
 other, so each sum runs in the specified order by construction rather than by a library's choice. Elementwise NumPy
@@ -400,6 +400,27 @@ def rms_norm(x: npt.ArrayLike, weight: npt.ArrayLike | None, eps: float, add_uni
         w = np.asarray(weight, dtype=F32).astype(F64)
         out = out * (1.0 + w if add_unit_offset else w)
     return _round(out).reshape(*lead, rows.shape[1])
+
+
+def layer_norm(x: npt.ArrayLike, weight: npt.ArrayLike, bias: npt.ArrayLike, eps: float) -> np.ndarray:
+    """Per row ``mean = sum x / dim`` and ``var = sum (x - mean)^2 / dim`` (both sums ascending in double), then
+    ``(x - mean) * (1 / sqrt(var + eps)) * w + b``, rounded once."""
+    rows, lead = _rows(x)
+    xd = rows.astype(F64)
+    dim = rows.shape[1]
+    total = np.zeros(rows.shape[0], dtype=F64)
+    for i in range(dim):
+        total += xd[:, i]
+    mean = total / float(dim)
+    squares = np.zeros(rows.shape[0], dtype=F64)
+    for i in range(dim):
+        centred = xd[:, i] - mean
+        squares += centred * centred
+    inverse = 1.0 / np.sqrt(squares / float(dim) + eps)
+    w = np.asarray(weight, dtype=F32).astype(F64)
+    b = np.asarray(bias, dtype=F32).astype(F64)
+    out = (xd - mean[:, None]) * inverse[:, None] * w + b
+    return _round(out).reshape(*lead, dim)
 
 
 def silu(x: npt.ArrayLike) -> np.ndarray:
@@ -1343,3 +1364,77 @@ class ReferenceTransformer:
             results.append((tokens, reason, total, total / power if count > 0 else total))
         results.sort(key=lambda r: (-r[3], r[0]))
         return results[:n_best]
+
+
+class ReferenceEncoder:
+    """The BERT encoder of :class:`etalii_dllm.encoder.Encoder` and the embedding the engine pools from it, step
+    for step, on this module's kernels."""
+
+    def __init__(
+        self,
+        config: TransformerConfig,
+        tensors: Mapping[str, npt.ArrayLike],
+        *,
+        quantize: str | None = None,
+        embedding: Mapping[str, Any] | None = None,
+    ) -> None:
+        self.config = config
+        self.settings = dict(embedding or {})
+        self.w: dict[str, Any] = {}
+        for name in config.tensor_shapes():
+            values = np.asarray(tensors[name], dtype=F32)
+            self.w[name] = Weight(values, quantize) if name.endswith(_MATRICES) else values
+
+    @classmethod
+    def from_engine(cls, engine: Any) -> ReferenceEncoder:
+        """The reference twin of an engine serving an encoder (same weights, quantisation and pooling)."""
+        model = engine.model
+        return cls(model.config, model.tensors, quantize=model.quantization, embedding=engine.embedding)
+
+    def hidden_states(self, tokens: Sequence[int]) -> np.ndarray:
+        """``LayerNorm((word + type 0) + position)``, then per layer ``h = LayerNorm(h + o(attention))`` (every key
+        visible) and ``h = LayerNorm(h + down(gelu(up(h))))``; additions in float32."""
+        config, w = self.config, self.w
+        count = len(tokens)
+        x = (w["token_embedding.weight"][np.asarray(tokens, dtype=np.int64)] + w["token_type_embedding.weight"][0]) + w[
+            "position_embedding.weight"
+        ][:count]
+
+        def norm(values: np.ndarray, name: str) -> np.ndarray:
+            return layer_norm(values, w[name + ".weight"], w[name + ".bias"], config.rms_norm_eps)
+
+        def project(values: np.ndarray, name: str) -> np.ndarray:
+            return linear(values, w[name + ".weight"], w[name + ".bias"])
+
+        x = norm(x, "embedding_norm")
+        shape = (count, config.heads, config.head_dim)
+        for layer in range(config.layers):
+            p = f"layers.{layer}."
+            q, k, v = (project(x, p + f"attention.{n}").reshape(shape) for n in ("q", "k", "v"))
+            attended = attention(q, k, v, scale=config.attention_scale, causal=False)
+            x = norm(x + project(attended.reshape(count, -1), p + "attention.o"), p + "attention_norm")
+            up = project(x, p + "mlp.up")
+            activated = gelu(up, "tanh" if config.activation == "gelu_tanh" else "none")
+            x = norm(x + project(activated, p + "mlp.down"), p + "mlp_norm")
+        return x
+
+    def embed(self, tokens: Sequence[int]) -> np.ndarray:
+        """The pooled embedding of ``tokens`` (already truncated, special tokens included): the first state for
+        ``cls`` pooling, else the mean (summed over positions ascending in double, rounded, then divided in float32),
+        then divided by its float32 norm (the square root of the sum of squares in double) when normalised."""
+        states = self.hidden_states(tokens)
+        if self.settings.get("pooling") == "cls":
+            vector = states[0].copy()
+        elif self.settings.get("pooling") == "last_token":
+            vector = states[-1].copy()
+        else:
+            total = np.zeros(states.shape[1], dtype=F64)
+            for row in states:
+                total += row.astype(F64)
+            vector = _round(total) / F32(states.shape[0])
+        if self.settings.get("normalize", True):
+            squares = sequential_sum(vector.astype(F64) * vector.astype(F64))
+            norm = F32(math.sqrt(squares))
+            if norm > 0:
+                vector = (vector / norm).astype(F32)
+        return vector

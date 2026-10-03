@@ -97,6 +97,9 @@ EMBEDDING_MODELS = {
     "qwen3-embedding": ReferenceModel(
         "Qwen/Qwen3-Embedding-0.6B", "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3", "Apache-2.0"
     ),
+    # BERT encoders (Phase 55): mean pooling (all-MiniLM-L6-v2) and CLS pooling (bge-small-en-v1.5).
+    "minilm": ReferenceModel("sentence-transformers/all-MiniLM-L6-v2", "main", "Apache-2.0"),
+    "bge-small": ReferenceModel("BAAI/bge-small-en-v1.5", "main", "MIT"),
 }
 _ALL_MODELS = {**REFERENCE_MODELS, **EMBEDDING_MODELS}
 TOOL_FORMATS = {"qwen2.5": "hermes", "qwen2.5-1.5b": "hermes", "qwen3": "hermes", "llama3.2": "llama3"}
@@ -510,20 +513,24 @@ def test_embedding_golden(embedding_imported):
 def test_embeddings_match_reference(embedding_imported):
     torch = pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")
-    _, directory, result = embedding_imported
+    key, directory, result = embedding_imported
     engine = DllmEngine.from_model_file(result.path)
-    assert engine.embedding is not None and engine.embedding["pooling"] == "last_token"
+    assert engine.embedding is not None
+    pooling = engine.embedding["pooling"]
+    assert pooling == {"minilm": "mean", "bge-small": "cls"}.get(key, "last_token")
     prompts = engine.embedding["prompts"]
+    limit = engine.embedding.get("max_tokens")
     tokenizer = transformers.AutoTokenizer.from_pretrained(directory)
     reference = transformers.AutoModel.from_pretrained(directory, dtype=torch.float32, attn_implementation="eager")
     expected = []
     for kind, text in EMBEDDING_TEXTS:
         full = (prompts.get(kind, "") if kind else "") + text
-        tokens = tokenizer(full)["input_ids"]
-        assert engine.tokenizer.encode(full, add_special_tokens=True) == tokens, full
+        tokens = tokenizer(full, truncation=limit is not None, max_length=limit)["input_ids"]
+        assert engine.embedding_tokens(text, kind) == tokens, full
         with torch.no_grad():
-            last = reference.eval()(torch.tensor([tokens])).last_hidden_state[0, -1]
-        expected.append(torch.nn.functional.normalize(last, dim=0).numpy())
+            states = reference.eval()(torch.tensor([tokens])).last_hidden_state[0]
+        pooled = {"mean": states.mean(dim=0), "cls": states[0]}.get(pooling, states[-1])
+        expected.append(torch.nn.functional.normalize(pooled, dim=0).numpy())
     actual = _embeddings(engine)
     np.testing.assert_allclose(actual, np.stack(expected), rtol=0, atol=1e-4)
     # Retrieval works: the query is closest to the passage that answers it.

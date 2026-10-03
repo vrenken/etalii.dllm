@@ -29,7 +29,7 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
 
 ## Layout
 
-- `cpp/include/dllm/`: header-only C++ kernels (`random.hpp`, `math.hpp` transcendentals, `nn.hpp` matmul/norm/RoPE/
+- `cpp/include/dllm/`: header-only C++ kernels (`random.hpp`, `math.hpp` transcendentals, `nn.hpp` matmul/RMSNorm/LayerNorm/RoPE/
   attention, `grad.hpp` their gradients (also tanh GELU, soft-caps, unit-offset norms, MoE routing) plus cross-entropy and AdamW, `quant.hpp` Q8_0, `interp.hpp` attention probabilities/cosine/Cholesky for interpretability, `parallel.hpp` the thread pool, `fpenv.hpp` the
   floating point environment every binding runs in,
   `simd.hpp` the per-machine AVX2/SSE2/NEON dispatch, `cuda.hpp` the CUDA backend; evaluation orders in `docs/kernels.md`);
@@ -43,7 +43,7 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
   truncation is `engine.fit_messages`, `docs/api.md#long-conversations`), `infill` (fill-in-the-middle prompts from the model's FIM tokens, `suffix`; `docs/api.md#fill-in-the-middle`), `reasoning` (thinking models: `<think>` split, the
   thinking switch and budget; `docs/api.md#reasoning`), `prompt_cache` (KV caches reused across requests),
   `batching` (concurrent generations share `forward_batch` steps), `chat`, `engine` (`DllmEngine`, the facade shared by every front
-  end; `DLLM_MODEL`/`--model` selects a `model.dllm`), `transformer` (the decoder of every family, mixtures of experts and shared experts included, + KV cache), `bpe` (also GGUF SentencePiece vocabularies, in SentencePiece's score order), `unicode` (Unicode tables pinned to one version) and
+  end; `DLLM_MODEL`/`--model` selects a `model.dllm`), `transformer` (the decoder of every family, mixtures of experts and shared experts included, + KV cache), `encoder` (BERT encoders for embeddings: `layer_norm`, bidirectional attention; CPU only, embed only; `docs/retrieval.md#encoder-models`), `bpe` (also GGUF SentencePiece vocabularies, in SentencePiece's score order, and WordPiece via `wordpiece`, with `tokenizers`' own character classes), `unicode` (Unicode tables pinned to one version) and
   `chat_template` (the model's own tokenizer and Jinja template), `sampling` (logit bias, penalties, DRY, top-k/top-p/
   min-p, top-n-sigma, typical-p, XTC, Mirostat, dynamic temperature, choice seeds; `docs/api.md#decoding-controls`, `docs/api.md#modern-samplers`, `docs/api.md#adaptive-samplers`), `regexp` (regexes compiled to byte DFAs for `grammar`), `numeric_automata` (number bounds and `multipleOf` as byte DFAs, exact decimals), `schema_algebra` (`allOf`/`not`/`if` merged and negated into plain schemas for `grammar`), `gbnf` (GBNF grammars for `grammar`: left recursion rewritten, token references, lazy triggers in `TokenConstraint`; `docs/api.md#grammars`), `cuda` (the GPU backend: NVRTC discovery, `CudaTensor`, device
   ops; `--device cuda`/`DLLM_DEVICE`), `architecture` (`TransformerConfig`), `modelfile`

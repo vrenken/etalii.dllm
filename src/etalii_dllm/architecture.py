@@ -1,4 +1,4 @@
-"""Description of a decoder-only transformer, independent of where its weights came from.
+"""Description of a transformer (decoder-only, or a BERT-style encoder), independent of where its weights came from.
 
 Imported models are mapped onto this one description and onto one set of tensor names (see
 ``docs/model-format.md``), so the decoder does not need to know about Hugging Face or GGUF conventions.
@@ -20,8 +20,11 @@ from typing import Any
 # without QK-norm or the second RoPE base, and soft-caps the attention scores and the logits. The mixture-of-experts
 # families replace the MLP with experts and a router: "mixtral" is "mistral", "qwen3_moe" is "qwen3", "olmoe" is
 # "llama" with OLMo's QK-norm over the whole projections, "qwen2_moe" is "qwen2" with a gated shared expert and
-# "granitemoe" is "granite" (with or without a shared expert).
+# "granitemoe" is "granite" (with or without a shared expert). "bert" is the one encoder: absolute position and token
+# type embeddings, LayerNorms with biases after the embeddings, attention and the MLP, bidirectional attention and
+# a plain (ungated) GELU MLP, all with biases (:mod:`etalii_dllm.encoder`); it embeds text and does not generate.
 FAMILIES = (
+    "bert",
     "gemma2",
     "gemma3",
     "granite",
@@ -38,8 +41,9 @@ FAMILIES = (
     "qwen3_moe",
 )
 NORM_PLACEMENTS = ("pre", "post", "sandwich")
-ACTIVATIONS = ("silu", "gelu_tanh")
+ACTIVATIONS = ("silu", "gelu_tanh", "gelu")
 QK_NORM_SCOPES = ("head", "all")
+ENCODER_ONLY = "an encoder model embeds text and cannot generate; use it with dllm embed, /v1/embeddings or dllm index"
 
 
 @dataclass(frozen=True)
@@ -110,6 +114,8 @@ class TransformerConfig:
     shared_expert_gate: bool = False
     """Whether the shared expert's output is scaled by ``sigmoid(h . w)`` with a gate weight ``[1, hidden]``
     (Qwen2-MoE)."""
+    type_vocabulary_size: int = 0
+    """BERT: the rows of the token type embedding (segment A is type 0, the only one an embedding uses)."""
 
     def __post_init__(self) -> None:
         if self.family not in FAMILIES:
@@ -119,10 +125,17 @@ class TransformerConfig:
                 raise ValueError(f"{name} must be positive")
         if self.heads % self.kv_heads:
             raise ValueError("heads must be a multiple of kv_heads")
-        if self.head_dim % 2:
+        if self.head_dim % 2 and not self.is_encoder:
             raise ValueError("head_dim must be even for rotary embeddings")
         if self.activation not in ACTIVATIONS:
             raise ValueError(f"unsupported activation {self.activation!r}")
+        if self.is_encoder:
+            if self.type_vocabulary_size < 1 or self.activation not in ("gelu", "gelu_tanh"):
+                raise ValueError("bert needs token types and a gelu or gelu_tanh MLP")
+            if self.kv_heads != self.heads or self.experts:
+                raise ValueError("bert has neither grouped-query attention nor experts")
+        elif self.activation == "gelu" or self.type_vocabulary_size:
+            raise ValueError("the plain gelu MLP and token types are for bert (encoders) only")
         if self.qk_norm_scope not in QK_NORM_SCOPES:
             raise ValueError(f"unsupported qk_norm_scope {self.qk_norm_scope!r}")
         if self.norm_placement not in NORM_PLACEMENTS:
@@ -169,6 +182,11 @@ class TransformerConfig:
                 raise ValueError("yarn needs a positive factor and original_max_position_embeddings")
         if self.rope_attention_factor != 1.0 and self.qk_norm and self.norm_unit_offset:
             raise ValueError("a RoPE attention factor together with unit-offset QK-norm is not supported")
+
+    @property
+    def is_encoder(self) -> bool:
+        """Whether the model is a BERT-style encoder (it embeds text and does not generate)."""
+        return self.family == "bert"
 
     @property
     def attention_scale(self) -> float:
@@ -250,6 +268,7 @@ class TransformerConfig:
             ("experts_per_token", 0),
             ("normalize_expert_weights", False),
             ("shared_expert_gate", False),
+            ("type_vocabulary_size", 0),
         )
         for name, default in defaults:
             if values[name] == default:
@@ -269,7 +288,9 @@ class TransformerConfig:
         return cls(**values)
 
     def tensor_shapes(self) -> dict[str, tuple[int, ...]]:
-        """Every tensor the decoder expects, with its shape. Weights use the ``[out, in]`` layout of ``linear``."""
+        """Every tensor the model expects, with its shape. Weights use the ``[out, in]`` layout of ``linear``."""
+        if self.is_encoder:
+            return self._encoder_shapes()
         q = self.heads * self.head_dim
         kv = self.kv_heads * self.head_dim
         shapes: dict[str, tuple[int, ...]] = {"token_embedding.weight": (self.vocabulary_size, self.hidden_size)}
@@ -314,4 +335,31 @@ class TransformerConfig:
         shapes["final_norm.weight"] = (self.hidden_size,)
         if not self.tie_word_embeddings:
             shapes["lm_head.weight"] = (self.vocabulary_size, self.hidden_size)
+        return shapes
+
+    def _encoder_shapes(self) -> dict[str, tuple[int, ...]]:
+        hidden = self.hidden_size
+        shapes: dict[str, tuple[int, ...]] = {
+            "token_embedding.weight": (self.vocabulary_size, hidden),
+            "position_embedding.weight": (self.context_length, hidden),
+            "token_type_embedding.weight": (self.type_vocabulary_size, hidden),
+            "embedding_norm.weight": (hidden,),
+            "embedding_norm.bias": (hidden,),
+        }
+        q = self.heads * self.head_dim
+        for i in range(self.layers):
+            p = f"layers.{i}."
+            for name in ("q", "k", "v"):
+                shapes[p + f"attention.{name}.weight"] = (q, hidden)
+                shapes[p + f"attention.{name}.bias"] = (q,)
+            shapes[p + "attention.o.weight"] = (hidden, q)
+            shapes[p + "attention.o.bias"] = (hidden,)
+            shapes[p + "attention_norm.weight"] = (hidden,)
+            shapes[p + "attention_norm.bias"] = (hidden,)
+            shapes[p + "mlp.up.weight"] = (self.intermediate_size, hidden)
+            shapes[p + "mlp.up.bias"] = (self.intermediate_size,)
+            shapes[p + "mlp.down.weight"] = (hidden, self.intermediate_size)
+            shapes[p + "mlp.down.bias"] = (hidden,)
+            shapes[p + "mlp_norm.weight"] = (hidden,)
+            shapes[p + "mlp_norm.bias"] = (hidden,)
         return shapes

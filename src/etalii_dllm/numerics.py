@@ -221,6 +221,14 @@ def rms_norm(
     return Tensor(_kernels.rms_norm(_float32(x), w, eps, add_unit_offset))
 
 
+def layer_norm(
+    x: npt.ArrayLike | Tensor, weight: npt.ArrayLike | Tensor, bias: npt.ArrayLike | Tensor, eps: float = 1e-12
+) -> Tensor:
+    """LayerNorm over the last dimension (BERT): the mean and the variance summed ascending in double, then
+    ``(x - mean) / sqrt(var + eps) * weight + bias`` in double, rounded once."""
+    return Tensor(_kernels.layer_norm(_float32(x), _float32(weight), _float32(bias), float(eps)))
+
+
 def sigmoid_elementwise(x: npt.ArrayLike | Tensor) -> FloatArray:
     """Elementwise ``1 / (1 + e^-x)`` (the portable :func:`sigmoid`), each rounded once to float32."""
     return _kernels.sigmoid_elementwise(_float32(x))

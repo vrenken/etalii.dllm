@@ -2,7 +2,8 @@
 
 ``write(directory)`` writes fixed inputs and this build's exact outputs for every kernel of the specification
 (``docs/specification.md``): the transcendentals, the linear layers (float32, Q8_0, Q4_0) and quantisation, RMSNorm,
-the activations, softmax, RoPE, attention, the random number generator, the sampler and two small decoders. Every
+the activations, softmax, RoPE, attention, LayerNorm, the random number generator, the sampler, small decoders and a
+BERT encoder. Every
 array is a raw little-endian file; ``manifest.json`` (canonical JSON: sorted keys, no whitespace) lists each case's
 kernel, parameters and arrays with their dtype, shape and SHA-256. A port to another language reads the inputs, runs
 its own kernels and compares the outputs bit for bit (any NaN matches any NaN: payloads are not specified).
@@ -80,11 +81,21 @@ DECODERS: dict[str, dict[str, Any]] = {
 RoPE scaling, sandwich (1 + w) norms, GELU, scaled embeddings, a sliding window, both soft-caps, QK-norm, a mixture
 of experts next to a dense layer and a gated shared expert."""
 
+ENCODERS: dict[str, dict[str, Any]] = {
+    "bert": {
+        "family": "bert", "vocabulary_size": 96, "hidden_size": 64, "intermediate_size": 96, "layers": 2,
+        "heads": 4, "kv_heads": 4, "head_dim": 16, "context_length": 16, "rms_norm_eps": 1e-12,
+        "rope_theta": 0.0, "tie_word_embeddings": True, "attention_bias": True, "activation": "gelu",
+        "type_vocabulary_size": 2,
+    },
+}  # fmt: skip
+"""A small BERT encoder: absolute positions, token types, LayerNorms with biases, bidirectional attention."""
+
 
 def _decoder_tensors(name: str) -> Arrays:
     from etalii_dllm.architecture import TransformerConfig
 
-    config = TransformerConfig.from_dict(DECODERS[name])
+    config = TransformerConfig.from_dict({**DECODERS, **ENCODERS}[name])
     tensors = {}
     for index, (tensor, shape) in enumerate(sorted(config.tensor_shapes().items())):
         values = _gaussian(500 + index, *shape, scale=0.3)
@@ -110,6 +121,8 @@ def cases() -> list[tuple[str, str, dict[str, Any], Arrays]]:
     for unit in (False, True):
         params = {"eps": 1e-6, "add_unit_offset": unit}
         items.append((f"rms-norm-unit-{str(unit).lower()}", "rms_norm", params, {"x": x, "weight": _gaussian(24, 96)}))
+    norm_inputs = {"x": _gaussian(35, 5, 96, scale=4.0) + np.float32(3.0), "weight": _gaussian(36, 96)}
+    items.append(("layer-norm", "layer_norm", {"eps": 1e-12}, {**norm_inputs, "bias": _gaussian(37, 96)}))
     wide = np.concatenate([_gaussian(25, 2000, scale=6.0), np.array([0.0, -0.0, 1e-40, 30.0, -30.0], np.float32)])
     for name in ("silu", "gelu", "gelu_tanh", "softmax", "log_softmax"):
         items.append((name, name, {}, {"x": wide}))
@@ -202,6 +215,11 @@ def cases() -> list[tuple[str, str, dict[str, Any], Arrays]]:
             params = {"config": DECODERS[name], "quantize": quantize}
             label = f"decoder-{name}" + (f"-{quantize}" if quantize else "")
             items.append((label, "decoder", params, {"tokens": tokens, **_decoder_tensors(name)}))
+    for name in ENCODERS:
+        for quantize in (None, "q8_0"):
+            params = {"config": ENCODERS[name], "quantize": quantize}
+            label = f"encoder-{name}" + (f"-{quantize}" if quantize else "")
+            items.append((label, "encoder", params, {"tokens": tokens, **_decoder_tensors(name)}))
     return items
 
 
@@ -233,6 +251,8 @@ def _kernels(kernel: str, params: Mapping[str, Any], inputs: Arrays) -> Arrays:
             inputs["x"], inputs["weight"], params["eps"], add_unit_offset=params["add_unit_offset"]
         )
         return {"y": array(normed)}
+    if kernel == "layer_norm":
+        return {"y": array(numerics.layer_norm(inputs["x"], inputs["weight"], inputs["bias"], params["eps"]))}
     if kernel in ("silu", "softmax", "log_softmax"):
         return {"y": array(getattr(numerics, kernel)(inputs["x"]))}
     if kernel == "gelu":
@@ -312,6 +332,14 @@ def _kernels(kernel: str, params: Mapping[str, Any], inputs: Arrays) -> Arrays:
         tokens = [int(t) for t in inputs["tokens"]]
         rows = [array(model.forward_cached(tokens[: i + 1], cache)).reshape(-1) for i in range(len(tokens))]
         return {"logits": np.stack(rows)}
+    if kernel == "encoder":
+        from etalii_dllm.architecture import TransformerConfig
+        from etalii_dllm.encoder import Encoder
+
+        config = TransformerConfig.from_dict(params["config"])
+        tensors = {name[len("tensor.") :]: v for name, v in inputs.items() if name.startswith("tensor.")}
+        encoder = Encoder(config, tensors, quantize=params["quantize"])
+        return {"states": array(encoder.hidden_states([int(t) for t in inputs["tokens"]]))}
     raise ValueError(f"unknown kernel {kernel!r}")
 
 
@@ -330,6 +358,8 @@ def _reference(kernel: str, params: Mapping[str, Any], inputs: Arrays) -> Arrays
         return {"y": r.matmul(inputs["a"], inputs["b"])}
     if kernel == "rms_norm":
         return {"y": r.rms_norm(inputs["x"], inputs["weight"], params["eps"], params["add_unit_offset"])}
+    if kernel == "layer_norm":
+        return {"y": r.layer_norm(inputs["x"], inputs["weight"], inputs["bias"], params["eps"])}
     if kernel in ("silu", "gelu", "softmax", "log_softmax"):
         return {"y": getattr(r, kernel)(inputs["x"])}
     if kernel == "gelu_tanh":
@@ -400,6 +430,13 @@ def _reference(kernel: str, params: Mapping[str, Any], inputs: Arrays) -> Arrays
         tensors = {name[len("tensor.") :]: v for name, v in inputs.items() if name.startswith("tensor.")}
         model = r.ReferenceTransformer(config, tensors, quantize=params["quantize"])
         return {"logits": np.stack([model.forward([int(t)]) for t in inputs["tokens"]])}
+    if kernel == "encoder":
+        from etalii_dllm.architecture import TransformerConfig
+
+        config = TransformerConfig.from_dict(params["config"])
+        tensors = {name[len("tensor.") :]: v for name, v in inputs.items() if name.startswith("tensor.")}
+        encoder = r.ReferenceEncoder(config, tensors, quantize=params["quantize"])
+        return {"states": encoder.hidden_states([int(t) for t in inputs["tokens"]])}
     raise ValueError(f"unknown kernel {kernel!r}")
 
 
