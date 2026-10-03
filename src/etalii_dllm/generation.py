@@ -20,7 +20,7 @@ from etalii_dllm.models import LanguageModel
 from etalii_dllm.numerics import fingerprint, log_softmax
 from etalii_dllm.prompt_cache import CacheStore, PromptCache
 from etalii_dllm.reasoning import Tracker, closing_text
-from etalii_dllm.sampling import Sampler, SamplingOptions
+from etalii_dllm.sampling import Sampler, SamplingOptions, dry_breakers
 from etalii_dllm.speculative import Drafter, DraftModel, PromptLookup
 from etalii_dllm.tokenization import Tokenizer
 
@@ -212,7 +212,8 @@ class Generation:
         cache = self._cache
         window = generator.context_length
         stop = [s for s in stop if s]
-        sampler = Sampler(options, context)
+        breakers = generator.dry_breakers(options.dry_sequence_breakers) if options.dry else ()
+        sampler = Sampler(options, context, breakers)
         data = bytearray()
         strip_leading_space = self._strip_leading_space
         healed = self._healed
@@ -415,6 +416,7 @@ class Generator:
         self.draft_model = draft_model
         self.model = model
         self.tokenizer = tokenizer
+        self._breakers: dict[tuple[str, ...], tuple[object, frozenset[int]]] = {}
         self.stop_tokens = frozenset(t for t in [tokenizer.end_of_sequence, *stop_tokens] if t >= 0)
         self.context_length: int | None = getattr(getattr(model, "config", None), "context_length", None) or None
         """The model's context window: prompt and answer together never hold more tokens (``None``: no limit)."""
@@ -429,6 +431,16 @@ class Generator:
                 key = f"dllm-kv/1|{__version__}|{getattr(model, 'weights_fingerprint', '')}"
                 store = CacheStore(prompt_cache_dir, key)
             self.prompt_cache = PromptCache(new_cache, prompt_cache, store)
+
+    def dry_breakers(self, breakers: tuple[str, ...]) -> frozenset[int]:
+        """The DRY breaker tokens of this tokenizer (:func:`etalii_dllm.sampling.dry_breakers`), cached."""
+        cached = self._breakers.get(breakers)
+        if cached is not None and cached[0] is self.tokenizer:
+            return cached[1]
+        size = getattr(self.model, "vocabulary_size", self.tokenizer.vocabulary_size)
+        found = dry_breakers([self.tokenizer.decode_bytes([t]) for t in range(size)], breakers)
+        self._breakers[breakers] = (self.tokenizer, found)
+        return found
 
     def new_drafter(self) -> Drafter | None:
         """A drafter for one generation, or ``None`` when speculation is off."""

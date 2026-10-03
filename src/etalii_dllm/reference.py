@@ -608,10 +608,14 @@ class Sampler:
     """Logit bias and penalties first, one token at a time in float: ``x + bias``; for the repetition penalty ``r``
     over the distinct tokens among the last ``repeat_last_n`` of prompt and output, ``x / r`` when ``x > 0`` else
     ``x * r``; ``x - (count * frequency + presence)`` (the penalty in double, rounded to float) for the tokens the
-    output holds. Then greedy (temperature 0) or: logits divided by the temperature in float, softmax, candidates
-    ordered by (probability descending, id ascending), top-k, top-p (the shortest prefix reaching ``top_p``),
-    min-p (candidates below ``min_p`` times the first are dropped), then one ``next_double()`` scaled by the kept
-    mass picks the first candidate whose running sum exceeds it. :meth:`begin` sets the prompt, :meth:`accept`
+    output holds; ``x - dry`` for DRY (the penalty in double, rounded to float). Then greedy (temperature 0) or:
+    logits divided by the temperature in float, softmax, candidates ordered by (probability descending, id
+    ascending), top-k, top-n-sigma (the first as many candidates as tokens within ``n`` deviations of the top
+    logit), typical-p (the candidates with surprise closest to the entropy, back in order), top-p (the shortest
+    prefix reaching ``top_p``), min-p (candidates below ``min_p`` times the first are dropped), XTC (with one
+    ``next_double()`` below ``xtc_probability``, all but the last of the candidates at least ``xtc_threshold`` of
+    the kept mass go), then one ``next_double()`` scaled by the kept mass picks the first candidate whose running
+    sum exceeds it. :meth:`begin` sets the prompt, :meth:`accept`
     records each generated token. Constrained decoding passes the allowed ids (ascending): the adjusted logits are
     restricted to them before the steps after the penalties."""
 
@@ -631,8 +635,22 @@ class Sampler:
         watermark_key: str | None = None,
         watermark_gamma: float = 0.25,
         watermark_delta: float = 2.0,
+        typical_p: float = 1.0,
+        top_n_sigma: float = 0.0,
+        xtc_probability: float = 0.0,
+        xtc_threshold: float = 0.1,
+        dry_multiplier: float = 0.0,
+        dry_base: float = 1.75,
+        dry_allowed_length: int = 2,
+        dry_penalty_last_n: int = -1,
+        dry_breakers: Sequence[int] = (),
     ) -> None:
         self.temperature, self.top_k, self.top_p, self.min_p = temperature, top_k, top_p, min_p
+        self.typical_p, self.top_n_sigma = typical_p, top_n_sigma
+        self.xtc_probability, self.xtc_threshold = xtc_probability, xtc_threshold
+        self.dry_multiplier, self.dry_base = dry_multiplier, dry_base
+        self.dry_allowed_length, self.dry_penalty_last_n = dry_allowed_length, dry_penalty_last_n
+        self.dry_breakers = set(dry_breakers)
         self.watermark_key, self.watermark_gamma, self.watermark_delta = watermark_key, watermark_gamma, watermark_delta
         self.repetition_penalty, self.repeat_last_n = repetition_penalty, repeat_last_n
         self.frequency_penalty, self.presence_penalty = frequency_penalty, presence_penalty
@@ -668,6 +686,13 @@ class Sampler:
                 if 0 <= token < len(values):
                     penalty = F32(count * self.frequency_penalty + self.presence_penalty)
                     values[token] = F32(values[token] - penalty)
+        if self.dry_multiplier != 0.0 and self.dry_penalty_last_n != 0:
+            n = self.dry_penalty_last_n
+            window = self._sequence if n < 0 else self._sequence[-n:]
+            for token, penalty in self._dry(window).items():
+                if 0 <= token < len(values):
+                    with np.errstate(over="ignore"):
+                        values[token] = F32(values[token] - F32(penalty))
         if self.watermark_key is not None:
             digest = hashlib.sha256(b"dllm-watermark/1\0" + self.watermark_key.encode("utf-8")).digest()
             key = int.from_bytes(digest[:8], "little")
@@ -679,6 +704,32 @@ class Sampler:
                 if _mix64(seed + (token + 1) * 0x9E3779B97F4A7C15) < limit:
                     values[token] = F32(values[token] + delta)
         return values
+
+    def _dry(self, window: Sequence[int]) -> dict[int, float]:
+        """For each position whose previous tokens equal the window's last ones (matched backwards, no breakers,
+        at most 256), the token at that position may repeat a run of that length; the longest run ``n`` of each
+        token at least ``dry_allowed_length`` long costs ``multiplier * base^(n - allowed)``, the power multiplied
+        out in double."""
+        best: dict[int, int] = {}
+        end = len(window) - 1
+        if end < 1 or window[end] in self.dry_breakers:
+            return {}
+        for position in range(1, end + 1):
+            n = 0
+            while n < 256 and n < position:
+                a, b = window[position - 1 - n], window[end - n]
+                if a != b or a in self.dry_breakers:
+                    break
+                n += 1
+            if n >= self.dry_allowed_length and n > best.get(window[position], 0):
+                best[window[position]] = n
+        result = {}
+        for token, n in best.items():
+            power = 1.0
+            for _ in range(n - self.dry_allowed_length):
+                power = power * self.dry_base
+            result[token] = self.dry_multiplier * power
+        return result
 
     def sample(self, logits: npt.ArrayLike, allowed: Sequence[int] | None = None) -> int:
         logits = self._adjusted(logits)
@@ -692,33 +743,72 @@ class Sampler:
         scaled = np.asarray(logits, dtype=F32) / F32(self.temperature)
         probabilities = softmax(scaled).tolist()
         order = sorted(range(len(probabilities)), key=lambda i: (-probabilities[i], i))
-        keep = len(order)
-        if self.top_k > 0:
-            keep = min(keep, self.top_k)
+        candidates = order[: self.top_k] if self.top_k > 0 else order
+        if self.top_n_sigma > 0:
+            xs = [float(x) for x in np.asarray(logits, dtype=F32) if math.isfinite(float(x))]
+            if xs:
+                mean = 0.0
+                for x in xs:
+                    mean = mean + x
+                mean = mean / len(xs)
+                variance = 0.0
+                for x in xs:
+                    variance = variance + (x - mean) * (x - mean)
+                variance = variance / len(xs)
+                floor = max(xs) - self.top_n_sigma * math.sqrt(variance)
+                candidates = candidates[: max(1, len([x for x in xs if x >= floor]))]
+        if self.typical_p < 1:
+            mass = 0.0
+            for i in candidates:
+                mass = mass + probabilities[i]
+            q = {i: probabilities[i] / mass for i in candidates}
+            surprise = {i: -float(log(q[i])) if q[i] > 0 else math.inf for i in candidates}
+            entropy = 0.0
+            for i in candidates:
+                if q[i] > 0:
+                    entropy = entropy - q[i] * -surprise[i]
+            rank = {i: r for r, i in enumerate(candidates)}
+            typical, reached = [], 0.0
+            for i in sorted(candidates, key=lambda i: (abs(surprise[i] - entropy), rank[i])):
+                typical.append(i)
+                reached = reached + q[i]
+                if reached >= self.typical_p:
+                    break
+            candidates = sorted(typical, key=lambda i: rank[i])
         if self.top_p < 1:
             cumulative = 0.0
-            for i in range(keep):
-                cumulative += probabilities[order[i]]
+            for n, i in enumerate(candidates):
+                cumulative = cumulative + probabilities[i]
                 if cumulative >= self.top_p:
-                    keep = i + 1
+                    candidates = candidates[: n + 1]
                     break
         if self.min_p > 0:
-            floor = self.min_p * probabilities[order[0]]
-            keep = next((i for i in range(1, keep) if probabilities[order[i]] < floor), keep)
+            floor = self.min_p * probabilities[candidates[0]]
+            candidates = candidates[
+                : next((n for n in range(1, len(candidates)) if probabilities[candidates[n]] < floor), len(candidates))
+            ]
         total = 0.0
-        for i in range(keep):
-            total += probabilities[order[i]]
+        for i in candidates:
+            total = total + probabilities[i]
+        if self.xtc_probability > 0 and self._random.next_double() < self.xtc_probability:
+            top = [i for i in candidates if probabilities[i] >= self.xtc_threshold * total]
+            if len(top) >= 2 and top == candidates[: len(top)]:
+                candidates = candidates[len(top) - 1 :]
+                total = 0.0
+                for i in candidates:
+                    total = total + probabilities[i]
         target = self._random.next_double() * total
         running = 0.0
-        for i in range(keep):
-            running += probabilities[order[i]]
+        for i in candidates:
+            running = running + probabilities[i]
             if target < running:
-                return order[i]
-        return order[keep - 1]
+                return i
+        return candidates[-1]
 
 
-def sampler(options: Any) -> Sampler:
-    """A sampler with the settings of an engine ``SamplingOptions`` (only its values are read)."""
+def sampler(options: Any, breakers: Sequence[int] = ()) -> Sampler:
+    """A sampler with the settings of an engine ``SamplingOptions`` (only its values are read) and the DRY breaker
+    token ids."""
     return Sampler(
         options.temperature,
         options.top_k,
@@ -733,7 +823,21 @@ def sampler(options: Any) -> Sampler:
         watermark_key=options.watermark_key,
         watermark_gamma=options.watermark_gamma,
         watermark_delta=options.watermark_delta,
+        typical_p=options.typical_p,
+        top_n_sigma=options.top_n_sigma,
+        xtc_probability=options.xtc_probability,
+        xtc_threshold=options.xtc_threshold,
+        dry_multiplier=options.dry_multiplier,
+        dry_base=options.dry_base,
+        dry_allowed_length=options.dry_allowed_length,
+        dry_penalty_last_n=options.dry_penalty_last_n,
+        dry_breakers=sorted(breakers),
     )
+
+
+def dry_breakers(token_bytes: Sequence[bytes], breakers: Sequence[str]) -> list[int]:
+    """The ids of the tokens whose bytes contain one of the breaker strings' UTF-8 bytes."""
+    return [t for t, data in enumerate(token_bytes) if any(b.encode("utf-8") in data for b in breakers)]
 
 
 def healing(prefix: bytes, token_bytes: Sequence[bytes]) -> Callable[[list[int]], list[int] | None]:

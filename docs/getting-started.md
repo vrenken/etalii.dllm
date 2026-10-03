@@ -868,6 +868,18 @@ Models now call tools in the format they were trained on, read from their own ch
 writes the calls it knows instead of imitating Hermes, and every API returns the same tool calls as before. Details:
 [tools](api.md#tools).
 
+## 45. Modern samplers
+
+```bash
+dllm generate --prompt "Once upon a time" --temperature 1.2 --seed 4 \
+    --top-n-sigma 1.5 --xtc-probability 0.5 --dry-multiplier 0.8
+```
+
+DRY, XTC, locally typical (`--typical-p`) and top-n-sigma sampling work like in llama.cpp, with its parameter names
+in the OpenAI, completions and Ollama APIs, and give the same bits on every run and machine: DRY discourages
+repeating earlier runs of text, XTC skips the most obvious word now and then, and top-n-sigma keeps high
+temperatures coherent. Details: [modern samplers](api.md#modern-samplers).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,

@@ -241,7 +241,7 @@ EVAL_FINGERPRINTS = {
 # output file's SHA-256, so it pins the bits of every kernel case, the sampler and the two small decoders. Phase 21
 # added the two sample-penalties cases (penalties, min-p and logit bias); Phase 41 the YaRN and LongRoPE long-factor
 # rope-inv-freq cases; Phase 44 the sigmoid case and the qwen2_moe decoder (a gated shared expert).
-CONFORMANCE_MANIFEST_SHA256 = "ebf4fafb167fd057e2aa0d6878e92fe64c1522823dda531faf0f9136e5df5ade"
+CONFORMANCE_MANIFEST_SHA256 = "fbb389f74d760a45ea9eb16753fb99890851ff1a5636a254c4f43ed9bee5c759"
 
 # Phase 21: the placeholder model continuing "Deterministic decoding controls are" with every decoding control set
 # (tests/test_decoding_controls.py::CONTROLLED): penalties, min-p and logit bias.
@@ -369,3 +369,6 @@ SENTENCEPIECE_GGUF_TOKENS = "ae5ae2d61ca9f2412dd492f23a87cd1d368e1cffb66ea76dcc5
 TOOL_FORMAT_CALLS = "3832e1250a9c25d6b82fe977f428e6581430a72d297f20e19a626fafd55a84d8"
 """Phase 48: SHA-256 of the tool calls a placeholder model makes in the Granite, Hermes, Llama 3 and Mistral formats
 (test_tool_formats.py)."""
+MODERN_SAMPLERS_FINGERPRINT = "7b75175cbaa5b1c62126a5d5a3f10e09e6b6d6e350b5e1da9ca0af62c894db3e"
+"""Phase 49: the default model's 48-token answer with top-n-sigma, typical-p, XTC and DRY at once
+(test_modern_samplers.py)."""

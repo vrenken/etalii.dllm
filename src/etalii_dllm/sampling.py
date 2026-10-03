@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 import numpy as np
 
 from etalii_dllm import watermark
-from etalii_dllm.numerics import DeterministicRandom, FloatArray, argmax, softmax
+from etalii_dllm.numerics import DeterministicRandom, FloatArray, argmax, log, softmax
+
+DRY_BREAKERS = ("\n", ":", '"', "*")
+"""llama.cpp's default DRY sequence breakers."""
+DRY_MAX_MATCH = 256
+"""The longest repeat DRY measures (longer repeats count as this long)."""
 
 
 @dataclass(frozen=True)
@@ -55,6 +60,26 @@ class SamplingOptions:
     """Contrastive decoding against the engine's amateur model with this strength; ``None`` disables."""
     contrast_alpha: float = 0.1
     """Contrastive decoding keeps only tokens at least ``contrast_alpha`` times as likely as the most likely one."""
+    typical_p: float = 1.0
+    """Locally typical sampling: keep the candidates whose surprise is closest to the entropy, up to this much
+    probability; 1 disables."""
+    top_n_sigma: float = 0.0
+    """Keep only tokens whose logit is within this many standard deviations of the top logit; 0 disables."""
+    xtc_probability: float = 0.0
+    """XTC (exclude top choices): the chance per token of dropping all but the least likely of the candidates at
+    least ``xtc_threshold`` likely; 0 disables."""
+    xtc_threshold: float = 0.1
+    """How likely a candidate must be for XTC to drop it."""
+    dry_multiplier: float = 0.0
+    """DRY: the penalty for a token that would extend a repeat of ``dry_allowed_length`` tokens; 0 disables."""
+    dry_base: float = 1.75
+    """DRY: each token a repeat is longer multiplies the penalty by this."""
+    dry_allowed_length: int = 2
+    """DRY: repeats up to this long are not penalised."""
+    dry_penalty_last_n: int = -1
+    """DRY: how many of the latest tokens it looks at; -1 means all of them, 0 none."""
+    dry_sequence_breakers: tuple[str, ...] = DRY_BREAKERS
+    """DRY: a token whose text contains one of these ends a repeat."""
 
     def __post_init__(self) -> None:
         if self.temperature < 0:
@@ -90,6 +115,22 @@ class SamplingOptions:
             raise ValueError("contrast_alpha must be in [0, 1]")
         if self.negative_prompt is not None and self.contrast_beta is not None:
             raise ValueError("a request can use a negative prompt or contrastive decoding, not both")
+        if not 0 < self.typical_p <= 1:
+            raise ValueError("typical_p must be in (0, 1]")
+        if not (math.isfinite(self.top_n_sigma) and self.top_n_sigma >= 0):
+            raise ValueError("top_n_sigma must be non-negative")
+        if not (0.0 <= self.xtc_probability <= 1.0 and 0.0 <= self.xtc_threshold <= 1.0):
+            raise ValueError("xtc_probability and xtc_threshold must be in [0, 1]")
+        if not (math.isfinite(self.dry_multiplier) and self.dry_multiplier >= 0):
+            raise ValueError("dry_multiplier must be non-negative")
+        if not (math.isfinite(self.dry_base) and self.dry_base >= 1):
+            raise ValueError("dry_base must be at least 1")
+        if self.dry_allowed_length < 1:
+            raise ValueError("dry_allowed_length must be at least 1")
+        if self.dry_penalty_last_n < -1:
+            raise ValueError("dry_penalty_last_n must be -1 or more")
+        if not all(isinstance(b, str) and b for b in self.dry_sequence_breakers):
+            raise ValueError("dry_sequence_breakers must be non-empty strings")
 
     @staticmethod
     def bias(values: Mapping[int, float] | Mapping[str, float] | None) -> tuple[tuple[int, float], ...]:
@@ -104,7 +145,7 @@ class SamplingOptions:
     @property
     def adjusts_logits(self) -> bool:
         """Whether the logits change before temperature (bias or a penalty is set)."""
-        return bool(self.logit_bias) or self.penalises or self.watermark_key is not None
+        return bool(self.logit_bias) or self.penalises or self.watermark_key is not None or self.dry
 
     @property
     def penalises(self) -> bool:
@@ -113,6 +154,11 @@ class SamplingOptions:
             or self.frequency_penalty != 0.0
             or self.presence_penalty != 0.0
         )
+
+    @property
+    def dry(self) -> bool:
+        """Whether the DRY penalty is on."""
+        return self.dry_multiplier != 0.0 and self.dry_penalty_last_n != 0
 
     def record(self) -> dict[str, object]:
         """The options as JSON: the original four always, the Phase 21 ones only when they are not the default,
@@ -126,7 +172,11 @@ class SamplingOptions:
         for name, default in _DEFAULTS.items():
             value = getattr(self, name)
             if value != default:
-                record[name] = [[t, b] for t, b in value] if name == "logit_bias" else value
+                if name == "logit_bias":
+                    value = [[t, b] for t, b in value]
+                elif name == "dry_sequence_breakers":
+                    value = list(value)
+                record[name] = value
         return record
 
     @classmethod
@@ -135,6 +185,8 @@ class SamplingOptions:
         values = dict(record)
         if "logit_bias" in values:
             values["logit_bias"] = tuple((int(t), float(b)) for t, b in values["logit_bias"])  # type: ignore[union-attr]
+        if "dry_sequence_breakers" in values:
+            values["dry_sequence_breakers"] = tuple(values["dry_sequence_breakers"])  # type: ignore[arg-type]
         return cls(**values)  # type: ignore[arg-type]
 
 
@@ -154,7 +206,83 @@ _DEFAULTS = {
     "guidance_scale": 1.5,
     "contrast_beta": None,
     "contrast_alpha": 0.1,
+    "typical_p": 1.0,
+    "top_n_sigma": 0.0,
+    "xtc_probability": 0.0,
+    "xtc_threshold": 0.1,
+    "dry_multiplier": 0.0,
+    "dry_base": 1.75,
+    "dry_allowed_length": 2,
+    "dry_penalty_last_n": -1,
+    "dry_sequence_breakers": DRY_BREAKERS,
 }
+
+SAMPLER_FIELDS = (
+    "typical_p",
+    "top_n_sigma",
+    "xtc_probability",
+    "xtc_threshold",
+    "dry_multiplier",
+    "dry_base",
+    "dry_allowed_length",
+    "dry_penalty_last_n",
+    "dry_sequence_breakers",
+)
+"""The Phase 49 sampler controls, named as in llama.cpp's server and every API."""
+
+
+def sampler_fields(source: object) -> dict[str, object]:
+    """The Phase 49 controls an API request or option object sets (attributes that are not ``None``)."""
+    values: dict[str, object] = {}
+    for name in SAMPLER_FIELDS:
+        value = getattr(source, name, None)
+        if value is not None:
+            values[name] = tuple(value) if name == "dry_sequence_breakers" else value
+    return values
+
+
+def dry_breakers(token_bytes: Sequence[bytes], breakers: Iterable[str]) -> frozenset[int]:
+    """The DRY breaker tokens: those whose bytes contain the UTF-8 bytes of a breaker string."""
+    needles = [b.encode("utf-8") for b in breakers]
+    return frozenset(t for t, data in enumerate(token_bytes) if any(n in data for n in needles))
+
+
+def dry_penalties(
+    window: Sequence[int], breakers: Collection[int], multiplier: float, base: float, allowed: int
+) -> dict[int, float]:
+    """The DRY penalty of each token that would extend a repeat in ``window`` (prompt and output, oldest first).
+
+    For every earlier position ``i`` whose preceding tokens match the window's last tokens, the match length is
+    the number of tokens matched backwards (none of them a breaker, at most :data:`DRY_MAX_MATCH`); the token
+    ``window[i]`` that followed gets the longest such length ``n`` over all ``i``. Tokens with ``n >= allowed`` get
+    ``multiplier * base^(n - allowed)``, the power by repeated multiplication in double."""
+    size = len(window)
+    if size < 2 or window[-1] in breakers:
+        return {}
+    last = window[-1]
+    longest: dict[int, int] = {}
+    for i in range(1, size):
+        if window[i - 1] != last:
+            continue
+        length = 0
+        while (
+            length < DRY_MAX_MATCH
+            and length < i
+            and window[i - 1 - length] == window[size - 1 - length]
+            and window[i - 1 - length] not in breakers
+        ):
+            length += 1
+        if length >= allowed:
+            token = window[i]
+            if length > longest.get(token, 0):
+                longest[token] = length
+    penalties: dict[int, float] = {}
+    for token, length in longest.items():
+        power = 1.0
+        for _ in range(length - allowed):
+            power *= base
+        penalties[token] = multiplier * power
+    return penalties
 
 
 class Sampler:
@@ -164,23 +292,30 @@ class Sampler:
     Logit bias and penalties change the float32 logits first, each token on its own and in this order (so the
     order tokens are counted in does not matter): ``x + bias``; for the repetition penalty ``r``, ``x / r`` when
     ``x > 0`` else ``x * r``; then ``x - (count * frequency_penalty + presence_penalty)``, the penalty computed in
-    double and rounded to float; last, with a watermark key, ``x + delta`` for the tokens green after the previous
-    token (:mod:`etalii_dllm.watermark`). ``prompt`` is the context the output continues: the repetition penalty
-    and the watermark look at it, frequency and presence count only tokens passed to :meth:`accept`."""
+    double and rounded to float; then ``x - dry`` for the DRY penalty (:func:`dry_penalties`); last, with a
+    watermark key, ``x + delta`` for the tokens green after the previous token (:mod:`etalii_dllm.watermark`).
+    ``prompt`` is the context the output continues: the repetition penalty, DRY and the watermark look at it,
+    frequency and presence count only tokens passed to :meth:`accept`. ``breakers`` are the DRY breaker tokens
+    (:func:`dry_breakers`).
 
-    def __init__(self, options: SamplingOptions, prompt: Iterable[int] = ()) -> None:
+    With a temperature, the candidates go through top-k, top-n-sigma, typical-p, top-p, min-p and XTC in that order
+    (docs/specification.md#4-random-numbers-and-sampling), then one draw picks the token."""
+
+    def __init__(self, options: SamplingOptions, prompt: Iterable[int] = (), breakers: Collection[int] = ()) -> None:
         self._options = options
         self._random = DeterministicRandom(options.seed & 0xFFFFFFFFFFFFFFFF)
-        self._history: list[int] = list(prompt) if options.repetition_penalty != 1.0 else []
+        keeps = options.repetition_penalty != 1.0 or options.dry
+        self._history: list[int] = list(prompt) if keeps else []
         self._counts: dict[int, int] = {}
-        prompt = self._history if options.repetition_penalty != 1.0 else list(prompt)
+        prompt = self._history if keeps else list(prompt)
         self._previous = prompt[-1] if prompt else -1
         self._watermark = None if options.watermark_key is None else watermark.key_hash(options.watermark_key)
+        self._breakers = frozenset(breakers)
 
     def accept(self, token: int) -> None:
         """Records a generated token for the penalties."""
         options = self._options
-        if options.repetition_penalty != 1.0:
+        if options.repetition_penalty != 1.0 or options.dry:
             self._history.append(token)
         if options.frequency_penalty != 0.0 or options.presence_penalty != 0.0:
             self._counts[token] = self._counts.get(token, 0) + 1
@@ -209,6 +344,17 @@ class Sampler:
                 dtype=np.float64,
             ).astype(np.float32)
             values[ids] = values[ids] - penalties
+        if options.dry:
+            last = options.dry_penalty_last_n
+            window = self._history if last < 0 else self._history[-last:]
+            dry = dry_penalties(
+                window, self._breakers, options.dry_multiplier, options.dry_base, options.dry_allowed_length
+            )
+            ids = np.array(sorted(t for t in dry if 0 <= t < size), dtype=np.int64)
+            if len(ids):
+                amounts = np.array([dry[t] for t in ids.tolist()], dtype=np.float64)
+                with np.errstate(over="ignore"):
+                    values[ids] = values[ids] - amounts.astype(np.float32)
         if self._watermark is not None:
             green = watermark.green_mask(self._watermark, self._previous, size, options.watermark_gamma)
             values[green] = values[green] + np.float32(options.watermark_delta)
@@ -241,27 +387,88 @@ class Sampler:
         keep = len(order)
         if options.top_k > 0:
             keep = min(keep, options.top_k)
+        if options.top_n_sigma > 0:
+            keep = min(keep, sigma_count(np.asarray(logits, dtype=np.float32).tolist(), options.top_n_sigma))
+        kept = order[:keep]
+        if options.typical_p < 1:
+            kept = typical(kept, probabilities, options.typical_p)
+            keep = len(kept)
         if options.top_p < 1:
             cumulative = 0.0
             for i in range(keep):
-                cumulative += probabilities[order[i]]
+                cumulative += probabilities[kept[i]]
                 if cumulative >= options.top_p:
                     keep = i + 1
                     break
         if options.min_p > 0:
-            threshold = options.min_p * probabilities[order[0]]
+            threshold = options.min_p * probabilities[kept[0]]
             for i in range(1, keep):
-                if probabilities[order[i]] < threshold:
+                if probabilities[kept[i]] < threshold:
                     keep = i
                     break
 
         total = 0.0
         for i in range(keep):
-            total += probabilities[order[i]]
+            total += probabilities[kept[i]]
+        start = 0
+        if options.xtc_probability > 0 and self._random.next_double() < options.xtc_probability:
+            floor = options.xtc_threshold * total
+            above = 0
+            while above < keep and probabilities[kept[above]] >= floor:
+                above += 1
+            if above >= 2:
+                start = above - 1
+                total = 0.0
+                for i in range(start, keep):
+                    total += probabilities[kept[i]]
         target = self._random.next_double() * total
         running = 0.0
-        for i in range(keep):
-            running += probabilities[order[i]]
+        for i in range(start, keep):
+            running += probabilities[kept[i]]
             if target < running:
-                return order[i]
-        return order[keep - 1]
+                return kept[i]
+        return kept[keep - 1]
+
+
+def sigma_count(logits: Sequence[float], n: float) -> int:
+    """Top-n-sigma: how many tokens have a logit of at least ``max - n * sigma``, where the mean and the standard
+    deviation of the finite logits are computed in double, in token order (a population deviation)."""
+    finite = [x for x in logits if math.isfinite(x)]
+    if not finite:
+        return len(logits)
+    mean = 0.0
+    for x in finite:
+        mean += x
+    mean /= len(finite)
+    variance = 0.0
+    for x in finite:
+        variance += (x - mean) * (x - mean)
+    variance /= len(finite)
+    threshold = max(finite) - n * math.sqrt(variance)
+    return max(1, sum(1 for x in finite if x >= threshold))
+
+
+def typical(kept: list[int], probabilities: Sequence[float], mass: float) -> list[int]:
+    """Locally typical sampling over the candidates ``kept`` (in probability order): with ``q`` their probabilities
+    renormalised and ``H = -sum q log q`` (in order, in double, with the portable ``log``), the candidates sorted by
+    ``|-log q - H|`` (then by their place in ``kept``) up to the shortest prefix whose ``q`` reaches ``mass``, back in
+    probability order."""
+    total = 0.0
+    for token in kept:
+        total += probabilities[token]
+    q = [probabilities[token] / total for token in kept]
+    logs = [log(v) if v > 0 else -math.inf for v in q]
+    entropy = 0.0
+    for v, lv in zip(q, logs, strict=True):
+        if v > 0:
+            entropy -= v * lv
+    scores = [abs(-lv - entropy) for lv in logs]
+    ranked = sorted(range(len(kept)), key=lambda i: (scores[i], i))
+    chosen: list[int] = []
+    cumulative = 0.0
+    for i in ranked:
+        chosen.append(i)
+        cumulative += q[i]
+        if cumulative >= mass:
+            break
+    return [kept[i] for i in sorted(chosen)]

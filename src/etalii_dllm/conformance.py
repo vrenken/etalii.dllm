@@ -178,6 +178,15 @@ def cases() -> list[tuple[str, str, dict[str, Any], Arrays]]:
                                     "watermark_delta": 4.0, "logit_bias": [[3, 1.0]]},
     }.items():  # fmt: skip
         items.append((name, "sample_controls", options, {"logits": logits, "prompt": history}))
+    repeating = np.array([5, 6, 7, 9, 5, 6, 7, 100, 5, 6, 7, 5, 6], dtype=np.int64)
+    for name, options in {
+        "sample-modern": {"temperature": 1.0, "top_k": 0, "top_p": 1.0, "seed": 21, "top_n_sigma": 1.5,
+                          "typical_p": 0.8, "xtc_probability": 0.6, "xtc_threshold": 0.05, "dry_multiplier": 0.9,
+                          "dry_allowed_length": 1, "dry_breaker_ids": [9, 100]},
+        "sample-modern-greedy": {"temperature": 0.0, "top_k": 0, "top_p": 1.0, "seed": 0, "dry_multiplier": 6.0,
+                                 "dry_base": 2.0, "dry_penalty_last_n": 12, "dry_breaker_ids": [9]},
+    }.items():  # fmt: skip
+        items.append((name, "sample_controls", options, {"logits": logits, "prompt": repeating}))
     other = _gaussian(32, 24, 300, scale=4.0)
     items.append(("guided", "guided", {"scale": 1.75}, {"logits": logits, "other": other}))
     items.append(("contrasted", "contrasted", {"alpha": 0.1, "beta": 0.5}, {"logits": logits, "other": other}))
@@ -265,7 +274,9 @@ def _kernels(kernel: str, params: Mapping[str, Any], inputs: Arrays) -> Arrays:
         sampler = Sampler(SamplingOptions(params["temperature"], params["top_k"], params["top_p"], params["seed"]))
         return {"tokens": np.array([sampler.sample(row) for row in inputs["logits"]], dtype=np.int64)}
     if kernel == "sample_controls":
-        sampler = Sampler(SamplingOptions.from_record(params), [int(t) for t in inputs["prompt"]])
+        record = {k: v for k, v in params.items() if k != "dry_breaker_ids"}
+        prompt = [int(t) for t in inputs["prompt"]]
+        sampler = Sampler(SamplingOptions.from_record(record), prompt, params.get("dry_breaker_ids", ()))
         tokens = []
         for row in inputs["logits"]:
             tokens.append(sampler.sample(row))
@@ -358,6 +369,7 @@ def _reference(kernel: str, params: Mapping[str, Any], inputs: Arrays) -> Arrays
         return {"tokens": np.array([sampler.sample(row) for row in inputs["logits"]], dtype=np.int64)}
     if kernel == "sample_controls":
         controls = {k: v for k, v in params.items() if k not in ("temperature", "top_k", "top_p", "seed")}
+        controls["dry_breakers"] = controls.pop("dry_breaker_ids", [])
         controls["logit_bias"] = {int(t): float(b) for t, b in controls.get("logit_bias", [])}
         sampler = r.Sampler(params["temperature"], params["top_k"], params["top_p"], params["seed"], **controls)
         sampler.begin([int(t) for t in inputs["prompt"]])

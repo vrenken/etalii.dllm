@@ -51,6 +51,17 @@ CONTROLLED = SamplingOptions(
     logit_bias=((13, 1.5), (32, -2.0)),
 )
 """Every Phase 21 decoding control at once (``dllm verify --reference``)."""
+MODERN = SamplingOptions(
+    temperature=1.1,
+    seed=13,
+    top_n_sigma=2.0,
+    typical_p=0.9,
+    xtc_probability=0.5,
+    xtc_threshold=0.1,
+    dry_multiplier=0.8,
+    dry_allowed_length=1,
+)
+"""Every Phase 49 sampler at once: top-n-sigma, typical-p, XTC and DRY (``dllm verify --reference``)."""
 
 # Text that exercises normalisation, case, categories and scripts (Latin, CJK, Hangul, Greek, Cyrillic, emoji,
 # compatibility and combining characters, letters new in Unicode 15/15.1), escaped to keep the source ASCII.
@@ -197,9 +208,9 @@ class ReferenceCheck:
     """``dllm verify --reference``: the engine against the independent reference implementation (issue #162)."""
 
     results: dict[str, str]
-    """``logits``, ``greedy``, ``sampled``, ``controlled``, ``rolled``, ``budgeted``, ``guided``, ``healed``,
-    ``lengthened``, ``beam``, ``scored`` and, for models with fill-in-the-middle tokens, ``infilled``: ``"equal"``,
-    or where the two first differ."""
+    """``logits``, ``greedy``, ``sampled``, ``controlled``, ``modern``, ``rolled``, ``budgeted``, ``guided``,
+    ``healed``, ``lengthened``, ``beam``, ``scored`` and, for models with fill-in-the-middle tokens, ``infilled``:
+    ``"equal"``, or where the two first differ."""
 
     @property
     def equal(self) -> bool:
@@ -246,9 +257,12 @@ def check_reference(engine: Any, max_tokens: int = MAX_TOKENS) -> ReferenceCheck
         differing = np.flatnonzero(logits.view(np.uint32) != expected.view(np.uint32))
         results["logits"] = f"{len(differing)} of {len(logits)} differ, first at token id {int(differing[0])}"
     stops = sorted(engine.stop_tokens)
-    for name, options in (("greedy", GREEDY), ("sampled", SAMPLED), ("controlled", CONTROLLED)):
+    token_bytes = [engine.tokenizer.decode_bytes([t]) for t in range(engine.model.vocabulary_size)]
+    breakers = reference.dry_breakers(token_bytes, MODERN.dry_sequence_breakers)
+    checks = (("greedy", GREEDY), ("sampled", SAMPLED), ("controlled", CONTROLLED), ("modern", MODERN))
+    for name, options in checks:
         answer = engine.complete(PROMPT, max_tokens, options)
-        sampler = reference.sampler(options)
+        sampler = reference.sampler(options, breakers if options.dry else ())
         tokens, _ = twin.generate(context, max_tokens, sampler, stops)
         results[name] = _first_difference(answer.tokens, tokens)
     # A window just past the prompt, so the answer rolls it (docs/specification.md#the-context-window) several times.

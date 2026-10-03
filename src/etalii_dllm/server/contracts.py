@@ -166,6 +166,20 @@ class ChatCompletionRequest(BaseModel):
     """Extension (as in vLLM and llama.cpp)."""
     repeat_last_n: int | None = None
     """Extension (as in llama.cpp)."""
+    typical_p: float | None = None
+    """Extension (as in llama.cpp): locally typical sampling (docs/api.md#modern-samplers)."""
+    top_n_sigma: float | None = None
+    """Extension (as in llama.cpp): keep tokens within this many standard deviations of the top logit."""
+    xtc_probability: float | None = None
+    """Extension (as in llama.cpp): XTC, the chance per token of excluding the top choices."""
+    xtc_threshold: float | None = None
+    """Extension (as in llama.cpp): how likely a choice must be for XTC to exclude it."""
+    dry_multiplier: float | None = None
+    """Extension (as in llama.cpp): the DRY repetition penalty (0 disables)."""
+    dry_base: float | None = None
+    dry_allowed_length: int | None = None
+    dry_penalty_last_n: int | None = None
+    dry_sequence_breakers: list[str] | None = None
     guided_regex: str | None = None
     """Extension (as in vLLM): the same as ``response_format: {"type": "regex", "regex": ...}``."""
     grammar: str | None = None
@@ -235,6 +249,15 @@ DECODING_CONTROLS = (
     "guidance",
     "contrast",
     "beam",
+    "typical_p",
+    "top_n_sigma",
+    "xtc_probability",
+    "xtc_threshold",
+    "dry_multiplier",
+    "dry_base",
+    "dry_allowed_length",
+    "dry_penalty_last_n",
+    "dry_sequence_breakers",
 )
 """Request fields added since Phase 21: left out of the payloads ids are derived from while unset, so the ids of
 requests without them did not change."""
