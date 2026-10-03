@@ -107,6 +107,8 @@ def target_weights(config: TransformerConfig, lora: LoraConfig) -> list[str]:
     """The adapted weight names, in tensor order. In a mixture-of-experts layer ``gate``, ``up`` and ``down`` adapt
     every expert's projection (``layers.N.mlp.experts.E.gate.weight``) and the shared expert's
     (``layers.N.mlp.shared.gate.weight``); the router and the shared expert's gate are never adapted."""
+    if config.is_encoder:
+        raise ValueError("LoRA adapters are for decoders; encoder models cannot be adapted yet")
     names = []
     for layer in range(config.layers):
         for target in lora.targets:

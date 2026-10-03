@@ -27,7 +27,7 @@ from typing import Any
 
 import regex
 
-from etalii_dllm import unicode
+from etalii_dllm import unicode, wordpiece
 
 GPT2_PATTERN = r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"
 
@@ -69,6 +69,8 @@ def _normalizer(spec: Mapping[str, Any] | None) -> Callable[[str], str]:
         return lambda text: unicode.normalize(form, text)
     if kind == "Lowercase":
         return unicode.lower
+    if kind == "BertNormalizer":
+        return wordpiece.normalizer(spec)
     if kind == "Prepend":
         prefix = spec["prepend"]
         return lambda text: prefix + text if text else text
@@ -172,6 +174,8 @@ def _pre_tokenizer(spec: Mapping[str, Any] | None) -> tuple[PreTokenizer, bool]:
             return pieces
 
         return run, any(byte_level for _, byte_level in steps)
+    if kind == "BertPreTokenizer":
+        return (lambda pieces, _: [p for piece in pieces for p in wordpiece.pre_tokenize(piece)]), False
     if kind == "Split":
         pattern = _pattern(spec["pattern"])
         behavior, invert = spec.get("behavior", "Isolated"), bool(spec.get("invert", False))
@@ -329,10 +333,22 @@ class BpeTokenizer:
         begin_of_sequence: str | int | None = None,
     ) -> None:
         model = spec.get("model") or {}
-        if model.get("type") != "BPE":
-            raise TokenizerError(f"model {model.get('type')!r} is not supported (only BPE)")
+        self._wordpiece: wordpiece.WordPiece | None = None
+        if model.get("type") == "WordPiece":
+            try:
+                self._wordpiece = wordpiece.WordPiece(
+                    {str(k): int(v) for k, v in model["vocab"].items()},
+                    str(model.get("unk_token", "[UNK]")),
+                    str(model.get("continuing_subword_prefix", "##")),
+                    int(model.get("max_input_chars_per_word", 100)),
+                )
+            except ValueError as error:
+                raise TokenizerError(str(error)) from error
+            model = {**model, "merges": [], "unk_token": None}
+        elif model.get("type") != "BPE":
+            raise TokenizerError(f"model {model.get('type')!r} is not supported (only BPE and WordPiece)")
         for option in ("continuing_subword_prefix", "end_of_word_suffix"):
-            if model.get(option):
+            if model.get(option) and self._wordpiece is None:
                 raise TokenizerError(f"BPE option {option} is not supported")
         if model.get("dropout"):
             raise TokenizerError("BPE dropout is not deterministic")
@@ -359,14 +375,19 @@ class BpeTokenizer:
         self._pre_tokenize, self._byte_level = _pre_tokenizer(spec.get("pre_tokenizer"))
         decoder = spec.get("decoder") or {}
         self._sentencepiece: SentencePieceDecoding | None = None
-        if self._byte_level:
+        self._wordpiece_decoder: tuple[str, bool] | None = None
+        if decoder.get("type") == "WordPiece" and not self._byte_level:
+            self._wordpiece_decoder = (str(decoder.get("prefix", "##")), bool(decoder.get("cleanup", True)))
+        elif self._byte_level:
             if decoder.get("type") != "ByteLevel":
                 raise TokenizerError(f"decoder {decoder.get('type')!r} is not supported with a ByteLevel pre-tokenizer")
         elif decoder.get("type") == "ByteLevel":
             raise TokenizerError("a ByteLevel decoder needs a ByteLevel pre-tokenizer (byte-level BPE)")
         else:
             self._sentencepiece = _sentencepiece_decoding(decoder)
-        self.strips_leading_space = self._sentencepiece is not None and self._sentencepiece.strip_leading_space
+        self.strips_leading_space = (
+            self._sentencepiece is not None and self._sentencepiece.strip_leading_space
+        ) or self._wordpiece_decoder is not None
         """Whether decoding drops one leading space of the text (SentencePiece-style tokenizers). ``decode`` does it;
         callers that concatenate ``decode_bytes`` of single tokens, as streaming does, drop it themselves."""
         self._post = self._post_processor(spec.get("post_processor"))
@@ -437,6 +458,9 @@ class BpeTokenizer:
                 return out
 
             return apply
+        if spec.get("type") == "BertProcessing":
+            cls, sep = int(spec["cls"][1]), int(spec["sep"][1])
+            return lambda ids: [cls, *ids, sep]
         raise TokenizerError(f"post-processor {spec.get('type')!r} is not supported")
 
     @property
@@ -488,8 +512,10 @@ class BpeTokenizer:
         cached = self._cache.get(piece)
         if cached is not None:
             return cached
-        if self._ignore_merges and piece in self._vocab:
-            result: tuple[int, ...] = (self._vocab[piece],)
+        if self._wordpiece is not None:
+            result: tuple[int, ...] = tuple(self._wordpiece.tokenize(piece))
+        elif self._ignore_merges and piece in self._vocab:
+            result = (self._vocab[piece],)
         else:
             symbols: list[int] = []
             previous_unknown = False
@@ -530,6 +556,11 @@ class BpeTokenizer:
                     ids.extend(self._word(piece))
         return self._post(ids) if add_special_tokens else ids
 
+    def with_special_tokens(self, ids: Sequence[int]) -> list[int]:
+        """``ids`` with the post-processor's special tokens added (``[CLS] ids [SEP]`` for BERT), as
+        ``encode(..., add_special_tokens=True)`` adds them."""
+        return self._post(list(ids))
+
     # -- decoding --
 
     def decode_bytes(self, tokens: Iterable[int], *, skip_special_tokens: bool = True) -> bytes:
@@ -543,6 +574,9 @@ class BpeTokenizer:
                 continue
             text = self._id_to_token.get(token)
             if text is None:
+                continue
+            if self._wordpiece_decoder is not None:
+                out.extend(wordpiece.decode_piece(text, False, *self._wordpiece_decoder).encode("utf-8"))
                 continue
             if sentencepiece is not None:
                 byte = self._byte_tokens.get(token) if sentencepiece.byte_fallback else None
@@ -561,6 +595,11 @@ class BpeTokenizer:
 
     def decode(self, tokens: Iterable[int], *, skip_special_tokens: bool = True) -> str:
         tokens = [t for t in tokens if not (skip_special_tokens and t in self._special_ids and t not in self._shown)]
+        if self._wordpiece_decoder is not None:
+            texts = [text for t in tokens if (text := self._id_to_token.get(t)) is not None]
+            return "".join(
+                wordpiece.decode_piece(text, i == 0, *self._wordpiece_decoder) for i, text in enumerate(texts)
+            )
         sentencepiece = self._sentencepiece
         if (
             sentencepiece is not None

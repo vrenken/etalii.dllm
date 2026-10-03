@@ -180,6 +180,13 @@ def _final_sigma(text: str, index: int) -> bool:
     return j == len(text) or not cased.get(ord(text[j]), False)
 
 
+def lower_characters(text: str) -> str:
+    """Each character lower-cased on its own (full case mapping, no final-sigma rule), as Rust's
+    ``char::to_lowercase`` and so ``tokenizers``' normalisers do it."""
+    mapping = _tables()["lower"]
+    return "".join(mapping.get(ord(character), character) for character in text)
+
+
 def lower(text: str) -> str:
     """``str.lower`` (full case mapping, final sigma) with this module's Unicode version."""
     if text.isascii():

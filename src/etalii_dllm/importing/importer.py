@@ -277,7 +277,7 @@ def hf_config(
     family = _HF_MODEL_TYPES.get(model_type)
     if family is None:
         hint = "; import the text-only Gemma 3 checkpoint (model_type gemma3_text)" if model_type == "gemma3" else ""
-        supported = ", ".join(sorted(_HF_MODEL_TYPES))
+        supported = ", ".join(sorted([*_HF_MODEL_TYPES, "bert"]))
         raise ModelImportError(f"model_type {model_type!r} is not supported (supported: {supported}){hint}")
     hf_activation = config.get("hidden_activation") or config.get("hidden_act") or "silu"
     activation = _HF_ACTIVATIONS.get(hf_activation)
@@ -352,7 +352,7 @@ def hf_config(
 
 # model_type -> family; Gemma 3's text-only checkpoints are "gemma3_text", and Granite MoE with a shared expert is
 # "granitemoeshared".
-_HF_MODEL_TYPES = {name: name for name in FAMILIES if name != "gemma3"} | {
+_HF_MODEL_TYPES = {name: name for name in FAMILIES if name not in ("gemma3", "bert")} | {
     "gemma3_text": "gemma3",
     "granitemoeshared": "granitemoe",
 }
@@ -581,7 +581,11 @@ def _file_hashes(paths: list[Path], root: Path) -> list[dict[str, Any]]:
     return entries
 
 
-_POOLING_MODES = {"pooling_mode_lasttoken": "last_token", "pooling_mode_mean_tokens": "mean"}
+_POOLING_MODES = {
+    "pooling_mode_lasttoken": "last_token",
+    "pooling_mode_mean_tokens": "mean",
+    "pooling_mode_cls_token": "cls",
+}
 
 
 def _embedding_settings(directory: Path) -> dict[str, Any] | None:
@@ -597,7 +601,7 @@ def _embedding_settings(directory: Path) -> dict[str, Any] | None:
     chosen = [mode for key, mode in _POOLING_MODES.items() if settings.get(key)]
     modes = [key for key, value in settings.items() if key.startswith("pooling_mode") and value]
     if len(chosen) != 1 or len(modes) != 1:
-        raise ModelImportError(f"{directory}: only mean or last-token pooling is supported, not {settings}")
+        raise ModelImportError(f"{directory}: only mean, CLS or last-token pooling is supported, not {settings}")
     if not settings.get("include_prompt", True):
         raise ModelImportError(f"{directory}: pooling that leaves out the prompt is not supported")
     extra = _read_json(directory / "config_sentence_transformers.json")
@@ -610,11 +614,109 @@ def _embedding_settings(directory: Path) -> dict[str, Any] | None:
     }
 
 
+_BERT_ACTIVATIONS = {"gelu": "gelu", "gelu_new": "gelu_tanh", "gelu_pytorch_tanh": "gelu_tanh"}
+
+
+def bert_config(config: dict[str, Any], context_length: int | None = None) -> TransformerConfig:
+    """Maps a Hugging Face BERT ``config.json`` to our description (family ``bert``)."""
+    if config.get("position_embedding_type", "absolute") != "absolute":
+        raise ModelImportError(f"BERT position embeddings {config.get('position_embedding_type')!r} are not supported")
+    hf_activation = str(config.get("hidden_act", "gelu"))
+    if hf_activation not in _BERT_ACTIVATIONS:
+        raise ModelImportError(f"activation {hf_activation!r} is not supported")
+    heads, hidden = int(config["num_attention_heads"]), int(config["hidden_size"])
+    if hidden % heads:
+        raise ModelImportError("hidden_size must be a multiple of num_attention_heads")
+    positions = int(config.get("max_position_embeddings", 512))
+    if context_length is not None:
+        raise ModelImportError("--context-length is for decoders; an encoder has learned absolute positions")
+    try:
+        return TransformerConfig(
+            family="bert",
+            vocabulary_size=int(config["vocab_size"]),
+            hidden_size=hidden,
+            intermediate_size=int(config["intermediate_size"]),
+            layers=int(config["num_hidden_layers"]),
+            heads=heads,
+            kv_heads=heads,
+            head_dim=hidden // heads,
+            context_length=positions,
+            rms_norm_eps=float(config.get("layer_norm_eps", 1e-12)),
+            rope_theta=0.0,
+            attention_bias=True,
+            activation=_BERT_ACTIVATIONS[hf_activation],
+            tie_word_embeddings=True,
+            type_vocabulary_size=int(config.get("type_vocab_size", 2)),
+        )
+    except ValueError as error:
+        raise ModelImportError(str(error)) from error
+
+
+_BERT_LAYER = re.compile(r"^encoder\.layer\.(\d+)\.(.+)\.(weight|bias|gamma|beta)$")
+_BERT_LAYER_NAMES = {
+    "attention.self.query": "attention.q",
+    "attention.self.key": "attention.k",
+    "attention.self.value": "attention.v",
+    "attention.output.dense": "attention.o",
+    "attention.output.LayerNorm": "attention_norm",
+    "intermediate.dense": "mlp.up",
+    "output.dense": "mlp.down",
+    "output.LayerNorm": "mlp_norm",
+}
+_BERT_GLOBAL_NAMES = {
+    "embeddings.word_embeddings": "token_embedding",
+    "embeddings.position_embeddings": "position_embedding",
+    "embeddings.token_type_embeddings": "token_type_embedding",
+    "embeddings.LayerNorm": "embedding_norm",
+}
+_BERT_PARAMETERS = {"weight": "weight", "bias": "bias", "gamma": "weight", "beta": "bias"}
+
+
+def _bert_name(name: str) -> str | None:
+    """Our name for a BERT checkpoint tensor (with or without the ``bert.`` prefix); None for the pooler, the
+    pre-training heads and buffers, which an embedding does not use."""
+    name = name.removeprefix("bert.")
+    if name.startswith(("pooler.", "cls.")) or name == "embeddings.position_ids":
+        return None
+    stem, _, parameter = name.rpartition(".")
+    if stem in _BERT_GLOBAL_NAMES and parameter in _BERT_PARAMETERS:
+        return f"{_BERT_GLOBAL_NAMES[stem]}.{_BERT_PARAMETERS[parameter]}"
+    match = _BERT_LAYER.match(name)
+    if match and match.group(2) in _BERT_LAYER_NAMES:
+        return f"layers.{int(match.group(1))}.{_BERT_LAYER_NAMES[match.group(2)]}.{_BERT_PARAMETERS[match.group(3)]}"
+    raise ModelImportError(f"unexpected tensor {name!r}")
+
+
+def _convert_bert(directory: Path, raw_config: dict[str, Any], context_length: int | None) -> _Converted:
+    """A BERT checkpoint (``BertModel`` or a pre-training model; sentence-transformers encoders such as
+    all-MiniLM-L6-v2 and bge-small-en-v1.5)."""
+    config = bert_config(raw_config, context_length)
+    pooling = _embedding_settings(directory) or {
+        "pooling": "mean",
+        "normalize": True,
+        "prompts": {},
+        "default_prompt_name": None,
+    }
+    limit = _read_json(directory / "sentence_bert_config.json").get("max_seq_length")
+    pooling["max_tokens"] = min(int(limit), config.context_length) if limit else config.context_length
+    tensors: dict[str, TensorSource] = {}
+    for tensor in open_checkpoint(directory).values():
+        name = _bert_name(tensor.name)
+        if name is None:
+            continue
+        if tensor.dtype not in ("F32", "F16", "BF16"):
+            raise ModelImportError(f"tensor {tensor.name!r} has dtype {tensor.dtype}; only F32, F16 and BF16 import")
+        tensors[name] = TensorSource(tensor.shape, tensor.to_float32, tensor.dtype)
+    return _with_tokenizer(directory, config, tensors, pooling)
+
+
 def _convert_huggingface(directory: Path, context_length: int | None = None) -> _Converted:
     config_path = directory / "config.json"
     if not config_path.exists():
         raise ModelImportError(f"{directory}: no config.json")
     raw_config = _read_json(config_path)
+    if raw_config.get("model_type") == "bert":
+        return _convert_bert(directory, raw_config, context_length)
     config = hf_config(raw_config, _read_json(directory / "generation_config.json"), context_length=context_length)
     pooling = _embedding_settings(directory)
     checkpoint = open_checkpoint(directory)
@@ -643,7 +745,13 @@ def _convert_huggingface(directory: Path, context_length: int | None = None) -> 
         if tensor.dtype not in ("F32", "F16", "BF16"):
             raise ModelImportError(f"tensor {tensor.name!r} has dtype {tensor.dtype}; only F32, F16 and BF16 import")
         tensors[name] = TensorSource(tensor.shape, tensor.to_float32, tensor.dtype)
+    return _with_tokenizer(directory, config, tensors, pooling)
 
+
+def _with_tokenizer(
+    directory: Path, config: TransformerConfig, tensors: dict[str, TensorSource], pooling: dict[str, Any] | None
+) -> _Converted:
+    """A converted checkpoint directory: the weights plus its tokenizer, chat template, licence and source files."""
     tokenizer_config = _read_json(directory / "tokenizer_config.json")
     template_file = directory / "chat_template.jinja"
     template = tokenizer_config.pop("chat_template", None)

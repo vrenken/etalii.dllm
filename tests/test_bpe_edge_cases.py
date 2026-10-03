@@ -97,8 +97,8 @@ def test_lowercase_normalizer_alone():
 
 
 def test_unsupported_normalizer_fails_at_load():
-    with pytest.raises(TokenizerError, match="normalizer 'BertNormalizer' is not supported"):
-        BpeTokenizer(minimal_spec(normalizer={"type": "BertNormalizer"}))
+    with pytest.raises(TokenizerError, match="normalizer 'ByteLevel' is not supported"):
+        BpeTokenizer(minimal_spec(normalizer={"type": "ByteLevel"}))
     # Also when nested inside a sequence.
     with pytest.raises(TokenizerError, match="normalizer 'Precompiled' is not supported"):
         BpeTokenizer(
@@ -208,8 +208,8 @@ def test_unsupported_decoder_fails_at_load():
 
 
 def test_unsupported_post_processor_fails_at_load():
-    with pytest.raises(TokenizerError, match="post-processor 'BertProcessing' is not supported"):
-        BpeTokenizer(minimal_spec(post_processor={"type": "BertProcessing"}))
+    with pytest.raises(TokenizerError, match="post-processor 'RobertaProcessing' is not supported"):
+        BpeTokenizer(minimal_spec(post_processor={"type": "RobertaProcessing"}))
     nested = {"type": "Sequence", "processors": [{"type": "ByteLevel"}, {"type": "RobertaProcessing"}]}
     with pytest.raises(TokenizerError, match="post-processor 'RobertaProcessing' is not supported"):
         BpeTokenizer(minimal_spec(post_processor=nested))

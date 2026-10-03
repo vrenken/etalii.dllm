@@ -946,6 +946,19 @@ Phi-4-mini, DeepSeek V3.1 and Command R7B now call tools in their own formats to
 markers and Command R7B's action blocks), read from their chat templates, with every tool control from section 49.
 Details: [tools](api.md#tools).
 
+## 51. Encoder embedding models
+
+```bash
+dllm import hf:sentence-transformers/all-MiniLM-L6-v2 -o minilm.dllm   # or hf:BAAI/bge-small-en-v1.5
+dllm --model minilm.dllm embed "What is the capital of France?"
+dllm --model minilm.dllm index build docs/ -o docs.index
+```
+
+Small BERT encoders, the models most retrieval systems use, now import with their WordPiece tokenizer and their
+sentence-transformers pooling (mean or CLS) and truncation. They embed only, on the CPU, through `dllm embed`,
+`/v1/embeddings`, `dllm index` and `--embedding-model`, with the same bits on every machine (`dllm verify
+--reference` checks them). Details: [encoder models](retrieval.md#encoder-models).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
@@ -979,8 +992,10 @@ Details: [tools](api.md#tools).
   that can match nothing ([grammars](api.md#grammars)). No images or audio.
 - MCP servers' URL-mode elicitations (open a web page) are declined and nobody is asked interactively (the model
   answers forms), and image, audio or binary MCP content is refused.
-- Models with Unigram or WordPiece tokenizers, dynamic NTK RoPE scaling or other architectures (including DeepSeek's mixtures
-  of experts with several shared experts and multi-head latent attention) are refused at import.
+- Models with Unigram tokenizers, dynamic NTK RoPE scaling or other architectures (including DeepSeek's mixtures
+  of experts with several shared experts and multi-head latent attention, and encoders other than BERT, such as
+  RoBERTa or XLM-R) are refused at import. BERT encoders (section 51) embed only, run on the CPU and cannot be
+  fine-tuned, adapted with LoRA or exported yet; cross-encoder rerankers (sentence pairs) are not supported.
 - Granite MoE's experts are stored fused, so a LoRA adapter on them cannot be exported in the PEFT format (the
   merged model exports fine), and llama.cpp has no Granite MoE architecture to export a GGUF file to.
 - Mixture-of-experts models (sections 38 and 40) are checked against a float64 transcription of `transformers` only on tiny

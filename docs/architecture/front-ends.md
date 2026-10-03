@@ -29,7 +29,7 @@ flowchart LR
         ollama["server/ollama_api.py<br/>/api/chat, /api/generate,<br/>/api/embed, /api/tags, ..."]
         page["static/chat.html<br/>at /"]
         mcps["mcp_server.py<br/>tools, resources, prompts"]
-        cli["cli.py<br/>dllm generate / chat"]
+        cli["cli.py<br/>dllm generate / chat / embed"]
         host["mcp_host.py<br/>tool loop"]
     end
 
@@ -53,7 +53,7 @@ flowchart LR
     req --> cs
     req --> cc
     cc -->|collects the events of| cs
-    app & ollama --> emb
+    app & ollama & cli --> emb
 ```
 
 Each front end does three things only: translate its wire request into a `ChatRequest` (messages, tools,
@@ -70,7 +70,7 @@ both need belongs in the engine.
 | Ollama API | `dllm-server` | newline-delimited JSON (default on) | chat, generate, embeddings, tags; durations and timestamps are 0 |
 | Web chat | `dllm-server`, `/` | over the OpenAI stream | a static page, no logic of its own |
 | MCP server | `dllm-mcp` (stdio) | no | tools `generate`, `chat`, `model_info`; model card, chat template and determinism resources; prompts |
-| CLI | `dllm generate`, `dllm chat` | to the terminal | prints the fingerprint to stderr |
+| CLI | `dllm generate`, `dllm chat`, `dllm embed` | to the terminal | prints the fingerprint to stderr |
 | MCP host | `dllm chat --mcp-server ...` | to the terminal | the model calls external MCP tools |
 
 ## Streamed and non-streamed answers are the same answer

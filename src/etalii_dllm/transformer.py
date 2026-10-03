@@ -21,7 +21,7 @@ import numpy as np
 import numpy.typing as npt
 
 from etalii_dllm import cuda
-from etalii_dllm.architecture import TransformerConfig
+from etalii_dllm.architecture import ENCODER_ONLY, TransformerConfig
 from etalii_dllm.cuda import CudaTensor
 from etalii_dllm.modelfile import ModelFile
 from etalii_dllm.numerics import (
@@ -263,6 +263,8 @@ class Transformer:
         """``steering`` maps 0-based layer indices to vectors ``[hidden]`` added (elementwise, float32) to the
         residual stream after that layer at every position (activation steering); it changes the output and so the
         fingerprint."""
+        if config.is_encoder:
+            raise ValueError(ENCODER_ONLY)
         expected = config.tensor_shapes()
         missing = sorted(set(expected) - set(tensors))
         if missing:

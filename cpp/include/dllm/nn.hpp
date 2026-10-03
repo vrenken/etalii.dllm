@@ -407,6 +407,30 @@ inline void rms_norm(const float* x, const float* weight, float* out, std::size_
     }
 }
 
+// LayerNorm over the last dimension (BERT): mean = (sum x_i) / dim and var = (sum (x_i - mean)^2) / dim, both sums
+// ascending in double, then out_i = (x_i - mean) * (1 / sqrt(var + eps)) * w_i + b_i in double, rounded once.
+inline void layer_norm(const float* x, const float* weight, const float* bias, float* out, std::size_t rows,
+                       std::size_t dim, double eps) {
+    for (std::size_t r = 0; r < rows; ++r) {
+        const float* xr = x + r * dim;
+        double total = 0.0;
+        for (std::size_t i = 0; i < dim; ++i) {
+            total += static_cast<double>(xr[i]);
+        }
+        const double mean = total / static_cast<double>(dim);
+        double sum_sq = 0.0;
+        for (std::size_t i = 0; i < dim; ++i) {
+            const double centred = static_cast<double>(xr[i]) - mean;
+            sum_sq += centred * centred;
+        }
+        const double inv_std = 1.0 / std::sqrt(sum_sq / static_cast<double>(dim) + eps);
+        for (std::size_t i = 0; i < dim; ++i) {
+            const double scaled = (static_cast<double>(xr[i]) - mean) * inv_std * static_cast<double>(weight[i]);
+            out[r * dim + i] = static_cast<float>(scaled + static_cast<double>(bias[i]));
+        }
+    }
+}
+
 // Elementwise work is split into fixed chunks of kElementChunk values, one thread-pool task each. Every output is
 // computed from its own inputs only, so the split never changes a bit; it is fixed so the tasks do not depend on
 // the thread count either.

@@ -10,7 +10,7 @@ what the CLI and the MCP server use, so all front ends give the same answer for 
 | `POST /v1/chat/completions` | OpenAI Chat Completions | Streaming, tools, structured output, logprobs, stop sequences |
 | `POST /v1/completions` | OpenAI Completions (legacy) | Raw prompts continued without a chat template, streaming, `n`, logprobs, `echo` with exact prompt scores. See [completions API](#completions-api) |
 | `POST /v1/responses`, `GET`/`DELETE /v1/responses/{id}` | OpenAI Responses | Streaming (typed `response.*` events), function tools, `text.format` JSON schema, logprobs, `previous_response_id`. See [Responses API](#responses-api) |
-| `POST /v1/embeddings` | OpenAI Embeddings | Final hidden states pooled as the model says (mean, or last token for embedding models), L2-normalised |
+| `POST /v1/embeddings` | OpenAI Embeddings | Final hidden states pooled as the model says (mean, last token or CLS for embedding models and encoders), L2-normalised |
 | `POST /v1/messages` | Anthropic Messages | Streaming, tools, structured output (`output_config.format`), stop sequences |
 | `POST /v1/messages/count_tokens` | Anthropic | Input tokens of a request, tools included |
 | `POST /api/chat`, `POST /api/generate` | Ollama | Streaming (NDJSON, the default), tools, `format` (JSON or a schema), logprobs, `raw` prompts. See [Ollama API](#ollama-api) |
@@ -764,6 +764,10 @@ Embedding models imported from sentence-transformers (such as Qwen3-Embedding-0.
 the text is encoded with the tokenizer's special tokens and the last token's hidden state (or the mean) is the
 embedding. The extension field `input_type` names one of the model's prompts (`"query"` for search queries, or
 `"document"`), which is put in front of the text; an unknown name is a 400 error. See [retrieval](retrieval.md).
+
+A server whose model is a BERT encoder (all-MiniLM, bge; [encoder models](retrieval.md#encoder-models)) serves
+`/v1/embeddings` and `/api/embed` with the model's CLS or mean pooling, truncating long inputs to its
+`max_seq_length`; chat and completion requests get a 400 error, since an encoder cannot generate.
 
 A server started with `--index` grounds every chat request in the passages its document index finds for the last
 user message, and its `system_fingerprint` includes the index ([retrieval](retrieval.md#grounded-chat)).

@@ -12,14 +12,35 @@ final hidden states. Trained embedding models do much better. Models published f
 [sentence-transformers](https://www.sbert.net/) import with their own recipe, which `dllm import` reads from
 `modules.json`, the pooling module's `config.json` and `config_sentence_transformers.json`:
 
-- pooling: `last_token` (the final hidden state of the last token, as in Qwen3-Embedding) or `mean`;
+- pooling: `last_token` (the final hidden state of the last token, as in Qwen3-Embedding), `cls` (the first
+  token's, as in bge) or `mean` (all-MiniLM);
 - normalisation: an L2 `Normalize` module;
 - prompts: named instructions such as `query`, put in front of the text (the `input_type` of a request);
 - checkpoints saved without the causal LM wrapper (no `model.` prefix, no LM head) import as well.
 
 The import stores this as the `embedding` section of `model.dllm` ([format](model-format.md)). Embedding then
 encodes the text with the tokenizer's special tokens (Qwen3-Embedding appends `<|endoftext|>`) and pools as the
-model says. Other pooling modes (CLS, max) and pooling that leaves out the prompt are refused at import.
+model says. Other pooling modes (max) and pooling that leaves out the prompt are refused at import.
+
+### Encoder models
+
+Small BERT encoders are what most retrieval systems use: all-MiniLM-L6-v2 (22M parameters, Apache 2.0) and
+bge-small-en-v1.5 (33M, MIT) embed far faster than a decoder and are trained for exactly this. They import with their
+WordPiece tokenizer (reproduced exactly, `tokenizers`' own character classes included) and their sentence-transformers
+settings; inputs longer than the model's `max_seq_length` are truncated as sentence-transformers truncates them,
+keeping `[CLS]` and `[SEP]`:
+
+```bash
+dllm import hf:sentence-transformers/all-MiniLM-L6-v2 -o minilm.dllm
+dllm --model minilm.dllm embed "What is the capital of France?" --json
+dllm --model minilm.dllm index build docs/ -o docs.index
+dllm --model chat.dllm --index docs.index --embedding-model minilm.dllm chat "What does the guide say about X?"
+```
+
+An encoder runs on the CPU, embeds only (chat, completions, fine-tuning, LoRA and export refuse it with an error) and
+gives the same bits on every machine: the encoder's forward pass and pooling are in the
+[specification](specification.md#6-the-encoder) and `dllm verify --reference` checks them against the reference
+implementation. A plain BERT checkpoint without sentence-transformers files pools the mean over all positions.
 
 [Qwen3-Embedding-0.6B](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B) (Apache 2.0) is checked against
 `transformers` in CI (`tests/test_reference_models.py`):

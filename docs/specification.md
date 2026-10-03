@@ -117,6 +117,7 @@ All functions take and return doubles. Constants are the double nearest to the d
 | `linear(x[r, in], w[out, in], bias)` | `f32(sum_k x[r,k] * w[n,k] + bias[n])`: the sum over `k` ascending, then the bias added to it. |
 | `matmul(a[m, k], b[k, n])` | `f32(sum_k a[i,k] * b[k,j])`, the sum over `k` ascending. |
 | `rms_norm(x, w, eps)` | Per row: `ss = sum_i x_i * x_i` ascending, `inv = 1 / sqrt(ss / dim + eps)`, `f32(x_i * inv * s_i)` with `s_i = w_i`, or `1 + w_i` with a unit offset (Gemma), or 1 without weights. |
+| `layer_norm(x, w, b, eps)` | Per row: `mean = (sum_i x_i) / dim` and `var = (sum_i (x_i - mean)^2) / dim`, both sums ascending, `inv = 1 / sqrt(var + eps)`, `f32((x_i - mean) * inv * w_i + b_i)`. |
 | `silu(x)` | `f32(x * sigmoid(x))`. |
 | `gelu(x)` | `f32(0.5 * x * erfc(-x * 7.07106781186547524401e-01))`. |
 | `gelu_tanh(x)` | `f32(0.5 * x * (1 + tanh(7.97884560802865355879e-01 * (x + 0.044715 * x * x * x))))`. |
@@ -462,6 +463,29 @@ Not covered here, but just as fixed:
   (`etalii_dllm.unicode`);
 - the chat templates;
 - receipts ([receipts](receipts.md)) and the model file format ([model format](model-format.md)).
+
+## 6. The encoder
+
+A model of family `bert` is an encoder: it turns all its tokens into hidden states at once, for embeddings, and does
+not generate. All in float32 unless stated:
+
+1. `x = (word[t] + type[0]) + position[i]` for the token `t` at position `i` (two float32 additions in that order;
+   every token is of type 0), then `x = layer_norm(x, embedding_norm)`.
+2. For each layer:
+   1. `q, k, v = linear(x, W, bias)`.
+   2. `a = attention(q, k, v)` with `scale = 1 / sqrt(head_dim)`, not causal: every position sees every key.
+   3. `x = layer_norm(x + linear(a, Wo, bo), attention_norm)`.
+   4. `x = layer_norm(x + linear(act(linear(x, Wup, bup)), Wdown, bdown), mlp_norm)`, with `act` the `gelu` kernel
+      (or `gelu_tanh` for checkpoints trained with the tanh form). The MLP has no gate.
+3. The states `x` of the last layer are the output. `layer_norm` uses the model's `rms_norm_eps` (BERT's
+   `layer_norm_eps`).
+
+**Embedding.** The text gets the model's prompt for the request's `input_type` (if any) and is encoded with the
+tokenizer; for an encoder its tokens are cut to `max_tokens - s`, where `s` is the number of special tokens the
+tokenizer adds, and the special tokens (`[CLS] … [SEP]`) are then added. The vector is the first state (`cls`
+pooling), the last state (`last_token`), or the mean: per component the sum over positions ascending in double,
+rounded to float32, then a float32 division by the number of positions. With normalisation it is divided (float32)
+by `f32(sqrt(ss))`, where `ss` is the sum of its squares in double, ascending.
 
 ## Checking an implementation
 

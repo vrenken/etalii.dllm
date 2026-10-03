@@ -85,7 +85,7 @@ CORPUS = [
 
 # The model-independent parts as computed when this release was built (tests/test_verify.py keeps them current).
 REFERENCE = {
-    "kernels": "b47cb0a7e81cfc06a73435e64342e7fe3efadf608511a77a32071045c32cd66d",
+    "kernels": "20c47a548224842a8a19203eb3a8453c2a99fd5882fe54e146d9a3ba3229171e",
     "unicode": "72dd232a0b75a6974a793c2c5293ea57bad7d586b37286090ed5b059cf048caa",
 }
 
@@ -112,6 +112,7 @@ def kernels_fingerprint() -> str:
         numerics.linear(x, numerics.QuantizedWeight(w), bias),
         numerics.matmul(x, np.ascontiguousarray(w.T)),
         numerics.rms_norm(x, _gaussian(7, 64), 1e-6),
+        numerics.layer_norm(x, _gaussian(9, 64), _gaussian(10, 64), 1e-12),
         numerics.silu(x),
         numerics.gelu(x),
         numerics.gelu(x, approximate="tanh"),
@@ -192,12 +193,21 @@ class Report:
         }
 
 
+def _is_encoder(engine: Any) -> bool:
+    return bool(getattr(getattr(engine.model, "config", None), "is_encoder", False))
+
+
 def run(engine: Any) -> Report:
-    """Runs the workload with ``engine`` (its model, tokenizer and sampler)."""
+    """Runs the workload with ``engine`` (its model, tokenizer and sampler); for an encoder model, the embeddings of
+    the corpus take the place of the logits and the answers."""
     parts = {"kernels": kernels_fingerprint(), "unicode": unicode_fingerprint()}
     parts["tokenizer"] = numerics.fingerprint(
         [t for text in CORPUS for t in [*engine.tokenizer.encode(text), -1]], dtype="<i4"
     )
+    if _is_encoder(engine):
+        parts["embeddings"] = numerics.fingerprint(np.concatenate([engine.embed(text).vector for text in CORPUS]))
+        mismatches = [name for name, value in REFERENCE.items() if value and parts[name] != value]
+        return Report(parts, environment(engine), mismatches)
     parts["logits"] = numerics.fingerprint(np.asarray(engine.model.forward(engine.tokenizer.encode(PROMPT))))
     parts["greedy"] = engine.complete(PROMPT, MAX_TOKENS, GREEDY).fingerprint
     parts["sampled"] = engine.complete(PROMPT, MAX_TOKENS, SAMPLED).fingerprint
@@ -212,7 +222,7 @@ class ReferenceCheck:
     results: dict[str, str]
     """``logits``, ``greedy``, ``sampled``, ``controlled``, ``modern``, ``adaptive``, ``rolled``, ``budgeted``,
     ``guided``, ``healed``, ``lengthened``, ``beam``, ``scored`` and, for models with fill-in-the-middle tokens,
-    ``infilled``: ``"equal"``, or where the two first differ."""
+    ``infilled`` (for encoder models ``states`` and ``embeddings``): ``"equal"``, or where the two first differ."""
 
     @property
     def equal(self) -> bool:
@@ -220,6 +230,26 @@ class ReferenceCheck:
 
     def as_dict(self) -> dict[str, Any]:
         return {"equal": self.equal, **self.results}
+
+
+def _check_encoder(engine: Any) -> ReferenceCheck:
+    """An encoder model against the reference: the hidden states of the verify prompt and the embedding of every
+    corpus text, bit for bit."""
+    from etalii_dllm import reference
+
+    twin = reference.ReferenceEncoder.from_engine(engine)
+    limit = int((engine.embedding or {}).get("max_tokens") or engine.model.config.context_length)
+    tokens = engine.tokenizer.encode(PROMPT, add_special_tokens=True)[:limit]
+    states = np.asarray(engine.model.hidden_states(tokens), dtype=np.float32)
+    expected = twin.hidden_states(tokens)
+    results = {"states": "equal" if states.tobytes() == expected.tobytes() else "differ"}
+    differing = [
+        number
+        for number, text in enumerate(CORPUS)
+        if engine.embed(text).vector.tobytes() != twin.embed(engine.embedding_tokens(text)).tobytes()
+    ]
+    results["embeddings"] = "equal" if not differing else f"texts {differing} differ"
+    return ReferenceCheck(results)
 
 
 def _first_difference(engine_tokens: Sequence[int], reference_tokens: Sequence[int]) -> str:
@@ -246,6 +276,8 @@ def check_reference(engine: Any, max_tokens: int = MAX_TOKENS) -> ReferenceCheck
     from etalii_dllm.reasoning import Tracker
     from etalii_dllm.transformer import Transformer
 
+    if _is_encoder(engine):
+        return _check_encoder(engine)
     if not isinstance(engine.model, Transformer):
         raise ValueError("--reference needs a model file (--model or DLLM_MODEL)")
     twin = reference.ReferenceTransformer.from_engine_model(engine.model)

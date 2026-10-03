@@ -145,8 +145,8 @@ def test_mean_pooling_without_normalisation(tmp_path):
 @pytest.mark.parametrize(
     ("pooling", "modules", "message"),
     [
-        ({"pooling_mode_cls_token": True}, None, "only mean or last-token"),
-        ({"pooling_mode_mean_tokens": True, "pooling_mode_max_tokens": True}, None, "only mean or last-token"),
+        ({"pooling_mode_max_tokens": True}, None, "only mean, CLS or last-token"),
+        ({"pooling_mode_mean_tokens": True, "pooling_mode_max_tokens": True}, None, "only mean, CLS or last-token"),
         ({"pooling_mode_mean_tokens": True, "include_prompt": False}, None, "leaves out the prompt"),
         (None, [MODULES[0]], "no pooling module"),
     ],
