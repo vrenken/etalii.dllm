@@ -105,7 +105,9 @@ EMBEDDING_MODELS = {
 }
 # A BERT cross-encoder (Phase 56): a query and a passage scored together by a sequence-classification head.
 CROSS_ENCODERS = {
-    "ms-marco": ReferenceModel("cross-encoder/ms-marco-MiniLM-L6-v2", "main", "Apache-2.0"),
+    "ms-marco": ReferenceModel(
+        "cross-encoder/ms-marco-MiniLM-L6-v2", "233902d25c440f23af6f7d6e94d2946bac0bee0a", "Apache-2.0"
+    ),
 }
 _ALL_MODELS = {**REFERENCE_MODELS, **EMBEDDING_MODELS, **CROSS_ENCODERS}
 TOOL_FORMATS = {"qwen2.5": "hermes", "qwen2.5-1.5b": "hermes", "qwen3": "hermes", "llama3.2": "llama3"}

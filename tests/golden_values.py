@@ -221,6 +221,11 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "import": "84d2ca3b329c8b989747b0b376b3e97d45b11c8e3da3a14b2b7b8c513f1eb559",
         "embedding": "a3bbe46df62036ce3971d37fd7eebfe87b5ea17e8d4a48975911200770c456d5",
     },
+    # BERT cross-encoder: the float32 bits of its logits for RERANK_QUERY paired with each of RERANK_PASSAGES.
+    "ms-marco": {
+        "import": "3d2e2103d4067e9b5a9d8b2c98a6be6967a1fd28b82d1cb03ebd906c16a27f2b",
+        "scores": "be2f4472bcdf216b284e539453a6dd9f42238210981bfd312ed6d592ca6208c0",
+    },
 }
 
 # Trace.fingerprint() of the tiny models over tests/test_interpret.py's PROMPT (every activation, attention included).
