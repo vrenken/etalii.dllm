@@ -935,6 +935,17 @@ answer; and `tool_choice: {"type": "allowed_tools", ...}` lets the model call on
 stay in the prompt. All three work in every tool format and are recorded in receipts. Details:
 [tool call controls](api.md#tool-call-controls).
 
+## 50. The remaining tool call formats
+
+```bash
+dllm import Phi-4-mini-instruct -o phi4.dllm   # or DeepSeek V3.1, or Command R7B
+dllm --model phi4.dllm chat "What is 12 * 34?" --tool calculator
+```
+
+Phi-4-mini, DeepSeek V3.1 and Command R7B now call tools in their own formats too (`functools[...]`, V3.1's changed
+markers and Command R7B's action blocks), read from their chat templates, with every tool control from section 49.
+Details: [tools](api.md#tools).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
@@ -955,8 +966,9 @@ stay in the prompt. All three work in every tool format and are recorded in rece
   slower than llama.cpp, prompt reading is about 0.8× transformers and 0.6× llama.cpp, and only EtAlii.Dllm gives the same
   bits whatever the batch, thread count or concurrent load. `python benchmarks/benchmark.py` reproduces it.
 - Tool calling works best with models trained for it; the engine uses each model's own format (Hermes, Llama 3,
-  Mistral, Granite, Qwen3-Coder XML, DeepSeek or Python calls, sections 44 and 48). Other formats (Phi-4-mini,
-  Command R, DeepSeek V3.1's changed markers) fall back to the Hermes format. SmolLM2-135M does not know tools, so
+  Mistral, Granite, Qwen3-Coder XML, DeepSeek V3/R1 and V3.1, Python calls, Phi-4-mini and Command R7B, sections 44,
+  48 and 50). Other formats (the original Command R's `Action:` blocks, Kimi, GLM, gpt-oss's harmony) fall back to
+  the Hermes format. SmolLM2-135M does not know tools, so
   expect clumsy calls from it; constrained decoding still guarantees that every call names a real tool with arguments that fit its schema
   (the whole schema for `strict` tools; otherwise keywords the grammar cannot check, such as number bounds, are ignored).
 - Structured output supports the common JSON-schema keywords, including `pattern`, `format`, string lengths, number

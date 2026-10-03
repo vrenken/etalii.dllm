@@ -28,6 +28,12 @@ template (:data:`FORMATS`):
   :data:`DEEPSEEK_SEP`, the name, the arguments in a fenced ``json`` block and :data:`DEEPSEEK_CALL_END`.
 - ``pythonic`` (Llama 3.2/4-style templates that ask for Python calls): the whole reply is a Python list of calls,
   ``[get_weather(city="Paris"), is_noon()]``, values as Python literals (``True``, ``False``, ``None``).
+- ``deepseek-v3.1`` (DeepSeek V3.1): V3's markers without the function type and the fenced block,
+  :data:`DEEPSEEK_CALL_BEGIN`, the name, :data:`DEEPSEEK_SEP`, the arguments as JSON and :data:`DEEPSEEK_CALL_END`.
+- ``phi4-mini`` (Phi-4-mini): ``functools[{"name": "get_weather", "arguments": {...}}]``; the template takes the
+  tools as a JSON string on the system message and shows earlier calls as the assistant's text.
+- ``command-r7b`` (Command R7B): ``<|START_ACTION|>[{"tool_call_id": "0", "tool_name": "get_weather", "parameters":
+  {...}}]<|END_ACTION|>``.
 
 When the model's chat template knows about tools (it references ``tools``), the template presents them, exactly as
 ``transformers`` would; otherwise the engine adds the Hermes instructions to the system message and the model calls
@@ -153,6 +159,14 @@ class ToolFormat:
     """Special tokens the format writes, kept visible in decoded text (with :attr:`open`)."""
     string_arguments: bool = False
     """The template expects earlier calls' arguments as JSON text rather than objects."""
+    name_key: str = "name"
+    """The key of the function name in a JSON call (Command R7B: ``tool_name``)."""
+    id_key: str | None = None
+    """A key the model writes with each JSON call for its own call number (Command R7B: ``tool_call_id``)."""
+    system_tools: bool = False
+    """The template takes the tools as a JSON string on the system message (Phi-4-mini), not as ``tools``."""
+    content_calls: bool = False
+    """The template does not render tool calls: earlier calls are written into the assistant's text."""
 
     @property
     def bare(self) -> str:
@@ -183,13 +197,38 @@ DEEPSEEK = ToolFormat(
     string_arguments=True,
 )
 PYTHONIC = ToolFormat("pythonic", "", style="pythonic")
-FORMATS = {f.name: f for f in (HERMES, LLAMA3, MISTRAL, GRANITE, XML, DEEPSEEK, PYTHONIC)}
+DEEPSEEK_V31 = ToolFormat(
+    "deepseek-v3.1",
+    DEEPSEEK_CALLS_BEGIN,
+    DEEPSEEK_CALLS_END,
+    listed=True,
+    style="deepseek-v3.1",
+    markers=DEEPSEEK.markers,
+    string_arguments=True,
+)
+PHI4_MINI = ToolFormat("phi4-mini", "functools", listed=True, system_tools=True, content_calls=True)
+COMMAND_R7B_OPEN = "<|START_ACTION|>"
+COMMAND_R7B_CLOSE = "<|END_ACTION|>"
+COMMAND_R7B = ToolFormat(
+    "command-r7b",
+    COMMAND_R7B_OPEN,
+    COMMAND_R7B_CLOSE,
+    arguments="parameters",
+    listed=True,
+    markers=(COMMAND_R7B_CLOSE,),
+    name_key="tool_name",
+    id_key="tool_call_id",
+)
+FORMATS = {
+    f.name: f for f in (HERMES, LLAMA3, MISTRAL, GRANITE, XML, DEEPSEEK, PYTHONIC, DEEPSEEK_V31, PHI4_MINI, COMMAND_R7B)
+}
 """The tool call formats, by name."""
 
 
 def detect_format(template_source: str | None) -> ToolFormat:
     """The tool call format of a model, from its chat template: the template's own call marker decides, in a fixed
-    order (``[TOOL_CALLS]``, DeepSeek's calls marker, ``<|tool_call|>``, Qwen3-Coder's ``<function=``,
+    order (``[TOOL_CALLS]``, DeepSeek's calls marker (V3 and R1 with a fenced ``json`` block, else V3.1), Command
+    R7B's ``<|START_ACTION|>``, Phi-4-mini's ``<|tool|>``, ``<|tool_call|>``, Qwen3-Coder's ``<function=``,
     ``<tool_call>``, the Python call example ``func_name1(``); Llama 3's bare calls are recognised by its ``ipython``
     role and ``"parameters"`` key. Templates that do not present tools get the Hermes instructions, and so the Hermes
     format."""
@@ -198,7 +237,9 @@ def detect_format(template_source: str | None) -> ToolFormat:
     assert template_source is not None
     markers = (
         ("[TOOL_CALLS]", MISTRAL),
-        (DEEPSEEK_CALLS_BEGIN, DEEPSEEK),
+        (DEEPSEEK_CALLS_BEGIN, DEEPSEEK if "```json" in template_source else DEEPSEEK_V31),
+        (COMMAND_R7B_OPEN, COMMAND_R7B),
+        ("<|tool|>", PHI4_MINI),
         ("<|tool_call|>", GRANITE),
         ("<function=", XML),
         (TOOL_CALL_OPEN, HERMES),
@@ -293,17 +334,24 @@ def with_instructions(messages: Sequence[ChatMessage], tools: Sequence[Tool]) ->
     return converted
 
 
-def template_messages(messages: Sequence[ChatMessage], fmt: ToolFormat = HERMES) -> list[dict[str, Any]]:
+def template_messages(
+    messages: Sequence[ChatMessage], fmt: ToolFormat = HERMES, tools: Sequence[Tool] = ()
+) -> list[dict[str, Any]]:
     """Messages in the Hugging Face form tool-aware chat templates expect (arguments as objects; call ids in the
-    shape the format's template accepts)."""
+    shape the format's template accepts). For a format whose template takes the tools on the system message
+    (:attr:`ToolFormat.system_tools`), ``tools`` go there; earlier calls a template cannot render
+    (:attr:`ToolFormat.content_calls`) are written into the assistant's text, in the format."""
 
     def ident(call_id: str) -> str:
         return template_id(call_id, fmt.id_length) if fmt.id_length is not None else call_id
 
-    result = []
+    result: list[dict[str, Any]] = []
     for message in messages:
         entry: dict[str, Any] = {"role": message.role, "content": message.content}
-        if message.tool_calls:
+        if message.tool_calls and fmt.content_calls:
+            listed = [{fmt.name_key: c.name, fmt.arguments: c.arguments_object()} for c in message.tool_calls]
+            entry["content"] = message.content + fmt.open + json.dumps(listed, ensure_ascii=False)
+        elif message.tool_calls:
             entry["tool_calls"] = [
                 {
                     "id": ident(call.id),
@@ -320,17 +368,26 @@ def template_messages(messages: Sequence[ChatMessage], fmt: ToolFormat = HERMES)
         if message.name is not None:
             entry["name"] = message.name
         result.append(entry)
+    if tools and fmt.system_tools:
+        if not result or result[0]["role"] != "system":
+            result.insert(0, {"role": "system", "content": ""})
+        result[0]["tools"] = json.dumps([t.to_openai()["function"] for t in tools], ensure_ascii=False)
     return result
+
+
+CALL_NUMBERS = [str(n) for n in range(10)]
+"""The call numbers a format with :attr:`ToolFormat.id_key` may write ("0" to "9"; their value is not used)."""
 
 
 def call_schema(tool: Tool, fmt: ToolFormat = HERMES) -> dict[str, Any]:
     parameters = dict(tool.parameters) if tool.parameters else {"type": "object", "properties": {}}
     if parameters.get("type", "object") != "object":
         raise ValueError(f"the parameters of tool {tool.name!r} must be a JSON schema of type object")
+    numbered = {fmt.id_key: {"enum": CALL_NUMBERS}} if fmt.id_key else {}
     schema: dict[str, Any] = {
         "type": "object",
-        "properties": {"name": {"const": tool.name}, fmt.arguments: parameters},
-        "required": ["name", fmt.arguments],
+        "properties": {**numbered, fmt.name_key: {"const": tool.name}, fmt.arguments: parameters},
+        "required": [*numbered, fmt.name_key, fmt.arguments],
     }
     # The arguments' definitions, where their "#/$defs/..." references look from the call object.
     schema.update({key: parameters[key] for key in _DEFINITIONS if key in parameters})
@@ -441,6 +498,17 @@ def _deepseek_call(tool: Tool) -> Grammar:
     )
 
 
+def _deepseek_v31_call(tool: Tool) -> Grammar:
+    arguments = Grammar.json_schema(call_schema(tool)["properties"]["arguments"], lenient=not tool.strict)
+    return Grammar.sequence(
+        [
+            Grammar.literal(f"{DEEPSEEK_CALL_BEGIN}{tool.name}{DEEPSEEK_SEP}"),
+            arguments,
+            Grammar.literal(DEEPSEEK_CALL_END),
+        ]
+    )
+
+
 def _python_value(sub: Mapping[str, Any], strict: bool) -> Grammar:
     if sub.get("type") == "boolean":
         return Grammar.one_of([Grammar.literal("True"), Grammar.literal("False")])
@@ -473,6 +541,9 @@ def _calls(tools: Sequence[Tool], fmt: ToolFormat, single: bool) -> Grammar:
     if fmt.style == "deepseek":
         call = Grammar.one_of([_deepseek_call(t) for t in tools])
         return call if single else Grammar.repeat(call, Grammar.literal("\n"))
+    if fmt.style == "deepseek-v3.1":
+        call = Grammar.one_of([_deepseek_v31_call(t) for t in tools])
+        return call if single else Grammar.repeat(call)
     if fmt.style == "pythonic":
         call = Grammar.one_of([_python_call(t) for t in tools])
         calls = call if single else Grammar.repeat(call, Grammar.literal(", "))
@@ -494,7 +565,7 @@ def _calls(tools: Sequence[Tool], fmt: ToolFormat, single: bool) -> Grammar:
 def call_grammar(tools: Sequence[Tool], fmt: ToolFormat = HERMES, *, single: bool = False) -> Grammar:
     """What follows the format's marker: the call (or call list, of one call when ``single``) and the closing
     marker."""
-    if fmt.style in ("xml", "deepseek"):
+    if fmt.style in ("xml", "deepseek", "deepseek-v3.1"):
         return Grammar.sequence([_calls(tools, fmt, single), Grammar.literal(fmt.close)])
     parts = [Grammar.whitespace(), _calls(tools, fmt, single)]
     if fmt.close:
@@ -529,13 +600,13 @@ def _block(fmt: ToolFormat) -> re.Pattern[str]:
     return re.compile(re.escape(fmt.open) + r"(.*?)(?:" + re.escape(fmt.close) + r"|\Z)", re.DOTALL)
 
 
-def _as_call(value: Any, tools: Mapping[str, Tool]) -> tuple[str, str] | None:
+def _as_call(value: Any, tools: Mapping[str, Tool], name_key: str = "name") -> tuple[str, str] | None:
     if isinstance(value, str):
         try:
             value = json.loads(value)
         except json.JSONDecodeError:
             return None
-    if not isinstance(value, dict) or value.get("name") not in tools:
+    if not isinstance(value, dict) or value.get(name_key) not in tools:
         return None
     arguments = value.get("arguments", value.get("parameters", {}))
     if isinstance(arguments, str):
@@ -545,7 +616,7 @@ def _as_call(value: Any, tools: Mapping[str, Tool]) -> tuple[str, str] | None:
             return None
     if not isinstance(arguments, dict):
         return None
-    return str(value["name"]), json.dumps(arguments, ensure_ascii=False)
+    return str(value[name_key]), json.dumps(arguments, ensure_ascii=False)
 
 
 def _listed_calls(text: str, fmt: ToolFormat, tools: Mapping[str, Tool]) -> tuple[str, list[tuple[str, str]]] | None:
@@ -559,8 +630,11 @@ def _listed_calls(text: str, fmt: ToolFormat, tools: Mapping[str, Tool]) -> tupl
     except json.JSONDecodeError:
         return None
     items = value if isinstance(value, list) else [value]
-    calls = [_as_call(item, tools) for item in items]
-    if not calls or None in calls or rest[end:].strip():
+    calls = [_as_call(item, tools, fmt.name_key) for item in items]
+    after = rest[end:].strip()
+    if fmt.close and after.startswith(fmt.close):  # text may follow a closed block
+        after = ""
+    if not calls or None in calls or after:
         return None
     return text[:cut].strip(), [call for call in calls if call is not None]
 
@@ -598,7 +672,15 @@ _DEEPSEEK_CALL = re.compile(
 )
 
 
-def _deepseek_calls(text: str, tools: Mapping[str, Tool]) -> tuple[str, list[tuple[str, str]]] | None:
+_DEEPSEEK_V31_CALL = re.compile(
+    re.escape(DEEPSEEK_CALL_BEGIN) + r"([^\n<]+?)" + re.escape(DEEPSEEK_SEP) + r"(.*?)" + re.escape(DEEPSEEK_CALL_END),
+    re.DOTALL,
+)
+
+
+def _deepseek_calls(
+    text: str, tools: Mapping[str, Tool], pattern: re.Pattern[str] = _DEEPSEEK_CALL
+) -> tuple[str, list[tuple[str, str]]] | None:
     """The text before the calls marker and the calls after it, when they are all calls of known tools."""
     cut = text.find(DEEPSEEK_CALLS_BEGIN)
     if cut < 0:
@@ -606,8 +688,8 @@ def _deepseek_calls(text: str, tools: Mapping[str, Tool]) -> tuple[str, list[tup
     rest = text[cut + len(DEEPSEEK_CALLS_BEGIN) :]
     end = rest.find(DEEPSEEK_CALLS_END)
     block = rest if end < 0 else rest[:end]
-    calls = [_as_call({"name": name, "arguments": body}, tools) for name, body in _DEEPSEEK_CALL.findall(block)]
-    if not calls or None in calls or _DEEPSEEK_CALL.sub("", block).strip():
+    calls = [_as_call({"name": name, "arguments": body}, tools) for name, body in pattern.findall(block)]
+    if not calls or None in calls or pattern.sub("", block).strip():
         return None
     return text[:cut].strip(), [call for call in calls if call is not None]
 
@@ -672,8 +754,8 @@ def parse_calls(text: str, tools: Sequence[Tool], fmt: ToolFormat = HERMES) -> t
     by_name = {t.name: t for t in tools}
     calls: list[tuple[str, str]] = []
     kept: list[str] = []
-    if fmt.style == "deepseek":
-        found = _deepseek_calls(text, by_name)
+    if fmt.style in ("deepseek", "deepseek-v3.1"):
+        found = _deepseek_calls(text, by_name, _DEEPSEEK_CALL if fmt.style == "deepseek" else _DEEPSEEK_V31_CALL)
         if found is not None:
             return found
     elif fmt.style == "pythonic":

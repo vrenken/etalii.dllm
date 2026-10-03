@@ -152,7 +152,8 @@ Tools are presented to the model through its chat template when the template sup
 otherwise as Hermes-style instructions in the system message. `tools.detect_format` reads the call format from the
 template (`DllmEngine.tool_format`): Hermes `<tool_call>{"name": ..., "arguments": ...}</tool_call>`, Llama 3's bare
 `{"name": ..., "parameters": ...}`, Mistral's `[TOOL_CALLS][...]`, Granite's `<|tool_call|>[...]`, Qwen3-Coder's
-XML parameters, DeepSeek's marker-delimited calls or a Python call list; the engine keeps that format's special
+XML parameters, DeepSeek's (V3/R1 or V3.1) marker-delimited calls, a Python call list, Phi-4-mini's `functools[...]`
+(its tools ride on the system message) or Command R7B's action block; the engine keeps that format's special
 marker tokens visible in the decoded text. The grammar guarantees that a call names an offered
 tool and that its arguments are valid under the tool's JSON schema (leniently, or in full for `strict` tools).
 `ToolChoice` also carries the allowed tools (`ToolChoice.callable` narrows the grammar and the parser, never the

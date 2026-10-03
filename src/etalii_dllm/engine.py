@@ -684,9 +684,11 @@ class DllmEngine:
             tools = ()
         if self.chat_template is None:
             return render(messages)
+        fmt = self.tool_format
+        on_system = tools if fmt.system_tools else ()  # Phi-4-mini: the tools ride on the system message
         return self.chat_template.render(
-            tooling.template_messages(messages, self.tool_format),
-            tools=[t.to_openai() for t in tools] or None,
+            tooling.template_messages(messages, fmt, on_system),
+            tools=None if on_system else [t.to_openai() for t in tools] or None,
             **variables,
         )
 
