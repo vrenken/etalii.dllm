@@ -905,6 +905,18 @@ GBNF grammars may now be left-recursive, as grammars for parser generators often
 trigger word appears and then holds it to the grammar. Everything stays bit-exact on every run and machine. Details:
 [grammars](api.md#grammars).
 
+## 48. More tool call formats
+
+```bash
+dllm import Qwen3-Coder-30B-A3B-Instruct -o coder.dllm   # or a DeepSeek-R1 distill, or a Llama 4-style template
+dllm --model coder.dllm chat "What is 12 * 34?" --tool calculator
+```
+
+Three more formats join the ones from section 44: Qwen3-Coder's XML parameters, DeepSeek's tool call markers (the
+R1 distills of Qwen and Llama use them) and Python-style call lists such as `[get_weather(city="Paris")]`. The engine
+reads the format from the model's chat template, constrains each call to a known tool with valid arguments and
+returns the same OpenAI-style tool calls in every API. Details: [tools](api.md#tools).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
@@ -925,9 +937,9 @@ trigger word appears and then holds it to the grammar. Everything stays bit-exac
   slower than llama.cpp, prompt reading is about 0.8× transformers and 0.6× llama.cpp, and only EtAlii.Dllm gives the same
   bits whatever the batch, thread count or concurrent load. `python benchmarks/benchmark.py` reproduces it.
 - Tool calling works best with models trained for it; the engine uses each model's own format (Hermes, Llama 3,
-  Mistral or Granite, section 44). Other formats (Phi-4-mini, DeepSeek, Command R) fall back to the Hermes
-  format. SmolLM2-135M does not know tools, so expect clumsy calls from it; constrained decoding still
-  guarantees that every call names a real tool with arguments that fit its schema.
+  Mistral, Granite, Qwen3-Coder XML, DeepSeek or Python calls, sections 44 and 48). Other formats (Phi-4-mini,
+  Command R, DeepSeek V3.1's changed markers) fall back to the Hermes format. SmolLM2-135M does not know tools, so
+  expect clumsy calls from it; constrained decoding still guarantees that every call names a real tool with arguments that fit its schema.
 - Structured output supports the common JSON-schema keywords, including `pattern`, `format`, string lengths, number
   bounds, `multipleOf`, property counts, tuples, property names, unique choices, `allOf`, `not`, `if`/`then`/`else`,
   `patternProperties` and `contains`; `uniqueItems` and `maxContains` over open-ended items, conditions that cannot

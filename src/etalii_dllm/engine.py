@@ -382,7 +382,7 @@ class DllmEngine:
         tokenizer = self._base_tokenizer
         showing = getattr(tokenizer, "showing", None)
         if showing is not None and fmt.open:
-            tokenizer = showing([fmt.open])
+            tokenizer = showing([fmt.open, *fmt.markers])
         self.tokenizer = tokenizer
         self._trie = None
         self._table = None
@@ -892,7 +892,7 @@ class DllmEngine:
                 continue
             # With tools, only text that is certainly answer text is streamed: not leading or trailing whitespace,
             # nothing from a <tool_call> on, and nothing at all when the reply starts like a bare JSON call.
-            safe = _answer_prefix(text, self.tool_format.open)
+            safe = _answer_prefix(text, self.tool_format.open, self.tool_format.bare)
             delta = safe[len(streamed) :]
             streamed = safe
             if delta or logprobs:
@@ -1039,12 +1039,12 @@ class DllmEngine:
         return Embedding(vector, len(tokens))
 
 
-def _answer_prefix(text: str, marker: str = TOOL_CALL_OPEN) -> str:
+def _answer_prefix(text: str, marker: str = TOOL_CALL_OPEN, bare: str = "{") -> str:
     """The part of generated text that is certainly answer text when tools are available (see ``_events``):
-    nothing from the tool call ``marker`` on (none for bare-JSON formats), and nothing when the reply starts like a
-    JSON call."""
+    nothing from the tool call ``marker`` on (none for formats without one), and nothing when the reply starts like
+    a JSON call or, for Python-style calls (``bare`` ``[``), a call list."""
     stripped = text.lstrip()
-    if stripped.startswith("{"):
+    if stripped.startswith("{") or (bare and stripped.startswith(bare)):
         return ""
     cut = stripped.find(marker) if marker else -1
     if cut >= 0:
