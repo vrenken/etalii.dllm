@@ -7,6 +7,10 @@ score is the probability of ``yes`` against ``no`` as the next token, ``sigmoid(
 with the portable kernel, where ``yes`` and ``no`` are the first token of each word. Documents are ranked by a total
 order: the higher score first, the earlier document on a tie. Scores are a pure function of the weights and the text,
 so the ranking is the same on every machine.
+
+A cross-encoder (a BERT sequence-classification model with one label, such as ms-marco-MiniLM-L6-v2) reads the query
+and the document together as a pair instead (:meth:`etalii_dllm.engine.DllmEngine.classify`); the score is its
+logit, or the sigmoid of it when the model was saved with that activation, and the instruction does not apply.
 """
 
 from __future__ import annotations
@@ -32,7 +36,7 @@ DEFAULT_INSTRUCTION = "Given a web search query, retrieve relevant passages that
 @dataclass(frozen=True)
 class Judgement:
     score: float
-    """The probability (double) that the document is relevant."""
+    """The probability (double) that the document is relevant; a cross-encoder's logit or its sigmoid."""
     tokens: int
     """Tokens of the prompt the model read."""
 
@@ -43,6 +47,14 @@ class Reranker:
     def __init__(self, engine: DllmEngine, instruction: str = DEFAULT_INSTRUCTION) -> None:
         self.engine = engine
         self.instruction = instruction
+        self.cross_encoder = getattr(engine, "classifier", None) is not None
+        """Whether the model is a cross-encoder, which scores the pair itself (see the module docstring)."""
+        if self.cross_encoder:
+            if len((engine.classifier or {}).get("labels") or []) != 1:
+                raise ValueError(f"model {engine.model.id} is a classifier with several labels, not a reranker")
+            self.yes = self.no = -1
+            self.fingerprint = hashlib.sha256(f"{engine.system_fingerprint}|cross-encoder".encode()).hexdigest()
+            return
         yes, no = engine.tokenizer.encode("yes"), engine.tokenizer.encode("no")
         if not yes or not no or yes[0] == no[0]:
             raise ValueError(f"model {engine.model.id} cannot tell 'yes' from 'no' by their first token")
@@ -57,6 +69,9 @@ class Reranker:
         return self.engine.render_chat(messages, thinking=False)
 
     def judge(self, query: str, document: str, instruction: str | None = None) -> Judgement:
+        if self.cross_encoder:
+            verdict = self.engine.classify(query, document)
+            return Judgement(verdict.scores[0], verdict.tokens)
         tokens = self.engine.tokenizer.encode(self.prompt(query, document, instruction))
         logits = self.engine.model.forward(tokens)
         return Judgement(sigmoid(float(logits[self.yes]) - float(logits[self.no])), len(tokens))

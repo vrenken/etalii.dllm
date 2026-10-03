@@ -107,8 +107,9 @@ def write_model_file(
         "fingerprint": _FINGERPRINT_PLACEHOLDER,
         **{key: metadata.get(key) for key in ("source", "licence", "tokenizer", "chat_template")},
     }
-    # Only fine-tuned, adapted, edited and embedding models carry these; files written by an import carry a lineage.
-    for section in ("fine_tuning", "adapter", "edits", "embedding", "merge", "lineage"):
+    # Only fine-tuned, adapted, edited, embedding and classification models carry these; files written by an import
+    # carry a lineage.
+    for section in ("fine_tuning", "adapter", "edits", "embedding", "classifier", "merge", "lineage"):
         if metadata.get(section) is not None:
             header[section] = metadata[section]
     header_bytes = canonical_json(header)
@@ -330,6 +331,12 @@ class ModelFile:
         """How an embedding model pools and normalises its hidden states (``pooling``: ``mean`` or ``last_token``,
         ``normalize``, ``prompts``), when the file was imported from a sentence-transformers model."""
         return self.header.get("embedding")
+
+    @property
+    def classifier(self) -> dict[str, Any] | None:
+        """A sequence-classification model's ``labels``, the ``activation`` of its scores (``none`` or ``sigmoid``)
+        and ``max_tokens`` of a pair, when the file was imported from a cross-encoder."""
+        return self.header.get("classifier")
 
     @property
     def edits(self) -> list[dict[str, Any]]:

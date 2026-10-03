@@ -322,6 +322,33 @@ class AddedToken:
     rstrip: bool = False
 
 
+_PostProcessor = Callable[[list[int], "list[int] | None"], tuple[list[int], list[int]]]
+
+
+def _plain_pair(first: list[int], second: list[int] | None) -> tuple[list[int], list[int]]:
+    if second is None:
+        return list(first), [0] * len(first)
+    return [*first, *second], [0] * len(first) + [1] * len(second)
+
+
+def _longest_first(first: list[int], second: list[int], budget: int) -> tuple[list[int], list[int]]:
+    """``tokenizers``' longest-first truncation of a pair to ``budget`` tokens: the shorter sequence keeps its
+    tokens and the longer one takes the rest, or, when that does not fit, each gets half; both are cut at the end."""
+    n1, n2 = len(first), len(second)
+    if n1 + n2 <= budget:
+        return first, second
+    swap = n1 > n2
+    if swap:
+        n1, n2 = n2, n1
+    n2 = n1 if n1 > budget else max(n1, budget - n1)
+    if n1 + n2 > budget:  # both too long: half each, the odd token to the longer
+        n1 = budget // 2
+        n2 = n1 + budget % 2
+    if swap:
+        n1, n2 = n2, n1
+    return first[:n1], second[:n2]
+
+
 class BpeTokenizer:
     """Encodes and decodes like the Hugging Face tokenizer described by ``spec`` (a parsed ``tokenizer.json``)."""
 
@@ -432,35 +459,49 @@ class BpeTokenizer:
             raise TokenizerError(f"unknown token {token!r}")
         return self._vocab[token]
 
-    def _post_processor(self, spec: Mapping[str, Any] | None) -> Callable[[list[int]], list[int]]:
+    def _post_processor(self, spec: Mapping[str, Any] | None) -> _PostProcessor:
+        """The post-processor as a function of one sequence or a pair: ``(ids, type ids)`` with its special tokens,
+        as ``tokenizers`` assembles them (a pair without a template is the two sequences, the second of type 1)."""
         if spec is None or spec.get("type") == "ByteLevel":
-            return lambda ids: ids
+            return _plain_pair
         if spec.get("type") == "Sequence":
             steps = [self._post_processor(s) for s in spec["processors"]]
-
-            def run(ids: list[int]) -> list[int]:
-                for step in steps:
-                    ids = step(ids)
-                return ids
-
-            return run
+            templates = [step for step in steps if step is not _plain_pair]
+            if len(templates) > 1:
+                raise TokenizerError("a post-processor sequence with more than one template is not supported")
+            return templates[0] if templates else _plain_pair
         if spec.get("type") == "TemplateProcessing":
-            template = spec["single"]
             special = {name: entry["ids"] for name, entry in spec.get("special_tokens", {}).items()}
+            single, pair = spec["single"], spec.get("pair")
 
-            def apply(ids: list[int]) -> list[int]:
-                out: list[int] = []
+            def apply(first: list[int], second: list[int] | None) -> tuple[list[int], list[int]]:
+                template = single if second is None else pair
+                if template is None:
+                    raise TokenizerError("the tokenizer's post-processor has no template for a pair of texts")
+                ids: list[int] = []
+                types: list[int] = []
                 for item in template:
                     if "Sequence" in item:
-                        out.extend(ids)
+                        part = first if item["Sequence"]["id"] == "A" else second or []
+                        type_id = int(item["Sequence"].get("type_id", 0))
                     else:
-                        out.extend(special[item["SpecialToken"]["id"]])
-                return out
+                        part = special[item["SpecialToken"]["id"]]
+                        type_id = int(item["SpecialToken"].get("type_id", 0))
+                    ids.extend(part)
+                    types.extend([type_id] * len(part))
+                return ids, types
 
             return apply
         if spec.get("type") == "BertProcessing":
             cls, sep = int(spec["cls"][1]), int(spec["sep"][1])
-            return lambda ids: [cls, *ids, sep]
+
+            def bert(first: list[int], second: list[int] | None) -> tuple[list[int], list[int]]:
+                ids = [cls, *first, sep]
+                if second is None:
+                    return ids, [0] * len(ids)
+                return [*ids, *second, sep], [0] * len(ids) + [1] * (len(second) + 1)
+
+            return bert
         raise TokenizerError(f"post-processor {spec.get('type')!r} is not supported")
 
     @property
@@ -544,22 +585,49 @@ class BpeTokenizer:
     def encode(self, text: str, *, add_special_tokens: bool = False) -> list[int]:
         """Token ids for ``text``. ``add_special_tokens`` applies the post-processor (e.g. a BOS token), as the
         ``tokenizers`` default does; chat prompts rendered from a template already contain their special tokens."""
-        ids: list[int] = []
+        ids = [token for word in self._words(text) for token in word]
+        return self._post(ids, None)[0] if add_special_tokens else ids
+
+    def _words(self, text: str, limit: int | None = None) -> list[list[int]]:
+        """The tokens of each pre-tokenized word (an added token is a word of its own). With ``limit``, the words
+        stop after the first ordinary word that brings them to that many tokens, as ``tokenizers`` tokenizes under
+        truncation (added tokens count but do not stop it)."""
+        words: list[list[int]] = []
+        total = 0
         for i, (part, added) in enumerate(self._split_added(text)):
             if added is not None:
-                ids.append(added.id)
+                words.append([added.id])
+                total += 1
                 continue
             for piece in self._pre_tokenize([self._normalize(part)], i == 0):
                 if piece:
                     if self._byte_level:
                         piece = "".join(self._byte_encoder[b] for b in piece.encode("utf-8"))
-                    ids.extend(self._word(piece))
-        return self._post(ids) if add_special_tokens else ids
+                    words.append(self._word(piece))
+                    total += len(words[-1])
+                    if limit is not None and total >= limit:
+                        return words
+        return words
 
     def with_special_tokens(self, ids: Sequence[int]) -> list[int]:
         """``ids`` with the post-processor's special tokens added (``[CLS] ids [SEP]`` for BERT), as
         ``encode(..., add_special_tokens=True)`` adds them."""
-        return self._post(list(ids))
+        return self._post(list(ids), None)[0]
+
+    def encode_pair(self, first: str, second: str, *, max_tokens: int | None = None) -> tuple[list[int], list[int]]:
+        """Token ids and type ids of a pair of texts with the post-processor's special tokens (``[CLS] first [SEP]
+        second [SEP]`` for BERT), as ``tokenizers`` encodes a pair. ``max_tokens`` truncates the pair longest
+        first to that many tokens, special tokens included (``truncation="longest_first"``)."""
+        # Under truncation tokenizers (0.23) tokenizes each text only up to the first word that reaches max_tokens
+        # tokens, then truncates the pair longest first to what the special tokens leave.
+        a = [token for word in self._words(first, max_tokens) for token in word]
+        b = [token for word in self._words(second, max_tokens) for token in word]
+        if max_tokens is not None:
+            budget = max_tokens - len(self._post([], [])[0])
+            if budget < 0:
+                raise ValueError(f"max_tokens {max_tokens} leaves no room for the special tokens")
+            a, b = _longest_first(a, b, budget)
+        return self._post(a, b)
 
     # -- decoding --
 

@@ -469,8 +469,9 @@ Not covered here, but just as fixed:
 A model of family `bert` is an encoder: it turns all its tokens into hidden states at once, for embeddings, and does
 not generate. All in float32 unless stated:
 
-1. `x = (word[t] + type[0]) + position[i]` for the token `t` at position `i` (two float32 additions in that order;
-   every token is of type 0), then `x = layer_norm(x, embedding_norm)`.
+1. `x = (word[t] + type[s]) + position[i]` for the token `t` of type `s` at position `i` (two float32 additions in
+   that order; every token of an embedding is of type 0, and the second text of a pair is of type 1), then
+   `x = layer_norm(x, embedding_norm)`.
 2. For each layer:
    1. `q, k, v = linear(x, W, bias)`.
    2. `a = attention(q, k, v)` with `scale = 1 / sqrt(head_dim)`, not causal: every position sees every key.
@@ -486,6 +487,17 @@ tokenizer adds, and the special tokens (`[CLS] … [SEP]`) are then added. The v
 pooling), the last state (`last_token`), or the mean: per component the sum over positions ascending in double,
 rounded to float32, then a float32 division by the number of positions. With normalisation it is divided (float32)
 by `f32(sqrt(ss))`, where `ss` is the sum of its squares in double, ascending.
+
+**Classification (cross-encoders).** A model with `classifier_labels` has a head on the first state `x[0]` (the
+`[CLS]` token): `p = f32(tanh(linear(x[0], Wpool, bpool)))` with `tanh` the portable kernel in double, then
+`logits = linear(p, Wcls, bcls)`, one per label. The head is never quantised. A pair of texts (a query and a document)
+is encoded as `tokenizers` encodes it: each text's words are tokenized until they hold `max_tokens` tokens (the
+word that reaches it kept whole; added tokens count but do not stop it), then the pair is truncated longest first to
+`b = max_tokens - s` tokens, `s` the pair template's special tokens: with `n1 <= n2` the shorter length and the
+longer, the shorter keeps `n1` and the longer gets `max(n1, b - n1)` (all of it when `n1 > b`); when the two still
+exceed `b`, they get `b // 2` and `b // 2 + b % 2`, the extra token to the longer one. Both are cut at the end, and
+the template adds `[CLS] A [SEP] B [SEP]` with token types 0 for `[CLS] A [SEP]` and 1 for `B [SEP]`. A reranking
+score is the single logit, or `sigmoid(logit)` in double when the model was saved with that activation.
 
 ## Checking an implementation
 

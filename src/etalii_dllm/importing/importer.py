@@ -63,6 +63,7 @@ class _Converted:
     tokenizer: dict[str, Any] | None
     chat_template: str | None
     embedding: dict[str, Any] | None = None
+    classifier: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -672,13 +673,18 @@ _BERT_GLOBAL_NAMES = {
 _BERT_PARAMETERS = {"weight": "weight", "bias": "bias", "gamma": "weight", "beta": "bias"}
 
 
-def _bert_name(name: str) -> str | None:
-    """Our name for a BERT checkpoint tensor (with or without the ``bert.`` prefix); None for the pooler, the
-    pre-training heads and buffers, which an embedding does not use."""
+_BERT_HEAD_NAMES = {"pooler.dense": "pooler", "classifier": "classifier"}
+
+
+def _bert_name(name: str, classifier: bool = False) -> str | None:
+    """Our name for a BERT checkpoint tensor (with or without the ``bert.`` prefix); None for the pre-training heads
+    and buffers, and for the pooler unless the model is a ``classifier``, which an embedding does not use."""
     name = name.removeprefix("bert.")
+    stem, _, parameter = name.rpartition(".")
+    if classifier and stem in _BERT_HEAD_NAMES and parameter in ("weight", "bias"):
+        return f"{_BERT_HEAD_NAMES[stem]}.{parameter}"
     if name.startswith(("pooler.", "cls.")) or name == "embeddings.position_ids":
         return None
-    stem, _, parameter = name.rpartition(".")
     if stem in _BERT_GLOBAL_NAMES and parameter in _BERT_PARAMETERS:
         return f"{_BERT_GLOBAL_NAMES[stem]}.{_BERT_PARAMETERS[parameter]}"
     match = _BERT_LAYER.match(name)
@@ -687,27 +693,68 @@ def _bert_name(name: str) -> str | None:
     raise ModelImportError(f"unexpected tensor {name!r}")
 
 
+_CROSS_ENCODER_ACTIVATIONS = {
+    "torch.nn.modules.activation.Sigmoid": "sigmoid",
+    "torch.nn.modules.linear.Identity": "none",
+}
+
+
+def _classifier_settings(directory: Path, raw_config: dict[str, Any], positions: int) -> dict[str, Any]:
+    """A sequence-classification model's labels (``id2label`` in id order), the activation sentence-transformers'
+    CrossEncoder applies to its scores (``none``: the raw logits, as transformers gives them; ``sigmoid``) and how
+    many tokens a pair may have (``max_length`` or the tokenizer's ``model_max_length``, at most the positions)."""
+    labels = raw_config.get("id2label") or {}
+    count = int(raw_config.get("num_labels") or len(labels) or 1)
+    names = [str(labels.get(str(i), labels.get(i, f"LABEL_{i}"))) for i in range(count)]
+    extra = raw_config.get("sentence_transformers") or {}
+    function = extra.get("activation_fn") or raw_config.get("sbert_ce_default_activation_function")
+    if function is not None and function not in _CROSS_ENCODER_ACTIVATIONS:
+        raise ModelImportError(f"cross-encoder activation {function!r} is not supported (Sigmoid or Identity)")
+    limit = _read_json(directory / "sentence_bert_config.json").get("max_seq_length")
+    if not limit:
+        limit = _read_json(directory / "tokenizer_config.json").get("model_max_length")
+    if not isinstance(limit, int) or limit < 1 or limit > positions:
+        limit = positions
+    return {
+        "labels": names,
+        "activation": _CROSS_ENCODER_ACTIVATIONS[function] if function else "none",
+        "max_tokens": limit,
+    }
+
+
 def _convert_bert(directory: Path, raw_config: dict[str, Any], context_length: int | None) -> _Converted:
     """A BERT checkpoint (``BertModel`` or a pre-training model; sentence-transformers encoders such as
-    all-MiniLM-L6-v2 and bge-small-en-v1.5)."""
+    all-MiniLM-L6-v2 and bge-small-en-v1.5), or a ``BertForSequenceClassification`` cross-encoder such as
+    ms-marco-MiniLM-L6-v2."""
     config = bert_config(raw_config, context_length)
-    pooling = _embedding_settings(directory) or {
-        "pooling": "mean",
-        "normalize": True,
-        "prompts": {},
-        "default_prompt_name": None,
-    }
-    limit = _read_json(directory / "sentence_bert_config.json").get("max_seq_length")
-    pooling["max_tokens"] = min(int(limit), config.context_length) if limit else config.context_length
+    checkpoint = open_checkpoint(directory)
+    classifier: dict[str, Any] | None = None
+    pooling: dict[str, Any] | None = None
+    if "classifier.weight" in checkpoint:
+        classifier = _classifier_settings(directory, raw_config, config.context_length)
+        rows, named = checkpoint["classifier.weight"].shape[0], len(classifier["labels"])
+        if rows != named:
+            raise ModelImportError(f"the classifier has {rows} labels but config.json names {named}")
+        config = dataclasses.replace(config, classifier_labels=rows)
+    else:
+        pooling = _embedding_settings(directory) or {
+            "pooling": "mean",
+            "normalize": True,
+            "prompts": {},
+            "default_prompt_name": None,
+        }
+        limit = _read_json(directory / "sentence_bert_config.json").get("max_seq_length")
+        pooling["max_tokens"] = min(int(limit), config.context_length) if limit else config.context_length
     tensors: dict[str, TensorSource] = {}
-    for tensor in open_checkpoint(directory).values():
-        name = _bert_name(tensor.name)
+    for tensor in checkpoint.values():
+        name = _bert_name(tensor.name, classifier is not None)
         if name is None:
             continue
         if tensor.dtype not in ("F32", "F16", "BF16"):
             raise ModelImportError(f"tensor {tensor.name!r} has dtype {tensor.dtype}; only F32, F16 and BF16 import")
         tensors[name] = TensorSource(tensor.shape, tensor.to_float32, tensor.dtype)
-    return _with_tokenizer(directory, config, tensors, pooling)
+    converted = _with_tokenizer(directory, config, tensors, pooling)
+    return dataclasses.replace(converted, classifier=classifier) if classifier else converted
 
 
 def _convert_huggingface(directory: Path, context_length: int | None = None) -> _Converted:
@@ -1097,6 +1144,7 @@ def import_model(
             "tokenizer": converted.tokenizer,
             "chat_template": converted.chat_template,
             "embedding": converted.embedding,
+            "classifier": converted.classifier,
             "lineage": [import_step(source_record)],
         },
     )

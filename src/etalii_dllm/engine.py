@@ -33,7 +33,7 @@ from etalii_dllm.grammar import Grammar, HealingConstraint, TokenConstraint, Tok
 from etalii_dllm.guidance import Guide
 from etalii_dllm.infill import fim_tokens
 from etalii_dllm.models import BigramModel, LanguageModel
-from etalii_dllm.numerics import QUANTIZATIONS, linear, set_threads, sum_squares
+from etalii_dllm.numerics import QUANTIZATIONS, linear, set_threads, sigmoid, sum_squares
 from etalii_dllm.prompt_cache import DEFAULT_PROMPT_CACHE_SIZE
 from etalii_dllm.retrieval import DEFAULT_TOP, MODES, Retriever
 from etalii_dllm.sampling import GREEDY, SamplingOptions
@@ -286,6 +286,19 @@ class Embedding:
     tokens: int
 
 
+@dataclass(frozen=True)
+class Classification:
+    """A sequence-classification model's verdict on a text or a pair (:meth:`DllmEngine.classify`)."""
+
+    logits: tuple[float, ...]
+    """The classifier's float32 logits, one per label."""
+    scores: tuple[float, ...]
+    """The logits after the model's activation (``sigmoid`` in double with the portable kernel, or unchanged)."""
+    labels: tuple[str, ...]
+    tokens: int
+    """Tokens of the input the model read."""
+
+
 class DllmEngine:
     signer: Signer | None = None
     """Signs every receipt this engine makes (``--sign-key``, :mod:`etalii_dllm.signing`)."""
@@ -304,6 +317,7 @@ class DllmEngine:
         stop_tokens: Iterable[int] = (),
         prompt_cache: int = 0,
         embedding: Mapping[str, Any] | None = None,
+        classifier: Mapping[str, Any] | None = None,
         retriever: Retriever | None = None,
         speculate: int = 0,
         draft_model: LanguageModel | None = None,
@@ -317,8 +331,9 @@ class DllmEngine:
         changes the output. ``speculate`` drafts that many
         tokens per step, with ``draft_model`` or from the text so far, and checks them in one pass
         (:mod:`etalii_dllm.speculative`); that saves work and never changes the output either. ``embedding`` holds an
-        embedding model's pooling settings (:attr:`etalii_dllm.modelfile.ModelFile.embedding`). ``retriever`` grounds
-        chats in a document index (:class:`etalii_dllm.retrieval.Retriever`); its fingerprint joins the
+        embedding model's pooling settings (:attr:`etalii_dllm.modelfile.ModelFile.embedding`) and ``classifier`` a
+        cross-encoder's labels and activation (:attr:`etalii_dllm.modelfile.ModelFile.classifier`). ``retriever``
+        grounds chats in a document index (:class:`etalii_dllm.retrieval.Retriever`); its fingerprint joins the
         ``system_fingerprint``. ``contrast_model`` is the amateur requests with ``contrast_beta`` decode against,
         and ``ensemble`` the other models (with weights; the served model has ``ensemble_weight``) every request is
         decoded with (:mod:`etalii_dllm.guidance`); their weights join the ``system_fingerprint``."""
@@ -341,6 +356,7 @@ class DllmEngine:
             joined = hashlib.sha256("|".join([system_fingerprint, *extras]).encode()).hexdigest()
             system_fingerprint = "fp_" + joined[:12]
         self.embedding = dict(embedding) if embedding else None
+        self.classifier = dict(classifier) if classifier else None
         self.retriever = retriever
         if retriever is not None:
             joined = hashlib.sha256(f"{system_fingerprint}|{retriever.fingerprint}".encode()).hexdigest()
@@ -456,6 +472,7 @@ class DllmEngine:
                 from_model_header(file.tokenizer),
                 "fp_" + encoder.weights_fingerprint[:12],
                 embedding=file.embedding,
+                classifier=file.classifier,
             )
         tensors: Mapping[str, np.ndarray] = file.tensors
         weights_fingerprint = file.fingerprint
@@ -1049,6 +1066,8 @@ class DllmEngine:
         (``last_token``: the last position's final hidden state; ``cls``: the first; ``mean``). Other models take the
         mean of the final hidden states over all positions. The mean sums each column over positions ascending in
         double, through the ``linear`` kernel."""
+        if self.classifier is not None:
+            raise ValueError(f"model {self.model.id} is a cross-encoder, which scores pairs; use it with dllm rerank")
         settings = self.embedding or {}
         tokens = self.embedding_tokens(text, input_type)
         if not tokens:
@@ -1074,6 +1093,31 @@ class DllmEngine:
             if norm > 0:
                 vector = (vector / norm).astype(np.float32)
         return Embedding(vector, len(tokens))
+
+    # -- classification -----------------------------------------------------------------------------------------
+
+    def classification_tokens(self, text: str, pair: str | None = None) -> tuple[list[int], list[int]]:
+        """The tokens and token types :meth:`classify` runs: the text, or the pair with the tokenizer's pair
+        template, truncated longest first to the model's ``max_tokens`` as ``tokenizers`` truncates."""
+        if self.classifier is None:
+            raise ValueError(f"model {self.model.id} has no classification head")
+        limit = int(self.classifier.get("max_tokens") or self.model.context_length)
+        if pair is None:
+            specials = len(self.tokenizer.encode("", add_special_tokens=True))  # type: ignore[call-arg]
+            plain = self.tokenizer.encode(text)[: max(limit - specials, 0)]
+            tokens = self.tokenizer.with_special_tokens(plain)  # type: ignore[attr-defined]
+            return tokens, [0] * len(tokens)
+        return self.tokenizer.encode_pair(text, pair, max_tokens=limit)  # type: ignore[attr-defined,no-any-return]
+
+    def classify(self, text: str, pair: str | None = None) -> Classification:
+        """A cross-encoder's verdict on ``text`` (and ``pair``, e.g. a query and a document): the classifier's
+        logits on the pooled ``[CLS]`` state and the scores after the model's activation."""
+        tokens, types = self.classification_tokens(text, pair)
+        logits = [float(v) for v in self.model.classify(tokens, types)]  # type: ignore[attr-defined]
+        activation = (self.classifier or {}).get("activation", "none")
+        scores = [sigmoid(v) for v in logits] if activation == "sigmoid" else logits
+        labels = tuple(str(name) for name in (self.classifier or {}).get("labels", []))
+        return Classification(tuple(logits), tuple(scores), labels, len(tokens))
 
 
 def _answer_prefix(text: str, marker: str = TOOL_CALL_OPEN, bare: str = "{") -> str:

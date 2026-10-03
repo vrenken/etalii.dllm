@@ -115,7 +115,10 @@ class TransformerConfig:
     """Whether the shared expert's output is scaled by ``sigmoid(h . w)`` with a gate weight ``[1, hidden]``
     (Qwen2-MoE)."""
     type_vocabulary_size: int = 0
-    """BERT: the rows of the token type embedding (segment A is type 0, the only one an embedding uses)."""
+    """BERT: the rows of the token type embedding (the first text of a pair is type 0, the second type 1)."""
+    classifier_labels: int = 0
+    """BERT sequence classification (cross-encoders): the number of labels of the classifier on the pooled
+    ``[CLS]`` state; 0 for an encoder without a classification head."""
 
     def __post_init__(self) -> None:
         if self.family not in FAMILIES:
@@ -134,8 +137,10 @@ class TransformerConfig:
                 raise ValueError("bert needs token types and a gelu or gelu_tanh MLP")
             if self.kv_heads != self.heads or self.experts:
                 raise ValueError("bert has neither grouped-query attention nor experts")
-        elif self.activation == "gelu" or self.type_vocabulary_size:
-            raise ValueError("the plain gelu MLP and token types are for bert (encoders) only")
+            if self.classifier_labels < 0:
+                raise ValueError("classifier_labels must not be negative")
+        elif self.activation == "gelu" or self.type_vocabulary_size or self.classifier_labels:
+            raise ValueError("the plain gelu MLP, token types and classifiers are for bert (encoders) only")
         if self.qk_norm_scope not in QK_NORM_SCOPES:
             raise ValueError(f"unsupported qk_norm_scope {self.qk_norm_scope!r}")
         if self.norm_placement not in NORM_PLACEMENTS:
@@ -269,6 +274,7 @@ class TransformerConfig:
             ("normalize_expert_weights", False),
             ("shared_expert_gate", False),
             ("type_vocabulary_size", 0),
+            ("classifier_labels", 0),
         )
         for name, default in defaults:
             if values[name] == default:
@@ -362,4 +368,9 @@ class TransformerConfig:
             shapes[p + "mlp.down.bias"] = (hidden,)
             shapes[p + "mlp_norm.weight"] = (hidden,)
             shapes[p + "mlp_norm.bias"] = (hidden,)
+        if self.classifier_labels:
+            shapes["pooler.weight"] = (hidden, hidden)
+            shapes["pooler.bias"] = (hidden,)
+            shapes["classifier.weight"] = (self.classifier_labels, hidden)
+            shapes["classifier.bias"] = (self.classifier_labels,)
         return shapes

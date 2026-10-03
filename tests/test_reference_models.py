@@ -103,7 +103,13 @@ EMBEDDING_MODELS = {
     ),
     "bge-small": ReferenceModel("BAAI/bge-small-en-v1.5", "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a", "MIT"),
 }
-_ALL_MODELS = {**REFERENCE_MODELS, **EMBEDDING_MODELS}
+# A BERT cross-encoder (Phase 56): a query and a passage scored together by a sequence-classification head.
+CROSS_ENCODERS = {
+    "ms-marco": ReferenceModel(
+        "cross-encoder/ms-marco-MiniLM-L6-v2", "233902d25c440f23af6f7d6e94d2946bac0bee0a", "Apache-2.0"
+    ),
+}
+_ALL_MODELS = {**REFERENCE_MODELS, **EMBEDDING_MODELS, **CROSS_ENCODERS}
 TOOL_FORMATS = {"qwen2.5": "hermes", "qwen2.5-1.5b": "hermes", "qwen3": "hermes", "llama3.2": "llama3"}
 
 EMBEDDING_TEXTS = [
@@ -538,6 +544,66 @@ def test_embeddings_match_reference(embedding_imported):
     # Retrieval works: the query is closest to the passage that answers it.
     scores = actual[1:3] @ actual[0]  # test-side cosine; the vectors are unit length
     assert scores[0] > scores[1]
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Real cross-encoders
+
+RERANK_QUERY = "How many people live in Berlin?"
+RERANK_PASSAGES = [
+    "Berlin had a population of 3,520,031 registered inhabitants in an area of 891.82 square kilometers.",
+    "Berlin is well known for its museums.",
+    "New York City is famous for the Metropolitan Museum of Art.",
+    "Ünïcödé café 日本語 🚀 " * 120,  # longer than the model's 512 tokens: truncated with the query kept
+]
+
+
+@pytest.fixture(scope="module", params=sorted(CROSS_ENCODERS))
+def cross_imported(request, tmp_path_factory):
+    directory = checkpoint(request.param, weights=True)
+    model = CROSS_ENCODERS[request.param]
+    output = tmp_path_factory.mktemp(request.param.replace(".", "_")) / "model.dllm"
+    result = import_model(
+        directory, output, repository=model.repository, revision=model.revision, licence=model.licence
+    )
+    return request.param, directory, result
+
+
+def _scores(engine: DllmEngine) -> np.ndarray:
+    return np.array([engine.classify(RERANK_QUERY, passage).logits for passage in RERANK_PASSAGES], dtype=np.float32)
+
+
+def test_cross_encoder_golden(cross_imported):
+    key, directory, result = cross_imported
+    golden = REFERENCE_MODEL_FINGERPRINTS.get(key, {})
+    actual = {"import": result.fingerprint, "scores": fingerprint(_scores(DllmEngine.from_model_file(result.path)))}
+    assert actual == {name: golden.get(name) for name in actual}, f"snapshot {directory.name}"
+
+
+def test_cross_encoder_matches_reference(cross_imported):
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    _, directory, result = cross_imported
+    engine = DllmEngine.from_model_file(result.path)
+    assert engine.classifier is not None
+    limit = engine.classifier["max_tokens"]
+    tokenizer = transformers.AutoTokenizer.from_pretrained(directory)
+    reference = transformers.AutoModelForSequenceClassification.from_pretrained(
+        directory, dtype=torch.float32, attn_implementation="eager"
+    ).eval()
+    expected = []
+    for passage in RERANK_PASSAGES:
+        batch = tokenizer(RERANK_QUERY, passage, truncation=True, max_length=limit)
+        assert engine.classification_tokens(RERANK_QUERY, passage) == (batch["input_ids"], batch["token_type_ids"])
+        with torch.no_grad():
+            tensors = {name: torch.tensor([values]) for name, values in batch.items()}
+            expected.append(reference(**tensors).logits[0].numpy())
+    actual = _scores(engine)
+    np.testing.assert_allclose(actual, np.stack(expected), rtol=0, atol=1e-4)
+    # Reranking works: the passage that answers the query comes first.
+    from etalii_dllm.reranking import Reranker
+
+    assert Reranker(engine).rerank(RERANK_QUERY, RERANK_PASSAGES[:3])[0][0] == 0
 
 
 def main() -> None:
