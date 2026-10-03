@@ -938,6 +938,36 @@ NB_MODULE(_kernels, module) {
         nb::arg("q_offset") = -1, nb::arg("window") = 0, nb::arg("softcap") = 0.0, "Gradients (dq, dk, dv) of attention(); fixed order, double accumulators.");
 
     m.def(
+        "biased_attention_backward",
+        [](FloatTensor q, FloatTensor k, FloatTensor v, FloatTensor bias, FloatTensor dout, double scale) {
+            require(q.ndim() == 3 && k.ndim() == 3 && v.ndim() == 3, "q, k and v must be [length, heads, dim]");
+            const std::size_t q_len = q.shape(0);
+            const std::size_t kv_len = k.shape(0);
+            const std::size_t heads = q.shape(1);
+            require(k.shape(1) == heads && v.shape(1) == heads, "q, k and v must have the same heads");
+            require(v.shape(0) == kv_len, "k and v must have the same length");
+            require(q.shape(2) == k.shape(2), "q and k must have the same head_dim");
+            require(bias.ndim() == 3 && bias.shape(0) == heads && bias.shape(1) == q_len && bias.shape(2) == kv_len,
+                    "bias must be [heads, q_len, kv_len]");
+            require(dout.ndim() == 3 && dout.shape(0) == q_len && dout.shape(1) == heads &&
+                        dout.shape(2) == v.shape(2),
+                    "dout must be [q_len, heads, value_dim]");
+            float* dq;
+            float* dk;
+            float* dv;
+            float* dbias;
+            auto dq_array = make_array(shape_of(q), &dq);
+            auto dk_array = make_array(shape_of(k), &dk);
+            auto dv_array = make_array(shape_of(v), &dv);
+            auto dbias_array = make_array(shape_of(bias), &dbias);
+            dllm::biased_attention_backward(q.data(), k.data(), v.data(), bias.data(), dout.data(), dq, dk, dv, dbias,
+                                            q_len, kv_len, heads, q.shape(2), v.shape(2), scale);
+            return std::make_tuple(dq_array, dk_array, dv_array, dbias_array);
+        },
+        nb::arg("q"), nb::arg("k"), nb::arg("v"), nb::arg("bias"), nb::arg("dout"), nb::arg("scale"),
+        "Gradients (dq, dk, dv, dbias) of biased_attention(); fixed order, double accumulators.");
+
+    m.def(
         "cross_entropy",
         [](FloatTensor logits, IndexVector targets, double scale) {
             require(logits.ndim() == 2, "logits must be [rows, vocab]");

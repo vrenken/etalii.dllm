@@ -352,6 +352,10 @@ element, a fixed order, one rounding.
   `1 - tanh(s_j / softcap)^2` of the scaled score `s_j` when a soft-cap is set),
   `dq = scale sum_j ds_j k_j`; `dk_j` and `dv_j` accumulate `scale ds_j q` and `p_j dout` in double over queries
   ascending, then heads ascending.
+- **`biased_attention_backward`** (DeBERTa): the same over every key with the scores of `biased_attention`
+  (`(q . k_j + bias_j) * scale`, no soft-cap); `g_j = p_j (dp_j - D) * scale` gives `dq = sum_j g_j k_j`, the
+  accumulations `dk_j += g_j q` and `dv_j += p_j dout`, and `dbias[h, t, j] = g_j` rounded once. One thread, the
+  (query, head) pairs in query-then-head order, so the accumulations have one order whatever the thread count.
 - **`cross_entropy`**: `logsumexp = max + log(sum_j exp(l_j - max))` (`j` ascending, `dllm` exp/log); the loss is
   summed over rows ascending; `dlogits = (softmax - onehot) * scale`. Negative targets are skipped.
 - **`embedding_backward`**: rows grouped per token id by a counting sort that keeps positions ascending, then

@@ -55,6 +55,23 @@ DEBERTA_CONFIG = {
 }
 
 
+def frozen_pieces(count: int) -> list[tuple[str, float]]:
+    """At most ``count`` Unigram pieces written out from :data:`TEXTS` (the printable ASCII and the texts'
+    characters, then their most frequent two- and three-character pieces), so the vocabulary never changes with a
+    trained model."""
+    from collections import Counter
+
+    corpus = " ".join(TEXTS).split()
+    characters = sorted({chr(c) for c in range(33, 127)} | {c for word in corpus for c in word})
+    grams: Counter[str] = Counter()
+    for word in corpus:
+        marked = "▁" + word
+        grams.update(marked[i : i + n] for n in (2, 3) for i in range(len(marked) - n + 1))
+    chosen = sorted(grams, key=lambda gram: (-grams[gram], gram))[: count - 1 - len(characters)]
+    pieces = [("▁", -2.0)] + [(gram, -5.0 - 0.001 * rank) for rank, gram in enumerate(chosen)]
+    return pieces + [(c, -10.0 - 0.001 * rank) for rank, c in enumerate(characters)]
+
+
 def deberta_tokenizer():
     """A Unigram tokenizer laid out as transformers converts DeBERTa-v3's ``spm.model``: ``[PAD]``, ``[CLS]``,
     ``[SEP]``, ``[UNK]`` first, the Strip/Precompiled/space-collapsing normaliser, Metaspace and the
@@ -62,8 +79,8 @@ def deberta_tokenizer():
     from test_unigram import sentencepiece_model
     from tokenizers import AddedToken, Regex, Tokenizer, decoders, models, normalizers, pre_tokenizers, processors
 
-    pieces, charsmap = sentencepiece_model()
-    vocab = [("[PAD]", 0.0), ("[CLS]", 0.0), ("[SEP]", 0.0), ("[UNK]", 0.0), *pieces[3:], ("[MASK]", 0.0)]
+    _, charsmap = sentencepiece_model()  # nmt_nfkc's precompiled map does not depend on the training text
+    vocab = [("[PAD]", 0.0), ("[CLS]", 0.0), ("[SEP]", 0.0), ("[UNK]", 0.0), *frozen_pieces(397), ("[MASK]", 0.0)]
     tokenizer = Tokenizer(models.Unigram(vocab, 3, False))
     tokenizer.normalizer = normalizers.Sequence(
         [normalizers.Strip(), normalizers.Precompiled(charsmap), normalizers.Replace(Regex(" {2,}"), " ")]
@@ -474,18 +491,264 @@ def test_import_refusals(tmp_path):
     assert _deberta_name("deberta.encoder.layer.1.attention.self.key_proj.bias") == "layers.1.attention.k.bias"
 
 
-def test_fine_tuning_lora_and_export_are_refused(embedder, tmp_path):
-    from etalii_dllm.encoder_export import export_encoder_gguf, export_encoder_safetensors
-    from etalii_dllm.lora import AdapterError, LoraConfig, target_weights
+# Fine-tuning, LoRA and export (#367-#370)
+
+
+def test_biased_attention_backward_matches_numeric_gradient():
+    q = numerics.fill_gaussian(11, 5 * 2 * 4).reshape(5, 2, 4).astype(np.float64)
+    k = numerics.fill_gaussian(12, 6 * 2 * 4).reshape(6, 2, 4).astype(np.float64)
+    v = numerics.fill_gaussian(13, 6 * 2 * 3).reshape(6, 2, 3).astype(np.float64)
+    bias = numerics.fill_gaussian(14, 2 * 5 * 6).reshape(2, 5, 6).astype(np.float64)
+    dout = numerics.fill_gaussian(15, 5 * 2 * 3).reshape(5, 2, 3).astype(np.float64)
+    scale = 0.4
+
+    def loss(q, k, v, bias):
+        scores = (np.einsum("thd,jhd->htj", q, k) + bias) * scale
+        p = np.exp(scores - scores.max(axis=-1, keepdims=True))
+        out = np.einsum("htj,jhd->thd", p / p.sum(axis=-1, keepdims=True), v)
+        return float((out * dout).sum())
+
+    grads = [t.numpy() for t in numerics.biased_attention_backward(q, k, v, bias, dout, scale)]
+    inputs = [q, k, v, bias]
+    for index, (value, grad) in enumerate(zip(inputs, grads, strict=True)):
+        assert grad.shape == value.shape
+        numeric = np.zeros_like(value)
+        for position in np.ndindex(value.shape):
+            plus, minus = [a.copy() for a in inputs], [a.copy() for a in inputs]
+            plus[index][position] += 1e-6
+            minus[index][position] -= 1e-6
+            numeric[position] = (loss(*plus) - loss(*minus)) / 2e-6
+        np.testing.assert_allclose(grad, numeric, atol=2e-5)
+    # a zero bias gives attention_backward's dq, dk and dv
+    zero = numerics.biased_attention_backward(q, k, v, np.zeros_like(bias), dout, scale)
+    plain = numerics.attention_backward(q, k, v, dout, scale=scale, causal=False, q_offset=0)
+    assert all(a.numpy().tobytes() == b.numpy().tobytes() for a, b in zip(zero[:3], plain, strict=True))
+    with pytest.raises(ValueError, match="dout must be"):
+        numerics.biased_attention_backward(q, k, v, bias, dout[:4], scale)
+    with pytest.raises(ValueError, match="bias must be"):
+        numerics.biased_attention_backward(q, k, v, bias[:1], dout, scale)
+
+
+def test_biased_attention_backward_is_thread_invariant():
+    q = numerics.fill_gaussian(5, 33 * 4 * 8).reshape(33, 4, 8)
+    bias = numerics.fill_gaussian(8, 4 * 33 * 33).reshape(4, 33, 33)
+    try:
+        results = set()
+        for threads in (1, 3, 8):
+            numerics.set_threads(threads)
+            grads = numerics.biased_attention_backward(q, q, q, bias, q, 0.25)
+            results.add(b"".join(g.numpy().tobytes() for g in grads))
+    finally:
+        numerics.set_threads(0)
+    assert len(results) == 1
+
+
+def deberta_autograd(directory: Path, tokens: list[int], upstream: np.ndarray, labels: int, types=None):
+    """transformers' float64 gradients of ``sum(upstream * output)`` under our names."""
+    torch = pytest.importorskip("torch")
+    from etalii_dllm.importing.importer import _deberta_name
+
+    model = transformers_model(directory, classification=bool(labels)).double()
+    extra = {} if types is None else {"token_type_ids": torch.tensor([types])}
+    output = model(torch.tensor([tokens]), **extra)
+    values = output.logits[0] if labels else output.last_hidden_state[0]
+    (values * torch.tensor(upstream, dtype=torch.float64)).sum().backward()
+    return {
+        _deberta_name(name, bool(labels)): parameter.grad.numpy()
+        for name, parameter in model.named_parameters()
+        if parameter.grad is not None
+    }
+
+
+def check_gradients(directory: Path, engine: DllmEngine, tokens: list[int], types=None) -> None:
     from etalii_dllm.training.encoder_backprop import EncoderGradients
 
-    checkpoint, _ = embedder
-    file = ModelFile(checkpoint.parent / "model.dllm")
-    with pytest.raises(AdapterError, match="DeBERTa"):
-        target_weights(file.config, LoraConfig(rank=2, alpha=4.0))
-    with pytest.raises(ValueError, match="DeBERTa"):
-        export_encoder_safetensors(file, tmp_path / "out")
-    with pytest.raises(ValueError, match="DeBERTa"):
-        export_encoder_gguf(file, tmp_path / "out.gguf")
-    with pytest.raises(ValueError, match="fine-tuning DeBERTa"):
-        EncoderGradients(file.config)
+    model = engine.model
+    weights = {name: np.asarray(values, dtype=np.float32) for name, values in model.tensors.items()}
+    config = model.config
+    gradients = EncoderGradients(config)
+    if config.classifier_labels:
+        result = gradients.classify(weights, tokens, types)
+        assert result.logits.tobytes() == model.classify(tokens, types).tobytes()
+        upstream = np.linspace(0.75, -0.5, config.classifier_labels).astype(np.float32)
+        ours = gradients.gradients(weights, result, dlogits=upstream)
+    else:
+        result = gradients.encode(weights, tokens)
+        assert result.states.tobytes() == model.hidden_states(tokens).tobytes()
+        upstream = numerics.fill_gaussian(4, len(tokens) * 32).reshape(len(tokens), 32)
+        ours = gradients.gradients(weights, result, upstream)
+    theirs = deberta_autograd(directory, tokens, upstream, config.classifier_labels, types)
+    assert set(ours) == set(theirs)
+    for name, expected in theirs.items():
+        scale = max(float(np.abs(expected).max()), 1e-3)
+        assert np.abs(ours[name] - expected).max() <= 2e-4 * scale, name
+
+
+def test_gradients_match_autograd(embedder, cross):
+    checkpoint, engine = embedder
+    tokens = long_tokens(engine)  # far buckets, clamped rows and table rows no pair reads
+    check_gradients(checkpoint, engine, tokens)
+    checkpoint, scorer = cross
+    tokens, types = scorer.classification_tokens(TEXTS[0], TEXTS[1])
+    check_gradients(checkpoint, scorer, tokens, types)
+
+
+def test_tanh_gelu_deberta_matches_transformers(tmp_path):
+    torch = pytest.importorskip("torch")
+    write_deberta_checkpoint(tmp_path / "checkpoint", labels=2, hidden_act="gelu_new", pooler_hidden_act="gelu_new")
+    import_model(tmp_path / "checkpoint", tmp_path / "tanh.dllm")
+    engine = DllmEngine.from_model_file(tmp_path / "tanh.dllm")
+    assert engine.model.config.activation == "gelu_tanh"
+    tokens = [1, 17, 40, 9, 2, 300, 5, 77, 12, 2]
+    with torch.no_grad():
+        expected = transformers_model(tmp_path / "checkpoint", classification=True)(torch.tensor([tokens])).logits[0]
+    np.testing.assert_allclose(engine.model.classify(tokens), expected.numpy(), atol=2e-5)
+    from etalii_dllm import reference
+
+    twin = reference.ReferenceEncoder.from_engine(engine)
+    assert twin.classify(tokens, None).tobytes() == engine.model.classify(tokens).tobytes()
+    check_gradients(tmp_path / "checkpoint", engine, tokens)
+
+
+def write_pairs(path: Path) -> Path:
+    rows = [
+        {"anchor": "quick fox", "positive": TEXTS[0], "negative": TEXTS[2]},
+        {"anchor": "how are you", "positive": TEXTS[1]},
+        {"anchor": "naive cafe", "positive": TEXTS[2], "negative": TEXTS[1]},
+        {"anchor": "same bits", "positive": TEXTS[3]},
+    ]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    return path
+
+
+def write_labels(path: Path) -> Path:
+    rows = [
+        {"text": "quick fox", "pair": TEXTS[0], "label": 1},
+        {"text": "quick fox", "pair": TEXTS[1], "label": 0},
+        {"text": "how are you", "pair": TEXTS[1], "label": 2},
+        {"text": "same bits", "pair": TEXTS[3], "label": 1},
+    ]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    return path
+
+
+def model_path(checkpoint: Path, engine: DllmEngine) -> Path:
+    return checkpoint.parent / ("cross.dllm" if engine.model.config.classifier_labels else "model.dllm")
+
+
+def test_finetune_runs_are_golden(embedder, cross, tmp_path):
+    from golden_values import DEBERTA_FINETUNE_FINGERPRINT
+
+    from etalii_dllm.training import AdamWConfig, FineTuner, RunConfig
+    from etalii_dllm.training.encoder_data import EncoderData, read_examples
+
+    for kind, (checkpoint, engine) in (("embedding", embedder), ("classifier", cross)):
+        data_file = write_pairs(tmp_path / "pairs.jsonl") if kind == "embedding" else write_labels(tmp_path / "l.jsonl")
+        data = EncoderData.from_records(read_examples(data_file, kind), engine, kind, MAX_SEQ_LENGTH)
+        run = RunConfig(3, 2, MAX_SEQ_LENGTH, 1, AdamWConfig(1e-3), objective=kind)
+        model_file = ModelFile(model_path(checkpoint, engine))
+        first = FineTuner.from_model_file(model_file, data, run)
+        first.train()
+        second = FineTuner.from_model_file(model_file, data, run)
+        second.train(until=1)
+        second.save_checkpoint(tmp_path / f"{kind}.dllmckpt")
+        resumed = FineTuner.load_checkpoint(tmp_path / f"{kind}.dllmckpt", data)
+        resumed.train()
+        assert resumed.losses == first.losses
+        fingerprint = first.export(tmp_path / f"{kind}.dllm")
+        assert resumed.export(tmp_path / f"{kind}-resumed.dllm") == fingerprint
+        assert fingerprint == DEBERTA_FINETUNE_FINGERPRINT[kind]
+        table = "relative_embedding.weight"
+        tuned = np.asarray(ModelFile(tmp_path / f"{kind}.dllm").tensors[table])
+        assert (tuned != np.asarray(model_file.tensors[table])).any()  # the position table trains
+
+
+def test_lora_on_deberta(embedder, cross, tmp_path, capsys):
+    import re
+
+    from etalii_dllm.cli import main as cli
+    from etalii_dllm.importing.safetensors import SafetensorsFile
+    from etalii_dllm.lora import AdapterError, peft_key, read_peft, target_modules
+
+    checkpoint, engine = embedder
+    path = model_path(checkpoint, engine)
+    config = engine.model.config
+    pairs = write_pairs(tmp_path / "pairs.jsonl")
+    common = ["finetune", str(path), "--data", str(pairs), "--steps", "2", "--batch-size", "2"]
+    common += ["--learning-rate", "1e-2", "--lora-rank", "2"]
+    assert cli([*common, "-o", str(tmp_path / "merged.dllm"), "--adapter-output", str(tmp_path / "adapter")]) == 0
+    capsys.readouterr()
+    settings = json.loads((tmp_path / "adapter" / "adapter_config.json").read_text())
+    assert settings["task_type"] == "FEATURE_EXTRACTION"
+    stored = {t.name: t.to_float32() for t in SafetensorsFile(tmp_path / "adapter" / "adapter_model.safetensors")}
+    assert stored["base_model.model.encoder.layer.0.attention.self.query_proj.lora_A.weight"].shape == (2, 32)
+    assert stored["base_model.model.encoder.layer.1.intermediate.dense.lora_B.weight"].shape == (64, 2)
+    modules = {name for name, _ in transformers_model(checkpoint).named_modules()}
+    adapted = {key.removeprefix("base_model.model.").rsplit(".lora_", 1)[0] for key in stored}
+    assert adapted <= modules
+    assert {m for m in modules if re.fullmatch(settings["target_modules"], m)} == adapted
+    merged = DllmEngine.from_model_file(tmp_path / "merged.dllm").embed("hello there").vector
+    loaded = DllmEngine.from_model_file(path, adapter=tmp_path / "adapter").embed("hello there").vector
+    assert merged.tobytes() == loaded.tobytes()
+    assert merged.tobytes() != engine.embed("hello there").vector.tobytes()
+    import_model(tmp_path / "adapter", tmp_path / "imported.dllm", base=path, licence="mit")
+    assert ModelFile(tmp_path / "imported.dllm").fingerprint == ModelFile(tmp_path / "merged.dllm").fingerprint
+    # BERT's module names are not DeBERTa's
+    from etalii_dllm.importing.safetensors import write_safetensors as write_tensors
+
+    (tmp_path / "bad").mkdir()
+    (tmp_path / "bad" / "adapter_config.json").write_text(json.dumps({"r": 2, "lora_alpha": 2}), encoding="utf-8")
+    key = "base_model.model.encoder.layer.0.attention.self.query.lora_A.weight"
+    write_tensors(tmp_path / "bad" / "adapter_model.safetensors", {key: np.zeros((2, 32), np.float32)})
+    with pytest.raises(AdapterError, match="unsupported adapter tensor"):
+        read_peft(tmp_path / "bad", config)
+    # a cross-encoder's adapter sits under deberta.; the head stays frozen
+    checkpoint, scorer = cross
+    assert peft_key("layers.1.attention.v.weight.lora_b", scorer.model.config) == (
+        "base_model.model.deberta.encoder.layer.1.attention.self.value_proj.lora_B.weight"
+    )
+    from etalii_dllm.lora import LoraConfig
+
+    assert target_modules(config, LoraConfig(2, 2.0, ("q", "k"))) == (
+        r".*encoder\.layer\.\d+\.(?:attention\.self\.query_proj|attention\.self\.key_proj)"
+    )
+    labels = write_labels(tmp_path / "labels.jsonl")
+    args = ["finetune", str(model_path(checkpoint, scorer)), "--data", str(labels), "--steps", "1"]
+    assert cli([*args, "--lora-rank", "2", "--adapter-output", str(tmp_path / "cross-adapter")]) == 0
+    capsys.readouterr()
+    assert json.loads((tmp_path / "cross-adapter" / "adapter_config.json").read_text())["task_type"] == "SEQ_CLS"
+    _, adapters = read_peft(tmp_path / "cross-adapter", scorer.model.config)
+    assert "layers.0.attention.q.weight.lora_a" in adapters
+
+
+def test_export_round_trips(embedder, cross, tmp_path):
+    from etalii_dllm.exporting import ExportError, export_gguf, export_safetensors
+
+    torch = pytest.importorskip("torch")
+    for name, (checkpoint, engine) in (("embedder", embedder), ("cross", cross)):
+        original = ModelFile(model_path(checkpoint, engine))
+        export_safetensors(original, tmp_path / name)
+        exported = json.loads((tmp_path / name / "config.json").read_text())
+        assert exported["model_type"] == "deberta-v2" and exported["position_buckets"] == 8
+        import_model(tmp_path / name, tmp_path / f"{name}.dllm", repository=f"example/{name}")
+        again = ModelFile(tmp_path / f"{name}.dllm")
+        assert again.fingerprint == original.fingerprint and again.config == original.config
+        assert (again.embedding, again.classifier) == (original.embedding, original.classifier)
+        model = transformers_model(tmp_path / name, classification=name == "cross")
+        tokens = long_tokens(engine)
+        types = [0] * 32 + [1] * 32 if name == "cross" else [0] * 64
+        with torch.no_grad():
+            output = model(input_ids=torch.tensor([tokens]), token_type_ids=torch.tensor([types]))
+        if name == "cross":
+            np.testing.assert_allclose(engine.model.classify(tokens, types), output.logits[0].numpy(), atol=2e-5)
+        else:
+            np.testing.assert_allclose(
+                engine.model.hidden_states(tokens), output.last_hidden_state[0].numpy(), atol=2e-5
+            )
+        with pytest.raises(ExportError, match="GGUF"):
+            export_gguf(original, tmp_path / f"{name}.gguf")
+    # a table reaching every distance (no buckets) is written without position_buckets
+    write_deberta_checkpoint(tmp_path / "plain", position_buckets=-1)
+    import_model(tmp_path / "plain", tmp_path / "plain.dllm")
+    export_safetensors(ModelFile(tmp_path / "plain.dllm"), tmp_path / "plain-out")
+    assert json.loads((tmp_path / "plain-out" / "config.json").read_text())["position_buckets"] == -1

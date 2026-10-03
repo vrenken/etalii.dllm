@@ -110,7 +110,12 @@ dllm export ms-marco-tuned.dllm --format gguf -o ms-marco-tuned.gguf          # 
   `global_attn_every_n_layers` (or `layer_types` when no period fits) and the classifier pooling, plus the
   sentence-transformers modules of an embedder. Before writing, the config is read back through the importer and
   must give the same model. llama.cpp's GGUF layout has no ModernBERT, so `--format gguf` refuses it.
-- **DeBERTa** encoders (Phase 60) do not export yet.
+- **DeBERTa** (Phase 61) exports to safetensors only: `DebertaV2Model` or `DebertaV2ForSequenceClassification` in
+  DeBERTa-v3's layout (relative attention with shared position projections, `pos_att_type` `p2c|c2p`, `norm_rel_ebd`
+  `layer_norm`, no absolute positions), the relative table as `encoder.rel_embeddings` and `encoder.LayerNorm`, the
+  context pooler as `pooler.dense`, the special token ids from the tokenizer, plus the sentence-transformers modules of
+  an embedder. As for the other encoders, the config is read back through the importer first and must give the same
+  model. llama.cpp's GGUF layout has no DeBERTa, so `--format gguf` refuses it.
 
 ### SentencePiece models through GGUF
 

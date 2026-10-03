@@ -561,6 +561,21 @@ def attention_backward(
     return Tensor(dq), Tensor(dk), Tensor(dv)
 
 
+def biased_attention_backward(
+    q: npt.ArrayLike | Tensor,
+    k: npt.ArrayLike | Tensor,
+    v: npt.ArrayLike | Tensor,
+    bias: npt.ArrayLike | Tensor,
+    dout: npt.ArrayLike | Tensor,
+    scale: float,
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    """``(dq, dk, dv, dbias)`` of :func:`biased_attention` with the same arguments."""
+    dq, dk, dv, dbias = _kernels.biased_attention_backward(
+        _float32(q), _float32(k), _float32(v), _float32(bias), _float32(dout), float(scale)
+    )
+    return Tensor(dq), Tensor(dk), Tensor(dv), Tensor(dbias)
+
+
 def cross_entropy(
     logits: npt.ArrayLike | Tensor, targets: npt.ArrayLike, *, scale: float = 1.0
 ) -> tuple[float, Tensor]:
