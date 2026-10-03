@@ -55,6 +55,19 @@ class NamedToolChoice(BaseModel):
     function: FunctionName
 
 
+class AllowedTools(BaseModel):
+    mode: Literal["auto", "required"] = "auto"
+    tools: list[NamedToolChoice]
+
+
+class AllowedToolsChoice(BaseModel):
+    """``{"type": "allowed_tools", "allowed_tools": {"mode": ..., "tools": [...]}}``: every tool stays in the prompt,
+    only these may be called."""
+
+    type: Literal["allowed_tools"]
+    allowed_tools: AllowedTools
+
+
 class JsonSchemaFormat(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -169,7 +182,7 @@ class ChatCompletionRequest(BaseModel):
     stream: bool | None = None
     stream_options: StreamOptions | None = None
     tools: list[ToolDefinition] | None = None
-    tool_choice: Literal["none", "auto", "required"] | NamedToolChoice | None = None
+    tool_choice: Literal["none", "auto", "required"] | NamedToolChoice | AllowedToolsChoice | None = None
     parallel_tool_calls: bool | None = None
     response_format: ResponseFormatModel | None = None
     logprobs: bool | None = None

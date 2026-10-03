@@ -72,8 +72,16 @@ def request_record(request: ChatRequest) -> dict[str, Any]:
         "max_tokens": request.max_tokens,
         "options": options.record(),
         "stop": list(request.stop),
-        "tools": [{"name": t.name, "description": t.description, "parameters": t.parameters} for t in request.tools],
-        "tool_choice": {"mode": request.tool_choice.mode, "name": request.tool_choice.name},
+        "tools": [
+            {
+                "name": t.name,
+                "description": t.description,
+                "parameters": t.parameters,
+                **({"strict": True} if t.strict else {}),
+            }
+            for t in request.tools
+        ],
+        "tool_choice": request.tool_choice.record(),
         "response_format": request.response_format.record(),
         "top_logprobs": request.top_logprobs,
         "call_id_prefix": request.call_id_prefix,
@@ -112,8 +120,10 @@ def request_from_record(record: Mapping[str, Any]) -> ChatRequest:
         max_tokens=record["max_tokens"],
         options=SamplingOptions.from_record(options),
         stop=tuple(record["stop"]),
-        tools=tuple(Tool(t["name"], t["description"], t["parameters"]) for t in record["tools"]),
-        tool_choice=ToolChoice(choice["mode"], choice["name"]),
+        tools=tuple(
+            Tool(t["name"], t["description"], t["parameters"], bool(t.get("strict", False))) for t in record["tools"]
+        ),
+        tool_choice=ToolChoice.from_record(choice),
         response_format=ResponseFormat(
             response_format["type"],
             response_format["schema"],

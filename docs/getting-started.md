@@ -917,6 +917,24 @@ R1 distills of Qwen and Llama use them) and Python-style call lists such as `[ge
 reads the format from the model's chat template, constrains each call to a known tool with valid arguments and
 returns the same OpenAI-style tool calls in every API. Details: [tools](api.md#tools).
 
+## 49. Tool call controls
+
+```bash
+curl -s localhost:5080/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "messages": [{"role": "user", "content": "Book a table for two at seven"}],
+  "tools": [{"type": "function", "function": {"name": "book", "strict": true, "parameters": {
+    "type": "object", "required": ["guests", "time"],
+    "properties": {"guests": {"type": "integer", "minimum": 1, "maximum": 8},
+                   "time": {"type": "string", "pattern": "^[0-2][0-9]:[0-5][0-9]$"}}}}}],
+  "parallel_tool_calls": false}'
+```
+
+`"strict": true` makes the call's arguments satisfy the whole schema, number bounds and patterns included, instead of
+only its shape; `parallel_tool_calls: false` (Anthropic: `disable_parallel_tool_use`) allows at most one call per
+answer; and `tool_choice: {"type": "allowed_tools", ...}` lets the model call only some of the tools while all of them
+stay in the prompt. All three work in every tool format and are recorded in receipts. Details:
+[tool call controls](api.md#tool-call-controls).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
@@ -939,7 +957,8 @@ returns the same OpenAI-style tool calls in every API. Details: [tools](api.md#t
 - Tool calling works best with models trained for it; the engine uses each model's own format (Hermes, Llama 3,
   Mistral, Granite, Qwen3-Coder XML, DeepSeek or Python calls, sections 44 and 48). Other formats (Phi-4-mini,
   Command R, DeepSeek V3.1's changed markers) fall back to the Hermes format. SmolLM2-135M does not know tools, so
-  expect clumsy calls from it; constrained decoding still guarantees that every call names a real tool with arguments that fit its schema.
+  expect clumsy calls from it; constrained decoding still guarantees that every call names a real tool with arguments that fit its schema
+  (the whole schema for `strict` tools; otherwise keywords the grammar cannot check, such as number bounds, are ignored).
 - Structured output supports the common JSON-schema keywords, including `pattern`, `format`, string lengths, number
   bounds, `multipleOf`, property counts, tuples, property names, unique choices, `allOf`, `not`, `if`/`then`/`else`,
   `patternProperties` and `contains`; `uniqueItems` and `maxContains` over open-ended items, conditions that cannot

@@ -57,6 +57,8 @@ _ANNOTATIONS = frozenset(
     {"title", "description", "default", "examples", "format", "$schema", "$id", "$comment", "strict", "deprecated",
      "readOnly", "writeOnly"}
 )  # fmt: skip
+ANNOTATIONS = _ANNOTATIONS
+"""Schema keywords that never restrict a value."""
 _STRUCTURE = frozenset(
     {"type", "properties", "required", "additionalProperties", "items", "minItems", "maxItems", "enum", "const",
      "anyOf", "oneOf", "allOf", "$ref", "$defs", "definitions", "nullable", "prefixItems", "additionalItems",
@@ -278,14 +280,18 @@ def _searched(pattern: str) -> str:
 
 @functools.lru_cache(maxsize=256)
 def string_automaton(
-    pattern: str | tuple[str, ...] | None, text_format: str | None, min_length: int, max_length: int | None
+    pattern: str | tuple[str, ...] | None,
+    text_format: str | None,
+    min_length: int,
+    max_length: int | None,
+    content: str = _CONTENT,
 ) -> Any:
-    """The byte automaton of string content written without escapes that matches ``pattern`` (JSON Schema
-    semantics; a tuple: every one of them), the format and the length bounds (in code points): the intersection of
-    their automata, trimmed so that every state can still reach a match."""
+    """The byte automaton of string content written without escapes (``content``: JSON's by default) that matches
+    ``pattern`` (JSON Schema semantics; a tuple: every one of them), the format and the length bounds (in code
+    points): the intersection of their automata, trimmed so that every state can still reach a match."""
     from etalii_dllm.regexp import Counted, compile_regex, intersect
 
-    dfa = compile_regex(_CONTENT)
+    dfa = compile_regex(content)
     try:
         for each in () if pattern is None else pattern if isinstance(pattern, tuple) else (pattern,):
             dfa = intersect(dfa, compile_regex(_searched(each)))
@@ -1222,6 +1228,20 @@ class Grammar:
         return compile_gbnf(text, tokens)
 
     @classmethod
+    def raw_string(cls, schema: Mapping[str, Any], content: str) -> Grammar:
+        """A string written as raw text, each byte allowed by the regex ``content`` (XML tool parameters: no
+        ``<``), that satisfies ``schema``'s ``pattern``, ``format`` and length bounds exactly."""
+        text_format = schema.get("format") if schema.get("format") in FORMATS else None
+        pattern = schema.get("pattern")
+        if pattern is not None and not isinstance(pattern, str):
+            raise GrammarError("'pattern' must be a string")
+        min_length, max_length = int(schema.get("minLength", 0)), schema.get("maxLength")
+        if max_length is not None and int(max_length) < min_length:
+            raise GrammarError("'maxLength' is smaller than 'minLength'")
+        maximum = None if max_length is None else int(max_length)
+        return cls([(_RE, string_automaton(pattern, text_format, min_length, maximum, content), 0)])
+
+    @classmethod
     def literal(cls, text: str) -> Grammar:
         return cls([_literal(text.encode("utf-8"))] if text else [])
 
@@ -1464,7 +1484,8 @@ class TokenConstraint:
 
     ``trigger`` makes the constraint lazy: generation is free until the generated text contains ``trigger``, then
     the rest must match the grammar; once it has matched completely generation is free again until the next
-    trigger (this is how tool calls are constrained while the model may still answer in plain text). ``lazy``
+    trigger (this is how tool calls are constrained while the model may still answer in plain text), or with
+    ``once`` the output ends there (an answer with at most one tool call). ``lazy``
     (trigger words, as llama.cpp's lazy grammars) also leaves generation free until one of the words appears (the
     earliest, ties to the first listed), but then the grammar matches from the start of that word and constrains
     the rest of the output, as without a trigger. Without either the whole output must match, and generation stops
@@ -1473,10 +1494,18 @@ class TokenConstraint:
     """
 
     def __init__(
-        self, grammar: Grammar, trie: TokenTrie, *, trigger: str | None = None, lazy: Sequence[str] = ()
+        self,
+        grammar: Grammar,
+        trie: TokenTrie,
+        *,
+        trigger: str | None = None,
+        lazy: Sequence[str] = (),
+        once: bool = False,
     ) -> None:
         if trigger is not None and lazy:
             raise ValueError("a constraint takes a trigger or lazy trigger words, not both")
+        if once and trigger is None:
+            raise ValueError("'once' needs a trigger")
         if any(not word for word in lazy):
             raise ValueError("a lazy grammar's trigger words cannot be empty")
         self._grammar = grammar
@@ -1485,6 +1514,7 @@ class TokenConstraint:
         self._triggers = (trigger.encode("utf-8"),) if trigger else tuple(word.encode("utf-8") for word in lazy)
         self._rearm = trigger is not None
         """Free again after each complete match (tool calls); else the trigger is fed to the grammar (``lazy``)."""
+        self._once = once
         for word in self._triggers if not self._rearm else ():
             if self._matcher.advance(self._matcher.start, word) == Matcher.DEAD:
                 raise GrammarError(f"the grammar cannot start with its trigger word {word.decode('utf-8')!r}")
@@ -1545,6 +1575,9 @@ class TokenConstraint:
             return
         self._state = state
         if self._rearm and self._matcher.finished(state):
+            if self._once:  # the match ends the output
+                self._rearm = False
+                return
             self._state = None
             self._pending = b""
 

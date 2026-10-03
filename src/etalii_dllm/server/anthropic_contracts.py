@@ -36,6 +36,7 @@ class ToolDefinition(BaseModel):
     description: str | None = None
     input_schema: dict[str, Any] | None = None
     type: str | None = None
+    strict: bool | None = None
 
 
 class ToolChoiceModel(BaseModel):

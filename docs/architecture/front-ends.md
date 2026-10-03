@@ -154,8 +154,11 @@ template (`DllmEngine.tool_format`): Hermes `<tool_call>{"name": ..., "arguments
 `{"name": ..., "parameters": ...}`, Mistral's `[TOOL_CALLS][...]`, Granite's `<|tool_call|>[...]`, Qwen3-Coder's
 XML parameters, DeepSeek's marker-delimited calls or a Python call list; the engine keeps that format's special
 marker tokens visible in the decoded text. The grammar guarantees that a call names an offered
-tool and that its arguments are valid under the tool's JSON schema. While tools are offered, the stream only
-releases text that is certainly part of the answer, never the beginning of a call.
+tool and that its arguments are valid under the tool's JSON schema (leniently, or in full for `strict` tools).
+`ToolChoice` also carries the allowed tools (`ToolChoice.callable` narrows the grammar and the parser, never the
+prompt) and the one-call limit: listed formats get a one-call list, and for marker formats `TokenConstraint(...,
+once=True)` ends the answer at the first call's closing marker instead of re-arming the trigger. While tools are
+offered, the stream only releases text that is certainly part of the answer, never the beginning of a call.
 
 A GBNF grammar compiles to the same automaton (`gbnf.py`): left-recursive rules are first rewritten into right
 recursion that derives the same strings, and token references (`<[id]>`, `<think>`, `!<...>`) become items that read
