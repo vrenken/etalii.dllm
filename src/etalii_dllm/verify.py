@@ -62,6 +62,8 @@ MODERN = SamplingOptions(
     dry_allowed_length=1,
 )
 """Every Phase 49 sampler at once: top-n-sigma, typical-p, XTC and DRY (``dllm verify --reference``)."""
+ADAPTIVE = SamplingOptions(temperature=0.9, seed=17, mirostat=2, mirostat_tau=3.0, dynatemp_range=0.5)
+"""Mirostat 2.0 with a dynamic temperature (``dllm verify --reference``)."""
 
 # Text that exercises normalisation, case, categories and scripts (Latin, CJK, Hangul, Greek, Cyrillic, emoji,
 # compatibility and combining characters, letters new in Unicode 15/15.1), escaped to keep the source ASCII.
@@ -208,9 +210,9 @@ class ReferenceCheck:
     """``dllm verify --reference``: the engine against the independent reference implementation (issue #162)."""
 
     results: dict[str, str]
-    """``logits``, ``greedy``, ``sampled``, ``controlled``, ``modern``, ``rolled``, ``budgeted``, ``guided``,
-    ``healed``, ``lengthened``, ``beam``, ``scored`` and, for models with fill-in-the-middle tokens, ``infilled``:
-    ``"equal"``, or where the two first differ."""
+    """``logits``, ``greedy``, ``sampled``, ``controlled``, ``modern``, ``adaptive``, ``rolled``, ``budgeted``,
+    ``guided``, ``healed``, ``lengthened``, ``beam``, ``scored`` and, for models with fill-in-the-middle tokens,
+    ``infilled``: ``"equal"``, or where the two first differ."""
 
     @property
     def equal(self) -> bool:
@@ -259,7 +261,13 @@ def check_reference(engine: Any, max_tokens: int = MAX_TOKENS) -> ReferenceCheck
     stops = sorted(engine.stop_tokens)
     token_bytes = [engine.tokenizer.decode_bytes([t]) for t in range(engine.model.vocabulary_size)]
     breakers = reference.dry_breakers(token_bytes, MODERN.dry_sequence_breakers)
-    checks = (("greedy", GREEDY), ("sampled", SAMPLED), ("controlled", CONTROLLED), ("modern", MODERN))
+    checks = (
+        ("greedy", GREEDY),
+        ("sampled", SAMPLED),
+        ("controlled", CONTROLLED),
+        ("modern", MODERN),
+        ("adaptive", ADAPTIVE),
+    )
     for name, options in checks:
         answer = engine.complete(PROMPT, max_tokens, options)
         sampler = reference.sampler(options, breakers if options.dry else ())

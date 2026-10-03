@@ -149,7 +149,7 @@ AdamW from `grad.hpp`.
 | `speculative.py` | Drafters for speculative decoding (prompt lookup, a draft model); the loop in `generation.py` keeps only drafted tokens it would have chosen. |
 | `prompt_cache.py` | KV caches of earlier requests, lent to the next prompt that shares their prefix; saves work, never changes tokens. |
 | `batching.py` | Continuous batching: concurrent generations share one `forward_batch` per step, each keeping its solo bits. |
-| `sampling.py` | Logit bias, repetition/frequency/presence penalties and DRY, then temperature, top-k, top-n-sigma, typical-p, top-p, min-p and XTC sampling with a seeded generator and ties broken on token id; choice seeds for `n`. |
+| `sampling.py` | Logit bias, repetition/frequency/presence penalties and DRY, then a fixed or dynamic temperature, top-k, top-n-sigma, typical-p, top-p, min-p and XTC sampling or Mirostat 1/2 with a seeded generator and ties broken on token id; choice seeds for `n`. |
 | `tokenization.py`, `bpe.py` | The byte tokenizer of the placeholder model, and BPE (byte-level or SentencePiece-style) driven by a `tokenizer.json` or GGUF metadata (SentencePiece vocabularies merged in SentencePiece's own score order). |
 | `verify.py` | `dllm verify`: one fingerprint of a fixed workload (kernels, Unicode, tokenizer, logits, answers) to compare machines; `--reference` compares the model's answers with `reference.py`. |
 | `reference.py` | A second, independent implementation of the [specification](../specification.md) (transcendentals, kernels, RNG, sampler, decoder) in Python and elementwise NumPy, sharing no code with the C++ kernels. |

@@ -254,6 +254,7 @@ def test_reference_generation_matches_the_engine(tmp_path):
         "sampled": "equal",
         "controlled": "equal",
         "modern": "equal",
+        "adaptive": "equal",
         "rolled": "equal",
         "budgeted": "equal",
         "guided": "equal",

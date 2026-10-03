@@ -644,8 +644,16 @@ class Sampler:
         dry_allowed_length: int = 2,
         dry_penalty_last_n: int = -1,
         dry_breakers: Sequence[int] = (),
+        mirostat: int = 0,
+        mirostat_tau: float = 5.0,
+        mirostat_eta: float = 0.1,
+        dynatemp_range: float = 0.0,
+        dynatemp_exponent: float = 1.0,
     ) -> None:
         self.temperature, self.top_k, self.top_p, self.min_p = temperature, top_k, top_p, min_p
+        self.mirostat, self.mirostat_tau, self.mirostat_eta = mirostat, mirostat_tau, mirostat_eta
+        self.dynatemp_range, self.dynatemp_exponent = dynatemp_range, dynatemp_exponent
+        self.mu = 2.0 * mirostat_tau
         self.typical_p, self.top_n_sigma = typical_p, top_n_sigma
         self.xtc_probability, self.xtc_threshold = xtc_probability, xtc_threshold
         self.dry_multiplier, self.dry_base = dry_multiplier, dry_base
@@ -731,6 +739,66 @@ class Sampler:
             result[token] = self.dry_multiplier * power
         return result
 
+    def _dynamic_temperature(self, logits: np.ndarray) -> float:
+        """``low + (high - low) * (H / log(n))^exponent``, ``H`` the entropy of ``softmax(logits)`` in token order."""
+        p = softmax(np.asarray(logits, dtype=F32)).tolist()
+        if len(p) < 2:
+            return self.temperature
+        entropy = 0.0
+        for v in p:
+            if v > 0:
+                entropy = entropy - v * float(log(v))
+        low = max(0.0, self.temperature - self.dynatemp_range)
+        high = self.temperature + self.dynatemp_range
+        return low + (high - low) * _power(entropy / float(log(float(len(p)))), self.dynatemp_exponent)
+
+    def _mirostat(self, order: list[int], probabilities: list[float]) -> int:
+        """Mirostat 1.0 keeps a Zipf-fitted ``k``, 2.0 the candidates up to the first (after the first) whose surprise
+        in bits exceeds ``mu``; one draw; then ``mu`` moves by ``eta`` times the drawn surprise's excess over tau."""
+        n = len(order)
+        if self.mirostat == 1:
+            keep = n
+            sum_tb = sum_tt = 0.0
+            for i in range(min(100, n) - 1):
+                a, b = probabilities[order[i]], probabilities[order[i + 1]]
+                if a > 0 and b > 0:
+                    t = float(log((i + 2) / (i + 1)))
+                    sum_tb = sum_tb + t * float(log(a / b))
+                    sum_tt = sum_tt + t * t
+            if sum_tt != 0:
+                s_hat = sum_tb / sum_tt
+                epsilon = s_hat - 1
+                below = 1 - _power(float(n), -epsilon) if epsilon != 0 else 0.0
+                if s_hat > 0 and below != 0:
+                    ratio = epsilon * _power(2.0, self.mu) / below
+                    if ratio > 0 and math.isfinite(ratio):
+                        k = _power(ratio, 1 / s_hat)
+                        if math.isfinite(k) and k < n:
+                            keep = max(1, int(k))
+        else:
+            keep = next(
+                (
+                    i
+                    for i in range(1, n)
+                    if probabilities[order[i]] <= 0 or -float(log(probabilities[order[i]])) / _LN2_BITS > self.mu
+                ),
+                n,
+            )
+        kept = order[:keep]
+        total = 0.0
+        for i in kept:
+            total = total + probabilities[i]
+        target = self._random.next_double() * total
+        running, chosen = 0.0, kept[-1]
+        for i in kept:
+            running = running + probabilities[i]
+            if target < running:
+                chosen = i
+                break
+        surprise = -float(log(probabilities[chosen] / total)) / _LN2_BITS
+        self.mu = self.mu - self.mirostat_eta * (surprise - self.mirostat_tau)
+        return chosen
+
     def sample(self, logits: npt.ArrayLike, allowed: Sequence[int] | None = None) -> int:
         logits = self._adjusted(logits)
         if allowed is not None:
@@ -740,9 +808,16 @@ class Sampler:
     def _choose(self, logits: np.ndarray) -> int:
         if self.temperature == 0:
             return argmax(logits)
-        scaled = np.asarray(logits, dtype=F32) / F32(self.temperature)
+        temperature = self.temperature
+        if self.dynatemp_range > 0:
+            temperature = self._dynamic_temperature(logits)
+            if F32(temperature) == 0:
+                return argmax(logits)
+        scaled = np.asarray(logits, dtype=F32) / F32(temperature)
         probabilities = softmax(scaled).tolist()
         order = sorted(range(len(probabilities)), key=lambda i: (-probabilities[i], i))
+        if self.mirostat:
+            return self._mirostat(order, probabilities)
         candidates = order[: self.top_k] if self.top_k > 0 else order
         if self.top_n_sigma > 0:
             xs = [float(x) for x in np.asarray(logits, dtype=F32) if math.isfinite(float(x))]
@@ -806,6 +881,18 @@ class Sampler:
         return candidates[-1]
 
 
+_LN2_BITS = 0.6931471805599453
+
+
+def _power(a: float, b: float) -> float:
+    """``a^b`` as ``exp(b * log(a))`` with the portable functions (1 for ``b == 0``, 0 for ``a == 0``)."""
+    if b == 0:
+        return 1.0
+    if a == 0:
+        return 0.0
+    return float(exp(b * float(log(a))))
+
+
 def sampler(options: Any, breakers: Sequence[int] = ()) -> Sampler:
     """A sampler with the settings of an engine ``SamplingOptions`` (only its values are read) and the DRY breaker
     token ids."""
@@ -832,6 +919,11 @@ def sampler(options: Any, breakers: Sequence[int] = ()) -> Sampler:
         dry_allowed_length=options.dry_allowed_length,
         dry_penalty_last_n=options.dry_penalty_last_n,
         dry_breakers=sorted(breakers),
+        mirostat=options.mirostat,
+        mirostat_tau=options.mirostat_tau,
+        mirostat_eta=options.mirostat_eta,
+        dynatemp_range=options.dynatemp_range,
+        dynatemp_exponent=options.dynatemp_exponent,
     )
 
 

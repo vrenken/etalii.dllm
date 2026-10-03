@@ -180,6 +180,13 @@ class ChatCompletionRequest(BaseModel):
     dry_allowed_length: int | None = None
     dry_penalty_last_n: int | None = None
     dry_sequence_breakers: list[str] | None = None
+    mirostat: int | None = None
+    """Extension (as in llama.cpp and Ollama): Mirostat 1 or 2 (docs/api.md#adaptive-samplers)."""
+    mirostat_tau: float | None = None
+    mirostat_eta: float | None = None
+    dynatemp_range: float | None = None
+    """Extension (as in llama.cpp): dynamic temperature between temperature - range and temperature + range."""
+    dynatemp_exponent: float | None = None
     guided_regex: str | None = None
     """Extension (as in vLLM): the same as ``response_format: {"type": "regex", "regex": ...}``."""
     grammar: str | None = None
@@ -258,6 +265,11 @@ DECODING_CONTROLS = (
     "dry_allowed_length",
     "dry_penalty_last_n",
     "dry_sequence_breakers",
+    "mirostat",
+    "mirostat_tau",
+    "mirostat_eta",
+    "dynatemp_range",
+    "dynatemp_exponent",
 )
 """Request fields added since Phase 21: left out of the payloads ids are derived from while unset, so the ids of
 requests without them did not change."""

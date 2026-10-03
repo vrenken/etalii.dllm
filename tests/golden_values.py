@@ -241,7 +241,7 @@ EVAL_FINGERPRINTS = {
 # output file's SHA-256, so it pins the bits of every kernel case, the sampler and the two small decoders. Phase 21
 # added the two sample-penalties cases (penalties, min-p and logit bias); Phase 41 the YaRN and LongRoPE long-factor
 # rope-inv-freq cases; Phase 44 the sigmoid case and the qwen2_moe decoder (a gated shared expert).
-CONFORMANCE_MANIFEST_SHA256 = "fbb389f74d760a45ea9eb16753fb99890851ff1a5636a254c4f43ed9bee5c759"
+CONFORMANCE_MANIFEST_SHA256 = "8e409440d354e738cd287ef67448aafb49fd7463fb8452d38e712088096359a1"
 
 # Phase 21: the placeholder model continuing "Deterministic decoding controls are" with every decoding control set
 # (tests/test_decoding_controls.py::CONTROLLED): penalties, min-p and logit bias.
@@ -372,3 +372,6 @@ TOOL_FORMAT_CALLS = "3832e1250a9c25d6b82fe977f428e6581430a72d297f20e19a626fafd55
 MODERN_SAMPLERS_FINGERPRINT = "7b75175cbaa5b1c62126a5d5a3f10e09e6b6d6e350b5e1da9ca0af62c894db3e"
 """Phase 49: the default model's 48-token answer with top-n-sigma, typical-p, XTC and DRY at once
 (test_modern_samplers.py)."""
+ADAPTIVE_SAMPLERS_FINGERPRINT = "50d7da182f470306a4de39256982b029269102eda52ee6bb9c0d5a5e594205d8"
+"""Phase 50: the default model's 48-token answer with Mirostat 2.0 and a dynamic temperature
+(test_adaptive_samplers.py)."""

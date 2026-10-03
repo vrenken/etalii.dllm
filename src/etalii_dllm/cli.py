@@ -368,6 +368,11 @@ def main(argv: list[str] | None = None) -> int:
             metavar="TEXT",
             help="text that ends a DRY repeat (repeatable; default newline, colon, quote and asterisk)",
         )
+        command.add_argument("--mirostat", type=int, choices=(0, 1, 2), default=0, help="Mirostat version (0: off)")
+        command.add_argument("--mirostat-tau", type=float, default=5.0, help="Mirostat's target surprise in bits")
+        command.add_argument("--mirostat-eta", type=float, default=0.1, help="Mirostat's learning rate")
+        command.add_argument("--dynatemp-range", type=float, default=0.0, help="dynamic temperature range (0: off)")
+        command.add_argument("--dynatemp-exponent", type=float, default=1.0, help="dynamic temperature exponent")
         command.add_argument("--regex", help="only produce text matching this regular expression in full")
         command.add_argument(
             "--grammar", help="only produce text this GBNF grammar derives (a file, or the grammar itself)"
@@ -830,6 +835,11 @@ def _sampling_options(args: argparse.Namespace) -> SamplingOptions:
         dry_allowed_length=args.dry_allowed_length,
         dry_penalty_last_n=args.dry_penalty_last_n,
         dry_sequence_breakers=tuple(args.dry_sequence_breaker) if args.dry_sequence_breaker else DRY_BREAKERS,
+        mirostat=args.mirostat,
+        mirostat_tau=args.mirostat_tau,
+        mirostat_eta=args.mirostat_eta,
+        dynatemp_range=args.dynatemp_range,
+        dynatemp_exponent=args.dynatemp_exponent,
     )
 
 
