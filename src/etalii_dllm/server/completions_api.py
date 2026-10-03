@@ -24,10 +24,12 @@ from etalii_dllm.sampling import SamplingOptions, sampler_fields
 from etalii_dllm.server.contracts import (
     BeamOptions,
     ContrastOptions,
+    GrammarTrigger,
     GuidanceOptions,
     WatermarkOptions,
     guided,
     id_payload,
+    lazy_triggers,
     length_controls,
 )
 
@@ -90,6 +92,9 @@ class CompletionRequest(BaseModel):
     guided_regex: str | None = None
     grammar: str | None = None
     """Extension (as in llama.cpp): a GBNF grammar the completion must follow (docs/api.md#grammars)."""
+    grammar_lazy: bool | None = None
+    """Extension (as in llama.cpp): the grammar starts at the first of ``grammar_triggers``."""
+    grammar_triggers: list[GrammarTrigger | str] | None = None
     watermark: WatermarkOptions | None = None
     guidance: GuidanceOptions | None = None
     """Extension: classifier-free guidance away from a negative prompt (docs/api.md#guided-decoding)."""
@@ -189,7 +194,10 @@ def _requests(request: CompletionRequest, engine: DllmEngine) -> list[ChatReques
     if request.guided_regex:
         response_format = ResponseFormat("regex", pattern=request.guided_regex)
     elif request.grammar is not None:
-        response_format = ResponseFormat("grammar", pattern=request.grammar)
+        triggers = lazy_triggers(request.grammar_lazy, request.grammar_triggers, grammar=True)
+        response_format = ResponseFormat("grammar", pattern=request.grammar, triggers=triggers)
+    if response_format.type != "grammar":
+        lazy_triggers(request.grammar_lazy, request.grammar_triggers, grammar=False)
     request_id = engine.derive_id(
         "cmpl-", id_payload(request.model_dump(mode="json", exclude={"stream", "stream_options", "receipt", "user"}))
     )

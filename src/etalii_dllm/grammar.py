@@ -932,10 +932,11 @@ def _array_can_finish(node: _Array, count: int, used: tuple[int, ...], found: in
 # -- automaton ----------------------------------------------------------------------------------------------------
 #
 # A stack is a persistent linked list ``(item, rest)`` with ``None`` for the empty stack; items are tuples whose first
-# element is a tag. Consuming items (literal, alternatives, whitespace, string, number) read bytes; the others
-# expand into consuming items without reading.
+# element is a tag. Consuming items (literal, alternatives, whitespace, string, number) read bytes; a token item
+# ``(_TOK, ids, negated)`` reads one whole token (one in ``ids``, or with ``negated`` one not in them, GBNF token
+# references); the others expand into consuming items without reading.
 
-_LIT, _ALT, _WS, _STR, _NUM, _VALUE, _OBJ, _ARR, _RE = range(9)
+_LIT, _ALT, _WS, _STR, _NUM, _VALUE, _OBJ, _ARR, _RE, _TOK = range(10)
 
 Stack = tuple[Any, Any] | None
 
@@ -1063,7 +1064,7 @@ def _closure(stack: Stack, out: dict[Stack, None]) -> None:
         return
     item, rest = stack
     tag = item[0]
-    if tag in (_LIT, _ALT, _STR):
+    if tag in (_LIT, _ALT, _STR, _TOK):
         out[stack] = None
     elif tag == _WS:
         out[stack] = None
@@ -1213,11 +1214,12 @@ class Grammar:
         return cls([(_RE, compile_regex(pattern), 0)])
 
     @classmethod
-    def gbnf(cls, text: str) -> Grammar:
-        """Text the GBNF grammar ``text`` derives from its ``root`` rule (:mod:`etalii_dllm.gbnf` lists the syntax)."""
+    def gbnf(cls, text: str, tokens: Any = None) -> Grammar:
+        """Text the GBNF grammar ``text`` derives from its ``root`` rule (:mod:`etalii_dllm.gbnf` lists the syntax);
+        ``tokens`` (a :class:`etalii_dllm.gbnf.TokenTable`) resolves its token references."""
         from etalii_dllm.gbnf import compile_gbnf
 
-        return compile_gbnf(text)
+        return compile_gbnf(text, tokens)
 
     @classmethod
     def literal(cls, text: str) -> Grammar:
@@ -1265,6 +1267,7 @@ class Matcher:
         self._ids: dict[tuple[Stack, ...], int] = {}
         self._transitions: dict[tuple[int, int], int] = {}
         self._accepting: dict[int, tuple[bool, bool]] = {}
+        self._token_items: dict[int, tuple[tuple[frozenset[int], bool], ...]] = {}
         closed: dict[Stack, None] = {}
         for start in starts:
             _closure(start, closed)
@@ -1294,6 +1297,45 @@ class Matcher:
         result = self._intern(tuple(closed)) if closed else self.DEAD
         self._transitions[key] = result
         return result
+
+    def token_items(self, state: int) -> tuple[tuple[frozenset[int], bool], ...]:
+        """The token references that may read the next token: ``(ids, negated)`` pairs, in stack order."""
+        found = self._token_items.get(state)
+        if found is None:
+            found = ()
+            if state != self.DEAD:
+                tops = (s[0] for s in self._states[state] if s is not None and s[0][0] == _TOK)
+                found = tuple(dict.fromkeys((top[1], top[2]) for top in tops))
+            self._token_items[state] = found
+        return found
+
+    def step_token(self, state: int, token: int) -> int:
+        """The state after a token reference reads ``token`` as a whole (``DEAD`` when none may)."""
+        if not self.token_items(state):
+            return self.DEAD
+        key = (state, -1 - token)
+        result = self._transitions.get(key)
+        if result is not None:
+            return result
+        closed: dict[Stack, None] = {}
+        for stack in self._states[state]:
+            if stack is not None and stack[0][0] == _TOK and (token in stack[0][1]) != stack[0][2]:
+                _closure(stack[1], closed)
+        result = self._intern(tuple(closed)) if closed else self.DEAD
+        self._transitions[key] = result
+        return result
+
+    def advance_token(self, state: int, token: int, data: bytes) -> int:
+        """The state after the token ``token`` with bytes ``data``: read byte by byte, or whole by a token
+        reference, whichever applies (both, merged). A token without bytes that no reference reads leaves the
+        state as it is (stop tokens)."""
+        whole = self.step_token(state, token)
+        if not data:
+            return state if whole == self.DEAD else whole
+        by_bytes = self.advance(state, data)
+        if whole == self.DEAD or by_bytes == self.DEAD:
+            return by_bytes if whole == self.DEAD else whole
+        return self._intern(tuple(dict.fromkeys((*self._states[by_bytes], *self._states[whole]))))
 
     def advance(self, state: int, data: bytes) -> int:
         for byte in data:
@@ -1348,7 +1390,8 @@ class TokenTrie:
             self._tokens[node].append(token)
 
     def allowed(self, matcher: Matcher, state: int) -> list[int]:
-        """Ids of the non-empty tokens whose bytes ``matcher`` accepts from ``state``, ascending."""
+        """Ids of the non-empty tokens whose bytes ``matcher`` accepts from ``state``, and of the tokens a token
+        reference reads there, ascending."""
         allowed: list[int] = []
         pending = [(0, state)]
         children, tokens = self._children, self._tokens
@@ -1361,6 +1404,15 @@ class TokenTrie:
                 allowed.extend(tokens[child])
                 if children[child]:
                     pending.append((child, following))
+        items = matcher.token_items(state)
+        if items:
+            whole: set[int] = set(allowed)
+            for ids, negated in items:
+                if negated:
+                    whole.update(t for t in range(self.vocabulary_size) if t not in ids)
+                else:
+                    whole.update(t for t in ids if t < self.vocabulary_size)
+            return sorted(whole)
         allowed.sort()
         return allowed
 
@@ -1390,16 +1442,31 @@ class TokenConstraint:
 
     ``trigger`` makes the constraint lazy: generation is free until the generated text contains ``trigger``, then
     the rest must match the grammar; once it has matched completely generation is free again until the next
-    trigger (this is how tool calls are constrained while the model may still answer in plain text). Without a
-    trigger the whole output must match, and generation stops as soon as the match cannot be extended.
+    trigger (this is how tool calls are constrained while the model may still answer in plain text). ``lazy``
+    (trigger words, as llama.cpp's lazy grammars) also leaves generation free until one of the words appears (the
+    earliest, ties to the first listed), but then the grammar matches from the start of that word and constrains
+    the rest of the output, as without a trigger. Without either the whole output must match, and generation stops
+    as soon as the match cannot be extended. If the token that completes a trigger already goes against the grammar
+    after it, the rest of the output stays free.
     """
 
-    def __init__(self, grammar: Grammar, trie: TokenTrie, *, trigger: str | None = None) -> None:
+    def __init__(
+        self, grammar: Grammar, trie: TokenTrie, *, trigger: str | None = None, lazy: Sequence[str] = ()
+    ) -> None:
+        if trigger is not None and lazy:
+            raise ValueError("a constraint takes a trigger or lazy trigger words, not both")
+        if any(not word for word in lazy):
+            raise ValueError("a lazy grammar's trigger words cannot be empty")
         self._grammar = grammar
         self._matcher = grammar.matcher()
         self._trie = trie
-        self._trigger = trigger.encode("utf-8") if trigger else None
-        self._state = self._matcher.start if self._trigger is None else None
+        self._triggers = (trigger.encode("utf-8"),) if trigger else tuple(word.encode("utf-8") for word in lazy)
+        self._rearm = trigger is not None
+        """Free again after each complete match (tool calls); else the trigger is fed to the grammar (``lazy``)."""
+        for word in self._triggers if not self._rearm else ():
+            if self._matcher.advance(self._matcher.start, word) == Matcher.DEAD:
+                raise GrammarError(f"the grammar cannot start with its trigger word {word.decode('utf-8')!r}")
+        self._state = self._matcher.start if not self._triggers else None
         self._pending = b""
         """Generated bytes since the last completed match, while waiting for the trigger."""
         self._masks: dict[int, list[int]] = {}
@@ -1411,6 +1478,8 @@ class TokenConstraint:
 
     def allows(self, token: int) -> bool:
         assert self._state is not None
+        if self._matcher.step_token(self._state, token) != Matcher.DEAD:
+            return True
         data = self._trie.token_bytes[token]
         return bool(data) and self._matcher.advance(self._state, data) != Matcher.DEAD
 
@@ -1419,7 +1488,7 @@ class TokenConstraint:
         return self._state is None or self._matcher.advance(self._state, data) != Matcher.DEAD
 
     def allowed(self) -> list[int]:
-        """The allowed (non-empty) tokens, ascending."""
+        """The allowed tokens (non-empty ones, and those a token reference reads), ascending."""
         assert self._state is not None
         mask = self._masks.get(self._state)
         if mask is None:
@@ -1432,44 +1501,51 @@ class TokenConstraint:
         """Whether a stop token may end the generation now."""
         if self._state is None:
             return True
-        return self._matcher.accepting(self._state) and self._trigger is None
+        return self._matcher.accepting(self._state) and not self._rearm
 
     @property
     def finished(self) -> bool:
         """The whole output has matched and cannot be extended: stop without sampling."""
-        return self._trigger is None and self._state is not None and self._matcher.finished(self._state)
+        return not self._rearm and self._state is not None and self._matcher.finished(self._state)
 
     def accept(self, token: int) -> None:
         """Records a generated token."""
-        self.accept_bytes(self._trie.token_bytes[token])
+        data = self._trie.token_bytes[token]
+        if self._state is not None:
+            self._moved(self._matcher.advance_token(self._state, token, data))
+        else:
+            self.accept_bytes(data)
+
+    def _moved(self, state: int) -> None:
+        if state == Matcher.DEAD:  # only reachable from bytes after a trigger
+            self._state = None
+            self._triggers = ()
+            return
+        self._state = state
+        if self._rearm and self._matcher.finished(state):
+            self._state = None
+            self._pending = b""
 
     def accept_bytes(self, data: bytes) -> None:
         """Records generated bytes."""
         if self._state is not None:
-            self._state = self._matcher.advance(self._state, data)
-            if self._state == Matcher.DEAD:  # only reachable in lazy mode, from bytes after the trigger
-                self._state = None
-                self._trigger = None
-                return
-            if self._trigger is not None and self._matcher.finished(self._state):
-                self._state = None
-                self._pending = b""
+            self._moved(self._matcher.advance(self._state, data))
             return
-        if self._trigger is None:
+        if not self._triggers:
             return
         self._pending += data
-        found = self._pending.find(self._trigger)
-        if found < 0:
-            self._pending = self._pending[-(len(self._trigger) - 1) :] if len(self._trigger) > 1 else b""
+        found = [(at, n) for n, word in enumerate(self._triggers) if (at := self._pending.find(word)) >= 0]
+        if not found:
+            longest = max(len(word) for word in self._triggers)
+            self._pending = self._pending[-(longest - 1) :] if longest > 1 else b""
             return
-        state = self._matcher.advance(self._matcher.start, self._pending[found + len(self._trigger) :])
+        at, which = min(found)
+        start = at if not self._rearm else at + len(self._triggers[which])
+        state = self._matcher.advance(self._matcher.start, self._pending[start:])
         self._pending = b""
-        if state == Matcher.DEAD:  # the model went its own way within the token: leave it unconstrained
-            self._trigger = None
-            return
-        self._state = state
-        if self._matcher.finished(state):
-            self._state = None
+        if not self._rearm:
+            self._triggers = ()
+        self._moved(state)
 
 
 class HealingConstraint:

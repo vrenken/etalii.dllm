@@ -115,7 +115,10 @@ def request_from_record(record: Mapping[str, Any]) -> ChatRequest:
         tools=tuple(Tool(t["name"], t["description"], t["parameters"]) for t in record["tools"]),
         tool_choice=ToolChoice(choice["mode"], choice["name"]),
         response_format=ResponseFormat(
-            response_format["type"], response_format["schema"], response_format.get("pattern")
+            response_format["type"],
+            response_format["schema"],
+            response_format.get("pattern"),
+            tuple(response_format.get("triggers", ())),
         ),
         top_logprobs=record["top_logprobs"],
         call_id_prefix=record["call_id_prefix"],

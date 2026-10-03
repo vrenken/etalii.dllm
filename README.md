@@ -208,6 +208,7 @@ module map), with Mermaid diagrams.
 | 48. Tool calling in each model's own format ✅ | ✅ The tool call format detected from the model's own chat template: Hermes, Llama 3, Mistral or Granite (#302); ✅ calls constrained in that format, special marker tokens kept visible (#303); ✅ calls read back in every API, with ids each template accepts (#304); ✅ docs, getting started and a golden value (#305). See [tools](docs/api.md#tools) |
 | 49. Exact modern samplers ✅ | ✅ DRY repetition penalty with exact runs and breakers (#307); ✅ XTC from the seeded stream (#308); ✅ locally typical and top-n-sigma sampling (#309); ✅ in every API, the CLI, receipts, the specification, the reference implementation and conformance vectors (#310). See [modern samplers](docs/api.md#modern-samplers) |
 | 50. Exact adaptive samplers ✅ | ✅ Mirostat 2.0 with an exact surprise target (#312); ✅ Mirostat 1.0 with an exact Zipf estimate (#313); ✅ entropy-based dynamic temperature (#314); ✅ in every API, the CLI, receipts, the specification, the reference implementation and conformance vectors (#315). See [adaptive samplers](docs/api.md#adaptive-samplers) |
+| 51. Exact complete GBNF grammars ✅ | ✅ Left-recursive rules rewritten exactly into the same language (#317); ✅ token references `<[id]>`, `<think>` and their negations `!<...>` (#318); ✅ lazy grammars that start at a trigger word (#319); ✅ in the OpenAI and completions APIs, the CLI, receipts, the specification, docs and golden values (#320). See [grammars](docs/api.md#grammars) |
 
 ## Working with Claude Code
 

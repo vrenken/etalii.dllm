@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import base64
 from collections.abc import Iterator
+from dataclasses import replace
 from importlib import resources
 from typing import Annotated, Any
 
@@ -70,6 +71,7 @@ from etalii_dllm.server.contracts import (
     WatermarkDetectRequest,
     guided,
     id_payload,
+    lazy_triggers,
     length_controls,
     thinking_switch,
 )
@@ -183,6 +185,9 @@ def _chat_request(request: ChatCompletionRequest, engine: DllmEngine) -> ChatReq
             raise ValueError("response_format json_schema needs a 'json_schema.schema'")
         schema = spec.json_schema if request.response_format.type == "json_schema" and spec else None
         response_format = ResponseFormat(request.response_format.type, schema)
+    triggers = lazy_triggers(request.grammar_lazy, request.grammar_triggers, response_format.type == "grammar")
+    if triggers:
+        response_format = replace(response_format, triggers=triggers)
     stop = [request.stop] if isinstance(request.stop, str) else list(request.stop or [])
     if len(stop) > 4:
         raise ValueError("at most 4 stop sequences are supported")

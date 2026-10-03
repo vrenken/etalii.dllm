@@ -73,6 +73,27 @@ class ResponseFormatModel(BaseModel):
     """Extension: the GBNF grammar of a ``grammar`` response format (docs/api.md#grammars)."""
 
 
+class GrammarTrigger(BaseModel):
+    """Extension (as in llama.cpp): a word that starts a lazy grammar (docs/api.md#grammars)."""
+
+    type: Literal["word"] = "word"
+    value: str
+
+
+def lazy_triggers(lazy: bool | None, triggers: list[GrammarTrigger | str] | None, grammar: bool) -> tuple[str, ...]:
+    """The trigger words of a lazy grammar (``grammar_lazy`` with ``grammar_triggers``), checked."""
+    if not lazy:
+        if triggers:
+            raise ValueError("grammar_triggers need grammar_lazy: true")
+        return ()
+    words = tuple(t if isinstance(t, str) else t.value for t in triggers or ())
+    if not words:
+        raise ValueError("grammar_lazy needs grammar_triggers")
+    if not grammar:
+        raise ValueError("grammar_lazy needs a grammar")
+    return words
+
+
 class WatermarkOptions(BaseModel):
     """Extension: watermark the answer (docs/watermarks.md)."""
 
@@ -191,6 +212,10 @@ class ChatCompletionRequest(BaseModel):
     """Extension (as in vLLM): the same as ``response_format: {"type": "regex", "regex": ...}``."""
     grammar: str | None = None
     """Extension (as in llama.cpp): a GBNF grammar, the same as ``response_format: {"type": "grammar", ...}``."""
+    grammar_lazy: bool | None = None
+    """Extension (as in llama.cpp): the grammar starts at the first of ``grammar_triggers`` (docs/api.md#grammars)."""
+    grammar_triggers: list[GrammarTrigger | str] | None = None
+    """Extension (as in llama.cpp): the words that start a lazy grammar."""
     truncation: Literal["auto", "disabled"] | None = None
     """Extension (as in the Responses API): ``auto`` drops the oldest messages that do not fit the context window."""
     context_overflow: Literal["stop", "roll"] | None = None
@@ -233,6 +258,8 @@ DECODING_CONTROLS = (
     "repeat_penalty",
     "guided_regex",
     "grammar",
+    "grammar_lazy",
+    "grammar_triggers",
     "truncation",
     "context_overflow",
     "truncate",

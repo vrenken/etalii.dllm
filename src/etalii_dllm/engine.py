@@ -27,6 +27,7 @@ from etalii_dllm import tools as tooling
 from etalii_dllm.chat import TOOL_CALL_OPEN, ChatMessage, ToolCall, render
 from etalii_dllm.chat_template import ChatTemplate
 from etalii_dllm.cuda import DEVICES
+from etalii_dllm.gbnf import TokenTable
 from etalii_dllm.generation import OVERFLOWS, Generation, GenerationResult, Generator, TokenLogprobs
 from etalii_dllm.grammar import Grammar, HealingConstraint, TokenConstraint, TokenTrie
 from etalii_dllm.guidance import Guide
@@ -94,11 +95,13 @@ AUDIT_EVERY_ENVIRONMENT_VARIABLE = "DLLM_AUDIT_EVERY"
 class ResponseFormat:
     """``text`` (free), ``json_object`` (any JSON object), ``json_schema`` (a value valid under ``schema``),
     ``regex`` (text matching the regular expression ``pattern`` in full) or ``grammar`` (text the GBNF grammar
-    ``pattern`` derives, :mod:`etalii_dllm.gbnf`)."""
+    ``pattern`` derives, :mod:`etalii_dllm.gbnf`). ``triggers`` makes a grammar lazy: the output is free until one
+    of the words appears, and from its start on it must follow the grammar (docs/api.md#grammars)."""
 
     type: str = "text"
     schema: Mapping[str, Any] | None = None
     pattern: str | None = None
+    triggers: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.type not in ("text", "json_object", "json_schema", "regex", "grammar"):
@@ -109,8 +112,14 @@ class ResponseFormat:
             if self.pattern is None:
                 raise ValueError(f"a {self.type} response format needs a pattern")
             raise ValueError("only regex and grammar response formats take a pattern")
+        if self.triggers and self.type != "grammar":
+            raise ValueError("only a grammar can be lazy (trigger words)")
+        if any(not word for word in self.triggers):
+            raise ValueError("a lazy grammar's trigger words cannot be empty")
 
-    def grammar(self) -> Grammar | None:
+    def grammar(self, tokens: TokenTable | None = None) -> Grammar | None:
+        """The grammar of the format (``None`` for free text); ``tokens`` resolves a GBNF grammar's token
+        references."""
         if self.type == "json_object":
             return Grammar.json_object()
         if self.type == "json_schema":
@@ -121,7 +130,7 @@ class ResponseFormat:
             return Grammar.regex(self.pattern)
         if self.type == "grammar":
             assert self.pattern is not None
-            return Grammar.gbnf(self.pattern)
+            return Grammar.gbnf(self.pattern, tokens)
         return None
 
     def record(self) -> dict[str, Any]:
@@ -129,6 +138,8 @@ class ResponseFormat:
         record: dict[str, Any] = {"type": self.type, "schema": self.schema}
         if self.pattern is not None:
             record["pattern"] = self.pattern
+        if self.triggers:
+            record["triggers"] = list(self.triggers)
         return record
 
 
@@ -339,6 +350,7 @@ class DllmEngine:
         self.system_fingerprint = system_fingerprint
         """Identifies the exact weights and engine; equal fingerprints plus equal requests give equal output."""
         self._trie: TokenTrie | None = None
+        self._table: TokenTable | None = None
         self._tool_format = tooling.HERMES
         self.chat_template = chat_template
         cache_dir = str(prompt_cache_dir) if prompt_cache_dir else None
@@ -373,6 +385,7 @@ class DllmEngine:
             tokenizer = showing([fmt.open])
         self.tokenizer = tokenizer
         self._trie = None
+        self._table = None
         generator = getattr(self, "_generator", None)
         if generator is not None:
             generator.tokenizer = tokenizer
@@ -532,6 +545,7 @@ class DllmEngine:
         *,
         regex: str | None = None,
         grammar: str | None = None,
+        grammar_triggers: Sequence[str] = (),
         overflow: str = "stop",
         token_healing: bool = False,
         suffix: str | None = None,
@@ -542,18 +556,22 @@ class DllmEngine:
         include_stop: bool = False,
     ) -> Generation:
         """Continues ``prompt``; ``regex`` restricts the continuation to text matching it in full, ``grammar`` to
-        text the GBNF grammar derives, ``overflow`` says what happens at a full context window
-        (docs/api.md#long-conversations), ``token_healing`` heals the prompt's last token (:meth:`heal`) and
-        ``suffix`` makes the output the middle between ``prompt`` and it (:meth:`infill`); ``stop`` ends it at
-        any of the strings (kept in the text with ``include_stop``); ``min_tokens``, ``ignore_eos`` and
-        ``stop_token_ids`` are the length controls (docs/api.md#length-and-stop-controls)."""
+        text the GBNF grammar derives (from the first of ``grammar_triggers`` on, if given), ``overflow`` says what
+        happens at a full context window (docs/api.md#long-conversations), ``token_healing`` heals the prompt's
+        last token (:meth:`heal`) and ``suffix`` makes the output the middle between ``prompt`` and it
+        (:meth:`infill`); ``stop`` ends it at any of the strings (kept in the text with ``include_stop``);
+        ``min_tokens``, ``ignore_eos`` and ``stop_token_ids`` are the length controls
+        (docs/api.md#length-and-stop-controls)."""
         if regex is not None and grammar is not None:
             raise ValueError("a regex and a grammar cannot be combined")
         constraint = None
         if regex is not None:
             constraint = TokenConstraint(Grammar.regex(regex), self._token_trie())
         elif grammar is not None:
-            constraint = TokenConstraint(Grammar.gbnf(grammar), self._token_trie())
+            gbnf = Grammar.gbnf(grammar, self._token_table())
+            constraint = TokenConstraint(gbnf, self._token_trie(), lazy=grammar_triggers)
+        elif grammar_triggers:
+            raise ValueError("trigger words need a grammar")
         guide = self.guide(options, raw=True)
         context, ends = self.infill(prompt, suffix, options, token_healing)
         context, constraint, healed = self.heal(prompt, constraint) if token_healing else (context, constraint, 0)
@@ -681,10 +699,21 @@ class DllmEngine:
             self._trie = TokenTrie([self.tokenizer.decode_bytes([token]) for token in range(size)])
         return self._trie
 
+    def _token_table(self) -> TokenTable:
+        """The vocabulary GBNF token references resolve against (``<think>`` by the token's text)."""
+        if self._table is None:
+            lookup = getattr(self.tokenizer, "token_to_id", None) or (lambda text: None)
+            self._table = TokenTable(self.model.vocabulary_size, lookup, self.stop_tokens)
+        return self._table
+
     def _constraint(self, request: ChatRequest, tools: Sequence[Tool]) -> TokenConstraint | None:
-        answer = request.response_format.grammar()
+        answer = request.response_format.grammar(self._token_table())
         choice = request.tool_choice
         fmt = self.tool_format
+        if request.response_format.triggers:
+            if tools and choice.mode != "none":
+                raise ValueError("a lazy grammar cannot be combined with tools")
+            return TokenConstraint(answer, self._token_trie(), lazy=request.response_format.triggers)
         if tools and choice.mode in ("required", "named"):
             return TokenConstraint(tooling.forced_grammar(tools, choice, fmt), self._token_trie())
         if tools and answer is not None:
