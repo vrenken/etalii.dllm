@@ -115,7 +115,10 @@ uses the first, API `logprobs` the second.
 `causal`, query `t` is at position `q_offset + t` (default `kv_len - q_len`) and sees keys `0 ..= q_offset + t`. A
 non-zero `window` (sliding-window attention, Mistral) keeps only the last `window` of those keys,
 `q_offset + t - window + 1 ..= q_offset + t`; the sums below then run over that range, from its first key on, which is
-exactly plain attention over those keys.
+exactly plain attention over those keys. Without `causal`, a `window` keeps the keys closer than `window` on either
+side (local attention, ModernBERT): `max(q_offset + t - window + 1, 0) ..= min(q_offset + t + window - 1, kv_len - 1)`.
+ModernBERT's `local_attention` of `L` sees keys at most `L / 2` away, so its window is `L / 2 + 1`. The CUDA kernel,
+`attention_backward` and the interpretability kernels (`attention_weights`) use the same range.
 
 For each (query, head), independently:
 

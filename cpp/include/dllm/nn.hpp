@@ -732,11 +732,17 @@ struct AttentionSpan {
 
 inline AttentionSpan attention_span(std::size_t t, std::size_t kv_len, bool causal, std::size_t q_offset,
                                     std::size_t window) {
-    std::size_t end = kv_len;
-    if (causal) {
-        const std::size_t last = q_offset + t + 1;
-        end = last < kv_len ? last : kv_len;
+    const std::size_t position = q_offset + t;
+    if (!causal) {
+        // Bidirectional local attention: the keys closer than `window` to the query's position on either side.
+        if (window == 0) {
+            return {0, kv_len};
+        }
+        const std::size_t first = position + 1 > window ? position + 1 - window : 0;
+        const std::size_t last = position + window < kv_len ? position + window : kv_len;
+        return {first, last > first ? last - first : 0};
     }
+    const std::size_t end = position + 1 < kv_len ? position + 1 : kv_len;
     const std::size_t first = window != 0 && end > window ? end - window : 0;
     return {first, end - first};
 }
@@ -746,7 +752,9 @@ inline AttentionSpan attention_span(std::size_t t, std::size_t kv_len, bool caus
 //   out [q_len, q_heads, value_dim]
 // Query head h reads key/value head h / (q_heads / kv_heads). With causal masking, query t sits at absolute
 // position q_offset + t and sees keys 0 .. q_offset + t; a non-zero window (sliding-window attention) limits that
-// to the last `window` of them, q_offset + t - window + 1 .. q_offset + t. Each (query, head) row is computed on its own:
+// to the last `window` of them, q_offset + t - window + 1 .. q_offset + t. Without causal masking every key is seen,
+// or with a non-zero window (bidirectional local attention, ModernBERT) the keys closer than `window` to position
+// q_offset + t on either side, q_offset + t - window + 1 .. q_offset + t + window - 1. Each (query, head) row is computed on its own:
 // scores in double (dot over head_dim ascending, times scale, then soft-capped when softcap > 0), softmax with the maximum subtracted and the sum
 // over keys ascending, then the value sum over keys ascending. A row's bits therefore do not depend on q_len,
 // so a prefill and token-by-token decoding against a KV cache give identical outputs.

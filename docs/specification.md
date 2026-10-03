@@ -165,8 +165,11 @@ multiple of 32 are quantised. The embedding stays float32, and the LM head is qu
 
 - Shapes: `q[t, qh, d]`, `k[j, kvh, d]`, `v[j, kvh, dv]`. Query head `h` reads key/value head `h / (qh / kvh)`.
 - Query `t` sits at position `q_offset + t` and sees keys `first … end - 1`:
-  - `end = min(q_offset + t + 1, kv_len)` (or `kv_len` when not causal);
-  - `first = end - window` when a window is set and `end > window`, else 0.
+  - causal: `end = min(q_offset + t + 1, kv_len)`, and `first = end - window` when a window is set and
+    `end > window`, else 0;
+  - not causal: every key (`first = 0`, `end = kv_len`), or with a window (bidirectional local attention) the keys
+    closer than `window` to the query on either side: `first = max(q_offset + t + 1 - window, 0)` and
+    `end = min(q_offset + t + window, kv_len)`.
 - For each query and head:
   1. `s_j = (sum_i q_i * k_ji) * scale`, the sum over `i` ascending. With a soft-cap, `s_j = cap * tanh(s_j / cap)`.
   2. `m = max_j s_j`, `p_j = exp(s_j - m)` and `Z = sum_j p_j`, over `j` ascending.
@@ -467,8 +470,8 @@ Not covered here, but just as fixed:
 
 ## 6. The encoder
 
-A model of family `bert` is an encoder: it turns all its tokens into hidden states at once, for embeddings, and does
-not generate. All in float32 unless stated:
+A model of family `bert` or `modernbert` is an encoder: it turns all its tokens into hidden states at once, for
+embeddings, and does not generate. A `bert` encoder, all in float32 unless stated:
 
 1. `x = (word[t] + type[s]) + position[p]` for the token `t` of type `s` with position id `p` (two float32 additions
    in that order; every token of an embedding is of type 0, and the second text of a pair is of type 1), then
@@ -483,6 +486,23 @@ not generate. All in float32 unless stated:
       (or `gelu_tanh` for checkpoints trained with the tanh form). The MLP has no gate.
 3. The states `x` of the last layer are the output. `layer_norm` uses the model's `rms_norm_eps` (BERT's
    `layer_norm_eps`).
+
+A `modernbert` encoder has no biases, no position or type embeddings and LayerNorms without a bias (`layer_norm`
+with a zero bias, which adds nothing):
+
+1. `h = layer_norm(word[t], embedding_norm)`.
+2. For each layer `l`:
+   1. `x = layer_norm(h, attention_norm)`, or `x = h` on the first layer.
+   2. `q, k, v = linear(x, W)`; `q` and `k` are rotated at positions `0, 1, …` with the inverse frequencies of
+      `rope_theta` on a global layer and of `local_rope_theta` on a local one (the layers in
+      `sliding_window_layers`).
+   3. `a = attention(q, k, v)` with `scale = 1 / sqrt(head_dim)`, not causal: every key on a global layer, the keys
+      closer than `sliding_window` on a local one (the window above; transformers' `local_attention` is
+      `2 * (sliding_window - 1)`).
+   4. `h = h + linear(a, Wo)`.
+   5. `x = layer_norm(h, mlp_norm)`, then `h = h + linear(f32(gelu(linear(x, Wgate)) * linear(x, Wup)), Wdown)`:
+      the gated MLP with the exact GELU (`gelu_tanh` for the tanh form), the product a float32 multiplication.
+3. The output is `layer_norm(h, final_norm)`.
 
 **Embedding.** The text gets the model's prompt for the request's `input_type` (if any) and is encoded with the
 tokenizer; for an encoder its tokens are cut to `max_tokens - s`, where `s` is the number of special tokens the
@@ -501,7 +521,10 @@ longer, the shorter keeps `n1` and the longer gets `max(n1, b - n1)` (all of it 
 exceed `b`, they get `b // 2` and `b // 2 + b % 2`, the extra token to the longer one. Both are cut at the end, and
 the template adds `[CLS] A [SEP] B [SEP]` with token types 0 for `[CLS] A [SEP]` and 1 for `B [SEP]` (RoBERTa's
 `<s> A </s></s> B </s>` gives every token type 0). RoBERTa's classification head (`dense`, tanh, `out_proj`) is the
-same computation, stored as the pooler and the classifier. A reranking
+same computation, stored as the pooler and the classifier. ModernBERT's head reads the first state
+(`classifier_pooling` `cls`) or the mean of every state (`mean`, computed as for an embedding), then
+`logits = linear(layer_norm(gelu(linear(pooled, Wpool)), pooler_norm), Wcls, bcls)`; its pair template is
+`[CLS] A [SEP] B [SEP]` with every token of type 0. A reranking
 score is the single logit, or `sigmoid(logit)` in double when the model was saved with that activation.
 
 ## Checking an implementation

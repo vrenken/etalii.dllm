@@ -23,11 +23,13 @@ from etalii_dllm.modelfile import ModelFile
 
 EXTRA = ["Hello world  x\né🙂", "  two leading", "trailing  ", "aaaaaa bbbb", "ababab abab", "東京", "\t\r\n", "x"]
 # A larger corpus that every test environment has (wheel tests run without the docs): the package's own sources.
+# Lines that spell out a control token (`<s>`) are left out: the tokenizer reads those as the special token, as
+# llama.cpp does, where the sentencepiece library spells them out piece by piece.
 SOURCES = [
     line
     for path in sorted(Path(etalii_dllm.__file__).parent.glob("*.py"))
     for line in path.read_text(encoding="utf-8").splitlines()
-    if line.strip()
+    if line.strip() and not any(control in line for control in ("<s>", "</s>", "<unk>"))
 ]
 
 

@@ -25,6 +25,9 @@ from typing import Any
 # type embeddings, LayerNorms with biases after the embeddings, attention and the MLP, bidirectional attention and
 # a plain (ungated) GELU MLP, all with biases (:mod:`etalii_dllm.encoder`); it embeds text and does not generate.
 # RoBERTa and XLM-RoBERTa are "bert" with a ``padding_index``: their positions count from past the padding token.
+# "modernbert" is the other encoder: rotary positions with a global and a local base, pre-norm layers with bias-free
+# LayerNorms, no biases, bidirectional attention that alternates between global and local (windowed) layers and a
+# gated GELU MLP, then a final norm.
 FAMILIES = (
     "bert",
     "gemma2",
@@ -34,6 +37,7 @@ FAMILIES = (
     "llama",
     "mistral",
     "mixtral",
+    "modernbert",
     "olmo2",
     "olmoe",
     "phi3",
@@ -45,6 +49,8 @@ FAMILIES = (
 NORM_PLACEMENTS = ("pre", "post", "sandwich")
 ACTIVATIONS = ("silu", "gelu_tanh", "gelu")
 QK_NORM_SCOPES = ("head", "all")
+ENCODER_FAMILIES = ("bert", "modernbert")
+CLASSIFIER_POOLINGS = ("cls", "mean")
 ENCODER_ONLY = "an encoder model embeds text and cannot generate; use it with dllm embed, /v1/embeddings or dllm index"
 
 
@@ -88,7 +94,9 @@ class TransformerConfig:
     logits_scaling: float = 1.0
     """Granite: the logits are divided by this."""
     sliding_window: int | None = None
-    """Sliding-window attention (Mistral): each query sees only the last ``sliding_window`` keys, itself included."""
+    """Sliding-window attention (Mistral): each query sees only the last ``sliding_window`` keys, itself included.
+    In an encoder (ModernBERT's local layers) each position sees the keys closer than ``sliding_window`` on either
+    side."""
     sliding_window_layers: tuple[int, ...] | None = None
     """The layers that use the sliding window; ``None`` means all of them."""
     local_rope_theta: float | None = None
@@ -125,6 +133,9 @@ class TransformerConfig:
     """RoBERTa and XLM-RoBERTa: the padding token's id, which their position ids count from (the first ordinary
     token sits at ``padding_index + 1``, a padding token at ``padding_index``; :meth:`position_ids`); ``None`` for
     BERT's positions 0, 1, ... The position table then has ``context_length + padding_index + 1`` rows."""
+    classifier_pooling: str | None = None
+    """ModernBERT sequence classification: the state the head reads, ``"cls"`` (the first position) or ``"mean"``
+    (the mean over every position); ``None`` for BERT, whose head always reads ``[CLS]``."""
 
     def __post_init__(self) -> None:
         if self.family not in FAMILIES:
@@ -139,10 +150,18 @@ class TransformerConfig:
         if self.activation not in ACTIVATIONS:
             raise ValueError(f"unsupported activation {self.activation!r}")
         if self.is_encoder:
-            if self.type_vocabulary_size < 1 or self.activation not in ("gelu", "gelu_tanh"):
-                raise ValueError("bert needs token types and a gelu or gelu_tanh MLP")
+            if self.activation not in ("gelu", "gelu_tanh"):
+                raise ValueError(f"{self.family} needs a gelu or gelu_tanh MLP")
+            if self.family == "bert" and self.type_vocabulary_size < 1:
+                raise ValueError("bert needs token types")
+            if self.family == "modernbert" and (self.type_vocabulary_size or self.padding_index is not None):
+                raise ValueError("modernbert has neither token types nor padding positions")
             if self.kv_heads != self.heads or self.experts:
-                raise ValueError("bert has neither grouped-query attention nor experts")
+                raise ValueError(f"{self.family} has neither grouped-query attention nor experts")
+            if self.classifier_pooling is not None and (
+                self.family != "modernbert" or self.classifier_pooling not in CLASSIFIER_POOLINGS
+            ):
+                raise ValueError("classifier_pooling is cls or mean, for modernbert only")
             if self.classifier_labels < 0:
                 raise ValueError("classifier_labels must not be negative")
             if self.padding_index is not None and self.padding_index < 0:
@@ -152,8 +171,12 @@ class TransformerConfig:
             or self.type_vocabulary_size
             or self.classifier_labels
             or self.padding_index is not None
+            or self.classifier_pooling is not None
         ):
-            raise ValueError("the plain gelu MLP, token types, classifiers and padding positions are for bert only")
+            raise ValueError(
+                "the plain gelu MLP, token types, classifiers and padding positions are for bert (and modernbert) "
+                "encoders only"
+            )
         if self.qk_norm_scope not in QK_NORM_SCOPES:
             raise ValueError(f"unsupported qk_norm_scope {self.qk_norm_scope!r}")
         if self.norm_placement not in NORM_PLACEMENTS:
@@ -203,13 +226,13 @@ class TransformerConfig:
 
     @property
     def is_encoder(self) -> bool:
-        """Whether the model is a BERT-style encoder (it embeds text and does not generate)."""
-        return self.family == "bert"
+        """Whether the model is an encoder, BERT or ModernBERT (it embeds text and does not generate)."""
+        return self.family in ENCODER_FAMILIES
 
     def position_ids(self, tokens: Sequence[int]) -> list[int]:
-        """An encoder's position ids for ``tokens``: 0, 1, ... for BERT; for RoBERTa (``padding_index``) the running
-        count of non-padding tokens past ``padding_index``, and ``padding_index`` itself for a padding token, as
-        transformers' ``create_position_ids_from_input_ids`` computes them."""
+        """An encoder's position ids for ``tokens``: 0, 1, ... for BERT and ModernBERT; for RoBERTa
+        (``padding_index``) the running count of non-padding tokens past ``padding_index``, and ``padding_index``
+        itself for a padding token, as transformers' ``create_position_ids_from_input_ids`` computes them."""
         if self.padding_index is None:
             return list(range(len(tokens)))
         out: list[int] = []
@@ -287,6 +310,7 @@ class TransformerConfig:
             "dense_layers",
             "shared_expert_intermediate_size",
             "padding_index",
+            "classifier_pooling",
         )
         for name in (*optional, "attention_softcap", "logits_softcap"):  # likewise
             if values[name] is None:
@@ -374,6 +398,8 @@ class TransformerConfig:
         return shapes
 
     def _encoder_shapes(self) -> dict[str, tuple[int, ...]]:
+        if self.family == "modernbert":
+            return self._modernbert_shapes()
         hidden = self.hidden_size
         shapes: dict[str, tuple[int, ...]] = {
             "token_embedding.weight": (self.vocabulary_size, hidden),
@@ -404,6 +430,31 @@ class TransformerConfig:
         if self.classifier_labels:
             shapes["pooler.weight"] = (hidden, hidden)
             shapes["pooler.bias"] = (hidden,)
+            shapes["classifier.weight"] = (self.classifier_labels, hidden)
+            shapes["classifier.bias"] = (self.classifier_labels,)
+        return shapes
+
+    def _modernbert_shapes(self) -> dict[str, tuple[int, ...]]:
+        hidden, q, size = self.hidden_size, self.heads * self.head_dim, self.intermediate_size
+        shapes: dict[str, tuple[int, ...]] = {
+            "token_embedding.weight": (self.vocabulary_size, hidden),
+            "embedding_norm.weight": (hidden,),
+        }
+        for i in range(self.layers):
+            p = f"layers.{i}."
+            if i:  # the first layer reads the normalised embeddings directly
+                shapes[p + "attention_norm.weight"] = (hidden,)
+            for name in ("q", "k", "v"):
+                shapes[p + f"attention.{name}.weight"] = (q, hidden)
+            shapes[p + "attention.o.weight"] = (hidden, q)
+            shapes[p + "mlp_norm.weight"] = (hidden,)
+            shapes[p + "mlp.gate.weight"] = (size, hidden)
+            shapes[p + "mlp.up.weight"] = (size, hidden)
+            shapes[p + "mlp.down.weight"] = (hidden, size)
+        shapes["final_norm.weight"] = (hidden,)
+        if self.classifier_labels:
+            shapes["pooler.weight"] = (hidden, hidden)
+            shapes["pooler_norm.weight"] = (hidden,)
             shapes["classifier.weight"] = (self.classifier_labels, hidden)
             shapes["classifier.bias"] = (self.classifier_labels,)
         return shapes

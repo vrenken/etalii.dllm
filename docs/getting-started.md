@@ -1004,6 +1004,24 @@ the same bits on every run. `dllm export` writes the result back as a directory 
 sentence-transformers load, or (for BERT models) as a GGUF file for llama.cpp; importing either again gives the same
 model. Details: [fine-tuning encoders](training.md#encoders) and [exporting encoders](model-building.md#encoders).
 
+## 55. ModernBERT encoders
+
+```bash
+dllm import hf:Alibaba-NLP/gte-modernbert-base -o gte-modernbert.dllm
+dllm --model gte-modernbert.dllm embed "What is the capital of France?" --json
+dllm import hf:Alibaba-NLP/gte-reranker-modernbert-base -o gte-reranker.dllm
+dllm --model gte-reranker.dllm rerank "How many people live in Berlin?" "Berlin has 3.5 million people." "Berlin has museums."
+dllm finetune gte-modernbert.dllm --data pairs.jsonl -o gte-tuned.dllm --steps 100 --lora-rank 8
+dllm export gte-tuned.dllm --format safetensors -o gte-tuned/
+```
+
+ModernBERT, the newer encoder behind many current embedders and rerankers, now imports: embedders such as
+gte-modernbert-base and modernbert-embed-base and cross-encoders such as gte-reranker-modernbert-base. Its local
+layers look only at nearby tokens on both sides, which the attention kernel now does exactly on the CPU and the GPU.
+Everything of sections 51 to 54 works on it: `dllm embed`, indexes, hybrid search, reranking, fine-tuning, LoRA
+adapters in the PEFT format and export to safetensors, with the same bits on every machine. Details:
+[ModernBERT encoders](retrieval.md#modernbert-encoders).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
@@ -1040,8 +1058,10 @@ model. Details: [fine-tuning encoders](training.md#encoders) and [exporting enco
 - MCP servers' URL-mode elicitations (open a web page) are declined and nobody is asked interactively (the model
   answers forms), and image, audio or binary MCP content is refused.
 - Models with dynamic NTK RoPE scaling or other architectures (including DeepSeek's mixtures of experts with several
-  shared experts and multi-head latent attention, and encoders other than BERT, RoBERTa and XLM-RoBERTa, such as
-  ModernBERT or DeBERTa) are refused at import. Encoders (sections 51 to 54) run on the CPU. RoBERTa and XLM-RoBERTa
+  shared experts and multi-head latent attention, and encoders other than BERT, RoBERTa, XLM-RoBERTa and ModernBERT,
+  such as DeBERTa) are refused at import. Encoders (sections 51 to 55) run on the CPU. ModernBERT (section 55) is
+  checked against `transformers` only on tiny synthetic models, exports to safetensors but not to GGUF (llama.cpp
+  has no ModernBERT layout), and its fine-tuning does not freeze the padding row. RoBERTa and XLM-RoBERTa
   encoders and BERT models with the tanh GELU export to safetensors but not to GGUF (llama.cpp's layout cuts their
   position rows), and GGUF files of RoBERTa or XLM-RoBERTa written by llama.cpp do not import. Unigram tokenizers
   come from `tokenizer.json`; GGUF files with a Unigram vocabulary (T5) are refused.

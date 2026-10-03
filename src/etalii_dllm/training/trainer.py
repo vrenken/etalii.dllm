@@ -54,6 +54,7 @@ from etalii_dllm.lora import (
     adapter_shapes,
     init_adapters,
     merged_weights,
+    shared_a,
     write_peft,
 )
 from etalii_dllm.modelfile import (
@@ -405,11 +406,14 @@ class FineTuner:
         assert self.lora is not None
         result: dict[str, FloatArray] = {}
         for name in self.params:
-            if name.endswith(".lora_a"):
-                weight = name[: -len(".lora_a")]
-                a, b = self.params[name], self.params[weight + ".lora_b"]
-                result[name], result[weight + ".lora_b"] = adapter_gradients(gradients[weight], a, b, self.lora.scale)
-        return result
+            if name.endswith(".lora_b"):
+                weight = name[: -len(".lora_b")]
+                a_name = shared_a(self.config, weight)
+                a, b = self.params[a_name], self.params[name]
+                da, result[name] = adapter_gradients(gradients[weight], a, b, self.lora.scale)
+                # a fused ModernBERT module's parts share one A: its gradient is their sum, in tensor order
+                result[a_name] = da if a_name not in result else result[a_name] + da
+        return {name: result[name] for name in self.params}
 
     def train(
         self, *, until: int | None = None, on_step: Callable[[StepResult], None] | None = None

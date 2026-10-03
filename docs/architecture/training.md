@@ -131,7 +131,7 @@ language-model runs omit them and keep their old bytes.
 
 ## Encoders
 
-`RunConfig.objective = "embedding"` or `"classifier"` trains a BERT, RoBERTa or XLM-RoBERTa encoder on
+`RunConfig.objective = "embedding"` or `"classifier"` trains a BERT, RoBERTa, XLM-RoBERTa or ModernBERT encoder on
 `EncoderData` (`training/encoder_data.py`): anchor/positive(/negative) texts, or labelled texts and pairs, tokenized
 with the model's own recipe. `EncoderGradients` (`training/encoder_backprop.py`) runs the encoder's forward pass
 kernel for kernel and its backward pass with `layer_norm_backward`, `gelu_backward` and the bidirectional
