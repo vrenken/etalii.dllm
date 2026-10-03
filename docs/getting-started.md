@@ -973,13 +973,28 @@ The pair is tokenized and truncated exactly as `tokenizers` does it, so the scor
 the same bits on every machine (`dllm verify --reference` checks them). Details:
 [cross-encoder rerankers](retrieval.md#cross-encoder-rerankers).
 
+## 53. Multilingual and RoBERTa encoders
+
+```bash
+dllm import hf:sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2 -o multilingual.dllm
+dllm --model multilingual.dllm embed "Wie viele Menschen leben in Berlin?"
+dllm import hf:cross-encoder/mmarco-mMiniLMv2-L12-H384-v1 -o mmarco.dllm
+dllm --model mmarco.dllm rerank "Wie viele Menschen leben in Berlin?" "Berlin hat 3,5 Millionen Einwohner." "Berlin hat Museen."
+```
+
+Multilingual embedders and rerankers now import: models with XLM-RoBERTa's Unigram tokenizer, tokenized exactly as
+`tokenizers` does it (SentencePiece's normaliser included), and RoBERTa and XLM-RoBERTa encoders such as
+all-distilroberta-v1. They embed and rerank like the BERT models of sections 51 and 52, with the same bits on every
+machine. Details: [RoBERTa and multilingual encoders](retrieval.md#roberta-and-multilingual-encoders).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
   Qwen2.5-0.5B-Instruct, Qwen2.5-1.5B-Instruct, Qwen3-0.6B, TinyLlama-1.1B-Chat, OLMo-2-1B-Instruct,
   Llama-3.2-1B-Instruct and gemma-3-270m-it (tokenizer, chat template, logits within 1e-3 and the
   same greedy answer; see `tests/test_reference_models.py`), and so are the embedding models Qwen3-Embedding-0.6B,
-  all-MiniLM-L6-v2 and bge-small-en-v1.5 and the cross-encoder ms-marco-MiniLM-L6-v2. Other Llama/Qwen2/Qwen3 models should work but are not
+  all-MiniLM-L6-v2, bge-small-en-v1.5, all-distilroberta-v1 and paraphrase-multilingual-MiniLM-L12-v2 and the
+  cross-encoders ms-marco-MiniLM-L6-v2 and mmarco-mMiniLMv2-L12-H384-v1. Other Llama/Qwen2/Qwen3 models should work but are not
   checked. Mistral, Granite, Phi-3 and Gemma 2 are checked against `transformers` only on tiny synthetic models (their real
   checkpoints are gated or too large for a CI runner in float32). Fine-tuning is checked on tiny synthetic models
   of every family, not on the real checkpoints. Phi-3/Phi-4-mini with LongRoPE run up to their original context
@@ -1007,10 +1022,11 @@ the same bits on every machine (`dllm verify --reference` checks them). Details:
   that can match nothing ([grammars](api.md#grammars)). No images or audio.
 - MCP servers' URL-mode elicitations (open a web page) are declined and nobody is asked interactively (the model
   answers forms), and image, audio or binary MCP content is refused.
-- Models with Unigram tokenizers, dynamic NTK RoPE scaling or other architectures (including DeepSeek's mixtures
-  of experts with several shared experts and multi-head latent attention, and encoders other than BERT, such as
-  RoBERTa or XLM-R) are refused at import. BERT encoders (section 51) embed only, run on the CPU and cannot be
-  fine-tuned, adapted with LoRA or exported yet; cross-encoder rerankers (sentence pairs) are not supported.
+- Models with dynamic NTK RoPE scaling or other architectures (including DeepSeek's mixtures of experts with several
+  shared experts and multi-head latent attention, and encoders other than BERT, RoBERTa and XLM-RoBERTa, such as
+  ModernBERT or DeBERTa) are refused at import. Encoders (sections 51 to 53) embed and rerank only, run on the CPU
+  and cannot be fine-tuned, adapted with LoRA or exported yet. Unigram tokenizers come from `tokenizer.json`; GGUF
+  files with a Unigram vocabulary (T5) are refused.
 - Granite MoE's experts are stored fused, so a LoRA adapter on them cannot be exported in the PEFT format (the
   merged model exports fine), and llama.cpp has no Granite MoE architecture to export a GGUF file to.
 - Mixture-of-experts models (sections 38 and 40) are checked against a float64 transcription of `transformers` only on tiny

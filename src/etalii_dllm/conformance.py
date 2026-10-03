@@ -94,9 +94,16 @@ ENCODERS: dict[str, dict[str, Any]] = {
         "rope_theta": 0.0, "tie_word_embeddings": True, "attention_bias": True, "activation": "gelu",
         "type_vocabulary_size": 2, "classifier_labels": 2,
     },
+    "roberta-classifier": {
+        "family": "bert", "vocabulary_size": 96, "hidden_size": 64, "intermediate_size": 96, "layers": 2,
+        "heads": 4, "kv_heads": 4, "head_dim": 16, "context_length": 16, "rms_norm_eps": 1e-5,
+        "rope_theta": 0.0, "tie_word_embeddings": True, "attention_bias": True, "activation": "gelu",
+        "type_vocabulary_size": 1, "classifier_labels": 1, "padding_index": 1,
+    },
 }  # fmt: skip
-"""A small BERT encoder: absolute positions, token types, LayerNorms with biases, bidirectional attention; and a
-cross-encoder with a two-label classification head, run on a pair (token types 0 and 1)."""
+"""A small BERT encoder: absolute positions, token types, LayerNorms with biases, bidirectional attention; a
+cross-encoder with a two-label classification head, run on a pair (token types 0 and 1); and an XLM-RoBERTa
+cross-encoder whose positions count from past the padding id, run on tokens with padding inside."""
 
 
 def _decoder_tensors(name: str) -> Arrays:
@@ -227,7 +234,9 @@ def cases() -> list[tuple[str, str, dict[str, Any], Arrays]]:
             params = {"config": ENCODERS[name], "quantize": quantize}
             label = f"encoder-{name}" + (f"-{quantize}" if quantize else "")
             inputs = {"tokens": tokens, **_decoder_tensors(name)}
-            if ENCODERS[name].get("classifier_labels"):
+            if ENCODERS[name].get("padding_index") is not None:
+                inputs["tokens"] = np.array([0, 17, 3, 1, 1, 41, 2, 2, 77, 2], dtype=np.int64)
+            elif ENCODERS[name].get("classifier_labels"):
                 inputs["types"] = np.array([0, 0, 0, 0, 0, 1, 1, 1, 1], dtype=np.int64)
             items.append((label, "encoder", params, inputs))
     return items

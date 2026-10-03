@@ -42,8 +42,23 @@ gives the same bits on every machine: the encoder's forward pass and pooling are
 [specification](specification.md#6-the-encoder) and `dllm verify --reference` checks them against the reference
 implementation. A plain BERT checkpoint without sentence-transformers files pools the mean over all positions.
 
-all-MiniLM-L6-v2, bge-small-en-v1.5 and [Qwen3-Embedding-0.6B](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B)
-(Apache 2.0) are checked against `transformers` in CI (`tests/test_reference_models.py`):
+#### RoBERTa and multilingual encoders
+
+RoBERTa and XLM-RoBERTa encoders import too (`model_type` `roberta` and `xlm-roberta`): they are BERT whose
+position ids count from past the padding token, with a single token type. Multilingual models usually carry
+XLM-RoBERTa's Unigram tokenizer, which is reproduced exactly as `tokenizers` runs it: SentencePiece's precompiled
+normaliser (looked up per grapheme cluster, with the cluster tables of `tokenizers`' own segmentation crate), the
+`▁` pre-tokenizer and the Viterbi segmentation, ties and unknown pieces included:
+
+```bash
+dllm import hf:sentence-transformers/all-distilroberta-v1 -o distilroberta.dllm
+dllm import hf:sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2 -o multilingual.dllm
+dllm --model multilingual.dllm embed "Wie viele Menschen leben in Berlin?" --json
+```
+
+all-MiniLM-L6-v2, bge-small-en-v1.5, all-distilroberta-v1, paraphrase-multilingual-MiniLM-L12-v2 and
+[Qwen3-Embedding-0.6B](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B) (Apache 2.0) are checked against
+`transformers` in CI (`tests/test_reference_models.py`):
 
 ```bash
 dllm import hf:Qwen/Qwen3-Embedding-0.6B -o qwen3-embedding.dllm
@@ -160,6 +175,16 @@ dllm --rerank-model ms-marco.dllm index search docs.index "How do I import a gat
 
 The pair encoding and the head are in the [specification](specification.md#6-the-encoder), and
 `dllm verify --reference` checks a cross-encoder's scores against the reference implementation bit for bit.
+
+XLM-RoBERTa cross-encoders rerank in many languages, for example
+[mmarco-mMiniLMv2-L12-H384-v1](https://huggingface.co/cross-encoder/mmarco-mMiniLMv2-L12-H384-v1) (118M parameters,
+Apache 2.0, checked against `transformers` in CI). Their pair is `<s> query </s></s> passage </s>`, every token of
+type 0, and their classification head is the same computation as BERT's:
+
+```bash
+dllm import hf:cross-encoder/mmarco-mMiniLMv2-L12-H384-v1 -o mmarco.dllm
+dllm --model mmarco.dllm rerank "Wie viele Menschen leben in Berlin?" "Berlin hat 3,5 Millionen Einwohner." "Berlin hat Museen."
+```
 
 `POST /v1/rerank` (also `/rerank`) takes the request shape of Cohere and Jina: `query`, `documents` (strings or
 `{"text": ...}`), `top_n` and `return_documents` (default true), and the extension `instruction`. It returns

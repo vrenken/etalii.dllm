@@ -459,8 +459,9 @@ A guided answer ends when any of its contexts fills the window; it never rolls.
 
 Not covered here, but just as fixed:
 
-- tokenization: byte-level BPE and SentencePiece-style tokenizers, with Unicode handling pinned to version 15.1
-  (`etalii_dllm.unicode`);
+- tokenization: byte-level BPE, SentencePiece-style, WordPiece and Unigram tokenizers, with Unicode handling pinned
+  to version 15.1 (`etalii_dllm.unicode`) and grapheme clusters to the tables of `tokenizers`' segmentation crate
+  (Unicode 17.0; Unigram's precompiled normaliser, `etalii_dllm.unigram`);
 - the chat templates;
 - receipts ([receipts](receipts.md)) and the model file format ([model format](model-format.md)).
 
@@ -469,9 +470,11 @@ Not covered here, but just as fixed:
 A model of family `bert` is an encoder: it turns all its tokens into hidden states at once, for embeddings, and does
 not generate. All in float32 unless stated:
 
-1. `x = (word[t] + type[s]) + position[i]` for the token `t` of type `s` at position `i` (two float32 additions in
-   that order; every token of an embedding is of type 0, and the second text of a pair is of type 1), then
-   `x = layer_norm(x, embedding_norm)`.
+1. `x = (word[t] + type[s]) + position[p]` for the token `t` of type `s` with position id `p` (two float32 additions
+   in that order; every token of an embedding is of type 0, and the second text of a pair is of type 1), then
+   `x = layer_norm(x, embedding_norm)`. The position id of the token at index `i` is `i`; for RoBERTa and
+   XLM-RoBERTa (a `padding_index` `P`) it is `P + c`, where `c` counts the tokens at indices `0..i` that are not `P`,
+   and `P` itself for a token equal to `P`.
 2. For each layer:
    1. `q, k, v = linear(x, W, bias)`.
    2. `a = attention(q, k, v)` with `scale = 1 / sqrt(head_dim)`, not causal: every position sees every key.
@@ -496,7 +499,9 @@ word that reaches it kept whole; added tokens count but do not stop it), then th
 `b = max_tokens - s` tokens, `s` the pair template's special tokens: with `n1 <= n2` the shorter length and the
 longer, the shorter keeps `n1` and the longer gets `max(n1, b - n1)` (all of it when `n1 > b`); when the two still
 exceed `b`, they get `b // 2` and `b // 2 + b % 2`, the extra token to the longer one. Both are cut at the end, and
-the template adds `[CLS] A [SEP] B [SEP]` with token types 0 for `[CLS] A [SEP]` and 1 for `B [SEP]`. A reranking
+the template adds `[CLS] A [SEP] B [SEP]` with token types 0 for `[CLS] A [SEP]` and 1 for `B [SEP]` (RoBERTa's
+`<s> A </s></s> B </s>` gives every token type 0). RoBERTa's classification head (`dense`, tanh, `out_proj`) is the
+same computation, stored as the pooler and the classifier. A reranking
 score is the single logit, or `sigmoid(logit)` in double when the model was saved with that activation.
 
 ## Checking an implementation
