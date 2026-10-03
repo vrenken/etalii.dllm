@@ -40,6 +40,7 @@ from etalii_dllm.generation import ContextLengthError, TokenLogprobs
 from etalii_dllm.sampling import SamplingOptions, sampler_fields
 from etalii_dllm.server import anthropic_api, batches_api, completions_api, ollama_api, responses_api
 from etalii_dllm.server.contracts import (
+    AllowedToolsChoice,
     AssistantMessage,
     ChatCompletionChoice,
     ChatCompletionChunk,
@@ -157,13 +158,18 @@ def _chat_request(request: ChatCompletionRequest, engine: DllmEngine) -> ChatReq
         **sampler_fields(request),
     )
     functions = [t.function for t in request.tools or ()]
-    tools = [Tool(f.name, f.description or "", f.parameters or {}) for f in functions]
+    tools = [Tool(f.name, f.description or "", f.parameters or {}, f.strict is True) for f in functions]
+    parallel = request.parallel_tool_calls is not False
     if request.tool_choice is None:
-        choice = ToolChoice("auto")
+        choice = ToolChoice("auto", parallel=parallel)
     elif isinstance(request.tool_choice, str):
-        choice = ToolChoice(request.tool_choice)
+        choice = ToolChoice(request.tool_choice, parallel=parallel)
+    elif isinstance(request.tool_choice, AllowedToolsChoice):
+        allowed = request.tool_choice.allowed_tools
+        names = tuple(t.function.name for t in allowed.tools)
+        choice = ToolChoice(allowed.mode, allowed=names, parallel=parallel)
     else:
-        choice = ToolChoice("named", request.tool_choice.function.name)
+        choice = ToolChoice("named", request.tool_choice.function.name, parallel=parallel)
     response_format = ResponseFormat()
     if request.guided_regex is not None and request.grammar is not None:
         raise ValueError("guided_regex and grammar cannot be combined")

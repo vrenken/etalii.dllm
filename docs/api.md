@@ -688,7 +688,8 @@ format they were trained on, read from the model's own chat template:
   the format's own markers in the generated text, so the constraint and the parser see them.
 - `auto`: the model may answer in text. Once it writes the format's marker, the call is constrained by a grammar
   built from the tool definitions (a known name and arguments that fit its `parameters`/`input_schema`, leniently:
-  keywords the grammar cannot check are ignored for tools). Several calls in one answer are fine (one `<tool_call>`
+  keywords the grammar cannot check are ignored for tools unless they are
+  [strict](#tool-call-controls)). Several calls in one answer are fine (one `<tool_call>`
   block each, or several entries in the Mistral, Granite, DeepSeek and Python lists). Llama 3 and Python calls have
   no marker, so their answer is constrained from the first token: either text that does not start with `{` (`[` for
   Python calls), or exactly one call (one list).
@@ -705,6 +706,32 @@ format they were trained on, read from the model's own chat template:
 
 When streaming with tools, text is streamed until the model starts a tool call (or starts its answer with `{`, which
 could be a bare JSON call, or `[` in the Python format); the rest is decided when generation ends.
+
+## Tool call controls
+
+Three request fields control tool calls exactly (Phase 53), in every tool format:
+
+- **Strict tools.** A tool with `"strict": true` (OpenAI Chat Completions `function.strict`, Responses `strict`,
+  Anthropic `strict`) has its arguments constrained by the full JSON Schema compiler of
+  [structured output](#structured-output) instead of the lenient tool grammar: patterns, formats, string lengths,
+  number bounds, `multipleOf`, combinators and the rest. Keywords it cannot enforce are refused with an error before
+  any token is generated, as for `response_format`. Formats that write arguments one by one (the XML and Python
+  formats) enforce `properties`, `required` and the values of each argument, and refuse other keywords on the
+  arguments object (such as `minProperties`); XML string parameters stay raw text, with their `pattern`, `format`
+  and lengths enforced on that text. Without `strict` (the default, also in the Responses API) the grammar is
+  lenient. The arguments' `$defs`/`definitions` resolve in both. Strictness is not shown to the model.
+- **At most one call.** `parallel_tool_calls: false` (OpenAI) and `tool_choice.disable_parallel_tool_use: true`
+  (Anthropic) limit an answer to one call: the Mistral, Granite, DeepSeek and Python lists hold exactly one call,
+  and in the Hermes and XML formats the answer ends with the first call's closing marker.
+- **Allowed tools.** OpenAI `tool_choice: {"type": "allowed_tools", "allowed_tools": {"mode": "auto" | "required",
+  "tools": [{"type": "function", "function": {"name": ...}}]}}` (the Responses API: `{"type": "allowed_tools",
+  "mode": ..., "tools": [{"type": "function", "name": ...}]}`) lets the model call only the named tools. Every tool
+  stays in the prompt, so the prompt, and with it the prompt cache, is the same whichever tools are allowed; the
+  grammar and the parser accept only the allowed ones. `required` means at least one call to them.
+
+All three are recorded in receipts only when set (older receipts keep their bytes), are part of the
+[response cache](serving.md) key, are replayed by `dllm replay`, and carry over to every round of the MCP host
+(`dllm chat --tool`).
 
 ## Logprobs
 

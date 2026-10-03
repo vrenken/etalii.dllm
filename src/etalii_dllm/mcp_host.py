@@ -36,7 +36,7 @@ from typing import Any
 from etalii_dllm.chat import ChatMessage, ToolCall
 from etalii_dllm.engine import ChatEvent, ChatRequest, DllmEngine, Finished, ResponseFormat, TextDelta, ToolCallEvent
 from etalii_dllm.sampling import SamplingOptions
-from etalii_dllm.tools import AUTO, Tool
+from etalii_dllm.tools import Tool, ToolChoice
 
 DEFAULT_MAX_ROUNDS = 8
 ELICITATIONS = ("engine", "decline")
@@ -562,7 +562,8 @@ async def chat(
     executed: a call to one ends the chat like a normal ``tool_calls`` answer).
 
     Yields the engine's events of every round and a :class:`ToolResult` after each executed call. A ``required``
-    or named ``tool_choice`` applies to the first round; later rounds let the model decide, so it can answer. The
+    or named ``tool_choice`` applies to the first round; later rounds let the model decide (among the allowed tools,
+    with the same limit on parallel calls), so it can answer. The
     last :class:`Finished` has finish reason ``tool_calls`` only when the model still called a tool in round
     ``max_rounds`` (those calls are not executed). Raises ``ValueError`` for invalid requests, like
     :meth:`DllmEngine.chat_stream`.
@@ -603,4 +604,4 @@ async def chat(
             text = f"Error: {result.content}" if result.is_error else result.content
             messages.append(ChatMessage("tool", text, tool_call_id=call.id, name=call.name))
         if choice.mode in ("required", "named"):
-            choice = AUTO
+            choice = ToolChoice("auto", None, choice.allowed, choice.parallel)

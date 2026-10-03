@@ -35,7 +35,9 @@ tools in the Hermes format. Calls are constrained by a grammar: with ``tool_choi
 once the model writes the format's marker (``<tool_call>``, ``[TOOL_CALLS]``, ``<|tool_call|>``, DeepSeek's; for
 Llama 3 and Python calls once the reply starts with ``{`` or ``[``), before which it may answer in text, so a call
 always has a known function name and arguments that fit its parameter schema; with ``required`` or a named tool the
-output must be exactly one call.
+output must be exactly one call. A :class:`ToolChoice` may also narrow the tools the model may call (``allowed``,
+while every tool stays in the prompt) and limit an answer to one call (``parallel``); a ``strict`` tool's arguments
+are constrained by the whole schema rather than leniently.
 
 Tool call ids are derived from the request and the call's position, never from a clock or random source. A template
 that insists on its own id shape (Mistral's nine letters and digits) sees ids derived from the caller's ids.
@@ -53,7 +55,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from etalii_dllm.chat import TOOL_CALL_CLOSE, TOOL_CALL_OPEN, ChatMessage
-from etalii_dllm.grammar import Grammar
+from etalii_dllm.grammar import ANNOTATIONS, Grammar, GrammarError
 
 
 @dataclass(frozen=True)
@@ -62,6 +64,9 @@ class Tool:
     description: str = ""
     parameters: Mapping[str, Any] = field(default_factory=lambda: {"type": "object", "properties": {}})
     """JSON schema of the arguments object."""
+    strict: bool = False
+    """The arguments must satisfy the whole schema (else the grammar is lenient: keywords it cannot check are
+    ignored). Not shown to the model."""
 
     def to_openai(self) -> dict[str, Any]:
         """The OpenAI/Hugging Face form chat templates expect."""
@@ -78,12 +83,50 @@ class ToolChoice:
     """``auto`` (the model decides), ``none`` (no tools), ``required`` (at least one call) or ``named``."""
     name: str | None = None
     """The function to call when ``mode`` is ``named``."""
+    allowed: tuple[str, ...] | None = None
+    """The tools the model may call (``auto`` and ``required``); every tool is still shown to it."""
+    parallel: bool = True
+    """Several calls in one answer (``False``: at most one)."""
 
     def __post_init__(self) -> None:
         if self.mode not in ("auto", "none", "required", "named"):
             raise ValueError(f"unknown tool_choice {self.mode!r}")
         if (self.mode == "named") != (self.name is not None):
             raise ValueError("a named tool_choice needs exactly one function name")
+        if self.allowed is not None:
+            if self.mode not in ("auto", "required"):
+                raise ValueError("allowed tools need the mode 'auto' or 'required'")
+            if not self.allowed:
+                raise ValueError("allowed tools need at least one tool")
+            if len(set(self.allowed)) != len(self.allowed):
+                raise ValueError("allowed tools must be unique")
+
+    def callable(self, tools: Sequence[Tool]) -> list[Tool]:
+        """The tools the model may call, in their order in ``tools``."""
+        if self.mode == "named":
+            return [t for t in tools if t.name == self.name]
+        if self.allowed is not None:
+            return [t for t in tools if t.name in self.allowed]
+        return list(tools)
+
+    def record(self) -> dict[str, Any]:
+        """The choice as JSON for receipts (the newer fields only when set, so older receipts stay the same)."""
+        record: dict[str, Any] = {"mode": self.mode, "name": self.name}
+        if self.allowed is not None:
+            record["allowed"] = list(self.allowed)
+        if not self.parallel:
+            record["parallel"] = False
+        return record
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, Any]) -> ToolChoice:
+        allowed = record.get("allowed")
+        return cls(
+            record["mode"],
+            record["name"],
+            None if allowed is None else tuple(allowed),
+            bool(record.get("parallel", True)),
+        )
 
 
 AUTO = ToolChoice()
@@ -211,6 +254,9 @@ def validate_tools(tools: Sequence[Tool], choice: ToolChoice) -> None:
         raise ValueError(f"tool_choice {choice.mode!r} needs tools")
     if choice.mode == "named" and choice.name not in names:
         raise ValueError(f"tool_choice names an unknown tool {choice.name!r}")
+    for name in choice.allowed or ():
+        if name not in names:
+            raise ValueError(f"allowed tools name an unknown tool {name!r}")
     for tool in tools:
         call_schema(tool)  # raises for schemas that are not objects
 
@@ -281,11 +327,22 @@ def call_schema(tool: Tool, fmt: ToolFormat = HERMES) -> dict[str, Any]:
     parameters = dict(tool.parameters) if tool.parameters else {"type": "object", "properties": {}}
     if parameters.get("type", "object") != "object":
         raise ValueError(f"the parameters of tool {tool.name!r} must be a JSON schema of type object")
-    return {
+    schema: dict[str, Any] = {
         "type": "object",
         "properties": {"name": {"const": tool.name}, fmt.arguments: parameters},
         "required": ["name", fmt.arguments],
     }
+    # The arguments' definitions, where their "#/$defs/..." references look from the call object.
+    schema.update({key: parameters[key] for key in _DEFINITIONS if key in parameters})
+    return schema
+
+
+_DEFINITIONS = ("$defs", "definitions")
+_ARGUMENTS_OBJECT = frozenset({"type", "properties", "required", "additionalProperties", *_DEFINITIONS})
+"""The keywords of a strict tool's arguments object that formats writing arguments one by one can enforce
+(``additionalProperties`` holds trivially: only the declared arguments are written)."""
+_RAW_STRING = frozenset({"type", "pattern", "minLength", "maxLength", *_DEFINITIONS})
+"""The keywords of a strict string parameter written as raw XML text."""
 
 
 def _parameters(tool: Tool) -> tuple[list[tuple[str, dict[str, Any], bool]], Mapping[str, Any]]:
@@ -298,10 +355,29 @@ def _parameters(tool: Tool) -> tuple[list[tuple[str, dict[str, Any], bool]], Map
     ], schema
 
 
-def _keyword_arguments(tool: Tool, written: Any, separator: str) -> Grammar:
-    """A tool's parameters in schema order, each written by ``written(name, schema)``, required ones always and
-    optional ones when chosen, ``separator`` between them."""
-    parts: list[tuple[Grammar, bool]] = [(written(name, sub), needed) for name, sub, needed in _parameters(tool)[0]]
+def _written_parameters(tool: Tool, fmt: ToolFormat) -> list[tuple[str, dict[str, Any], bool]]:
+    """The parameters of a format that writes arguments one by one (XML, Python calls). For a strict tool the
+    arguments object may only use what that enforces, and each parameter carries the definitions it may refer to."""
+    parameters, schema = _parameters(tool)
+    if not tool.strict:
+        return parameters
+    extra = sorted(set(schema) - ANNOTATIONS - _ARGUMENTS_OBJECT)
+    if extra:
+        raise GrammarError(
+            f"strict tool {tool.name!r}: the {fmt.name} format writes arguments one by one and cannot enforce "
+            f"{', '.join(extra)} on the arguments object"
+        )
+    missing = sorted(set(schema.get("required", ())) - {name for name, _, _ in parameters})
+    if missing:
+        raise GrammarError(f"strict tool {tool.name!r}: required arguments without properties: {', '.join(missing)}")
+    definitions = {key: schema[key] for key in _DEFINITIONS if key in schema}
+    return [(name, {**definitions, **sub}, needed) for name, sub, needed in parameters]
+
+
+def _keyword_arguments(parameters: list[tuple[str, dict[str, Any], bool]], written: Any, separator: str) -> Grammar:
+    """Parameters in schema order, each written by ``written(name, schema)``, required ones always and optional
+    ones when chosen, ``separator`` between them."""
+    parts: list[tuple[Grammar, bool]] = [(written(name, sub), needed) for name, sub, needed in parameters]
     if not separator:
         return Grammar.sequence(g if needed else Grammar.optional(g) for g, needed in parts)
     # With a separator, the arguments after the first written one each start with it: a small automaton over the
@@ -322,31 +398,40 @@ _XML_TEXT = r"[^<]*"
 """A string parameter's raw text in the XML format (no ``<``, so it cannot run into the closing tag)."""
 
 
-def _xml_value(sub: Mapping[str, Any]) -> Grammar:
-    if sub.get("type") == "string" and isinstance(sub.get("enum"), list):
-        return Grammar.one_of([Grammar.literal(str(v)) for v in sub["enum"] if isinstance(v, str)] or [Grammar([])])
+def _xml_value(sub: Mapping[str, Any], strict: bool) -> Grammar:
+    if sub.get("type") == "string" and strict:
+        extra = sorted(set(sub) - ANNOTATIONS - _RAW_STRING - {"enum", "const"})
+        if extra:
+            raise GrammarError(f"a strict string parameter in the xml format cannot use {', '.join(extra)}")
+    if sub.get("type") == "string" and (isinstance(sub.get("enum"), list) or (strict and "const" in sub)):
+        values = [v for v in (sub["enum"] if "enum" in sub else [sub["const"]]) if isinstance(v, str)]
+        if strict:
+            rest = Grammar.raw_string(sub, _XML_TEXT).matcher()
+            values = [v for v in values if rest.matches(v.encode("utf-8"))]
+            if "enum" in sub and "const" in sub:
+                values = [v for v in values if v == sub["const"]]
+        return Grammar.one_of([Grammar.literal(v) for v in values] or [Grammar([])])
     if sub.get("type") == "string":
-        return Grammar.regex(_XML_TEXT)
-    return Grammar.json_schema(sub, lenient=True)
+        return Grammar.raw_string(sub, _XML_TEXT) if strict else Grammar.regex(_XML_TEXT)
+    return Grammar.json_schema(sub, lenient=not strict)
 
 
 def _xml_call(tool: Tool) -> Grammar:
     def parameter(name: str, sub: dict[str, Any]) -> Grammar:
-        return Grammar.sequence(
-            [Grammar.literal(f"<parameter={name}>\n"), _xml_value(sub), Grammar.literal("\n</parameter>\n")]
-        )
+        value = _xml_value(sub, tool.strict)
+        return Grammar.sequence([Grammar.literal(f"<parameter={name}>\n"), value, Grammar.literal("\n</parameter>\n")])
 
     return Grammar.sequence(
         [
             Grammar.literal(f"\n<function={tool.name}>\n"),
-            _keyword_arguments(tool, parameter, ""),
+            _keyword_arguments(_written_parameters(tool, XML), parameter, ""),
             Grammar.literal("</function>\n"),
         ]
     )
 
 
 def _deepseek_call(tool: Tool) -> Grammar:
-    arguments = Grammar.json_schema(call_schema(tool)["properties"]["arguments"], lenient=True)
+    arguments = Grammar.json_schema(call_schema(tool)["properties"]["arguments"], lenient=not tool.strict)
     return Grammar.sequence(
         [
             Grammar.literal(f"{DEEPSEEK_CALL_BEGIN}function{DEEPSEEK_SEP}{tool.name}\n```json\n"),
@@ -356,52 +441,73 @@ def _deepseek_call(tool: Tool) -> Grammar:
     )
 
 
-def _python_value(sub: Mapping[str, Any]) -> Grammar:
+def _python_value(sub: Mapping[str, Any], strict: bool) -> Grammar:
     if sub.get("type") == "boolean":
         return Grammar.one_of([Grammar.literal("True"), Grammar.literal("False")])
     if sub.get("type") == "null":
         return Grammar.literal("None")
-    return Grammar.json_schema(sub, lenient=True)
+    return Grammar.json_schema(sub, lenient=not strict)
 
 
 def _python_call(tool: Tool) -> Grammar:
     def argument(name: str, sub: dict[str, Any]) -> Grammar:
-        return Grammar.sequence([Grammar.literal(f"{name}="), _python_value(sub)])
+        return Grammar.sequence([Grammar.literal(f"{name}="), _python_value(sub, tool.strict)])
 
     return Grammar.sequence(
-        [Grammar.literal(f"{tool.name}("), _keyword_arguments(tool, argument, ", "), Grammar.literal(")")]
+        [
+            Grammar.literal(f"{tool.name}("),
+            _keyword_arguments(_written_parameters(tool, PYTHONIC), argument, ", "),
+            Grammar.literal(")"),
+        ]
     )
 
 
-def _calls(tools: Sequence[Tool], fmt: ToolFormat) -> Grammar:
-    """One call to any of ``tools``, or for listed formats a non-empty list of them."""
+def _json_call(tool: Tool, fmt: ToolFormat) -> Grammar:
+    return Grammar.json_schema(call_schema(tool, fmt), lenient=not tool.strict)
+
+
+def _calls(tools: Sequence[Tool], fmt: ToolFormat, single: bool) -> Grammar:
+    """One call to any of ``tools``, or for listed formats a non-empty list of them (of one, when ``single``)."""
     if fmt.style == "xml":
         return Grammar.one_of([_xml_call(t) for t in tools])
     if fmt.style == "deepseek":
-        return Grammar.repeat(Grammar.one_of([_deepseek_call(t) for t in tools]), Grammar.literal("\n"))
+        call = Grammar.one_of([_deepseek_call(t) for t in tools])
+        return call if single else Grammar.repeat(call, Grammar.literal("\n"))
     if fmt.style == "pythonic":
-        calls = Grammar.repeat(Grammar.one_of([_python_call(t) for t in tools]), Grammar.literal(", "))
+        call = Grammar.one_of([_python_call(t) for t in tools])
+        calls = call if single else Grammar.repeat(call, Grammar.literal(", "))
         return Grammar.sequence([Grammar.literal("["), calls, Grammar.literal("]")])
-    if fmt.listed:
+    if fmt.listed and not any(t.strict for t in tools):
         items = {"anyOf": [call_schema(t, fmt) for t in tools]}
-        return Grammar.json_schema({"type": "array", "items": items, "minItems": 1}, lenient=True)
-    return Grammar.choice([Grammar.json_schema(call_schema(t, fmt), lenient=True) for t in tools])
+        array: dict[str, Any] = {"type": "array", "items": items, "minItems": 1, **({"maxItems": 1} if single else {})}
+        return Grammar.json_schema(array, lenient=True)
+    call = Grammar.choice([_json_call(t, fmt) for t in tools])
+    if not fmt.listed:
+        return call
+    # Strict tools are compiled one by one (a lenient neighbour must not loosen them), so the list is spelled out.
+    space = Grammar.whitespace()
+    comma = Grammar.sequence([space, Grammar.literal(","), space])
+    calls = call if single else Grammar.repeat(call, comma)
+    return Grammar.sequence([Grammar.literal("["), space, calls, space, Grammar.literal("]")])
 
 
-def call_grammar(tools: Sequence[Tool], fmt: ToolFormat = HERMES) -> Grammar:
-    """What follows the format's marker: the call (or call list) and the closing marker."""
+def call_grammar(tools: Sequence[Tool], fmt: ToolFormat = HERMES, *, single: bool = False) -> Grammar:
+    """What follows the format's marker: the call (or call list, of one call when ``single``) and the closing
+    marker."""
     if fmt.style in ("xml", "deepseek"):
-        return Grammar.sequence([_calls(tools, fmt), Grammar.literal(fmt.close)])
-    parts = [Grammar.whitespace(), _calls(tools, fmt)]
+        return Grammar.sequence([_calls(tools, fmt, single), Grammar.literal(fmt.close)])
+    parts = [Grammar.whitespace(), _calls(tools, fmt, single)]
     if fmt.close:
         parts += [Grammar.whitespace(), Grammar.literal(fmt.close)]
     return Grammar.sequence(parts)
 
 
 def forced_grammar(tools: Sequence[Tool], choice: ToolChoice, fmt: ToolFormat = HERMES) -> Grammar:
-    """Exactly one call (or call list), for ``required`` and named tool choices."""
-    chosen = [t for t in tools if t.name == choice.name] if choice.mode == "named" else list(tools)
-    return Grammar.sequence([Grammar.literal(fmt.open), call_grammar(chosen, fmt)])
+    """Exactly one call (or call list) to the tools ``choice`` lets the model call: for ``required`` and named tool
+    choices, and as the call branch of the others."""
+    return Grammar.sequence(
+        [Grammar.literal(fmt.open), call_grammar(choice.callable(tools), fmt, single=not choice.parallel)]
+    )
 
 
 FREE_TEXT = r"[ \t\r\n]*([^{ \t\r\n][\s\S]*)?"
@@ -410,12 +516,13 @@ FREE_TEXT_PYTHONIC = r"[ \t\r\n]*([^\[ \t\r\n][\s\S]*)?"
 """Text that does not start like a list (an answer, for Python-style calls)."""
 
 
-def auto_grammar(tools: Sequence[Tool], fmt: ToolFormat) -> tuple[Grammar, str | None]:
-    """The constraint for ``tool_choice`` ``auto`` and the marker that starts it (``None``: from the start)."""
+def auto_grammar(tools: Sequence[Tool], fmt: ToolFormat, choice: ToolChoice = AUTO) -> tuple[Grammar, str | None]:
+    """The constraint for ``tool_choice`` ``auto`` and the marker that starts it (``None``: from the start). With
+    ``choice.parallel`` off the constraint must also end the answer after the first call (``once``)."""
     if fmt.open:
-        return call_grammar(tools, fmt), fmt.open
+        return call_grammar(choice.callable(tools), fmt, single=not choice.parallel), fmt.open
     free = FREE_TEXT_PYTHONIC if fmt.style == "pythonic" else FREE_TEXT
-    return Grammar.either([Grammar.regex(free), forced_grammar(tools, AUTO, fmt)]), None
+    return Grammar.either([Grammar.regex(free), forced_grammar(tools, choice, fmt)]), None
 
 
 def _block(fmt: ToolFormat) -> re.Pattern[str]:

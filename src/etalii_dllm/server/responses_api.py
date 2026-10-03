@@ -90,6 +90,10 @@ class FunctionTool(BaseModel):
 class NamedToolChoice(BaseModel):
     type: str
     name: str | None = None
+    mode: Literal["auto", "required"] | None = None
+    """``allowed_tools`` only."""
+    tools: list[NamedToolChoice] | None = None
+    """``allowed_tools`` only: the functions the model may call."""
 
 
 class TextFormat(BaseModel):
@@ -245,15 +249,22 @@ def _tools(request: ResponsesRequest) -> tuple[list[Tool], ToolChoice]:
     for tool in request.tools or ():
         if tool.type != "function" or not tool.name:
             raise ValueError(f"only function tools are supported, not {tool.type!r}")
-        tools.append(Tool(tool.name, tool.description or "", tool.parameters or {}))
+        tools.append(Tool(tool.name, tool.description or "", tool.parameters or {}, tool.strict is True))
     choice = request.tool_choice
+    parallel = request.parallel_tool_calls is not False
     if choice is None:
-        return tools, ToolChoice("auto")
+        return tools, ToolChoice("auto", parallel=parallel)
     if isinstance(choice, str):
-        return tools, ToolChoice(choice)
+        return tools, ToolChoice(choice, parallel=parallel)
+    if choice.type == "allowed_tools":
+        listed = choice.tools or []
+        if any(t.type != "function" or not t.name for t in listed):
+            raise ValueError("allowed tools must be functions with a name")
+        names = tuple(t.name for t in listed if t.name)
+        return tools, ToolChoice(choice.mode or "auto", allowed=names, parallel=parallel)
     if choice.type != "function" or not choice.name:
-        raise ValueError("tool_choice must be 'none', 'auto', 'required' or a function")
-    return tools, ToolChoice("named", choice.name)
+        raise ValueError("tool_choice must be 'none', 'auto', 'required', a function or allowed_tools")
+    return tools, ToolChoice("named", choice.name, parallel=parallel)
 
 
 def _response_format(request: ResponsesRequest) -> ResponseFormat:
@@ -330,7 +341,7 @@ def _logprobs(engine: DllmEngine, entries: tuple[TokenLogprobs, ...]) -> list[di
 def _response(request: ResponsesRequest, chat: ChatRequest, engine: DllmEngine, **fields: Any) -> dict[str, Any]:
     tools = [
         {"type": "function", "name": t.name, "description": t.description or None, "parameters": t.parameters,
-         "strict": False}
+         "strict": t.strict}
         for t in chat.tools
     ]  # fmt: skip
     choice = request.tool_choice

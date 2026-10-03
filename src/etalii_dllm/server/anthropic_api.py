@@ -106,16 +106,17 @@ def _tools(tools: list[ToolDefinition] | None, choice: ToolChoiceModel | None) -
     for tool in tools or ():
         if tool.type not in (None, "custom"):
             raise ValueError(f"server tools ({tool.type}) are not supported")
-        converted.append(Tool(tool.name, tool.description or "", tool.input_schema or {}))
+        converted.append(Tool(tool.name, tool.description or "", tool.input_schema or {}, tool.strict is True))
+    parallel = choice is None or choice.disable_parallel_tool_use is not True
     if choice is None or choice.type == "auto":
-        return converted, ToolChoice("auto")
+        return converted, ToolChoice("auto", parallel=parallel)
     if choice.type == "any":
-        return converted, ToolChoice("required")
+        return converted, ToolChoice("required", parallel=parallel)
     if choice.type == "none":
         return converted, ToolChoice("none")
     if not choice.name:
         raise ValueError("tool_choice of type 'tool' needs a name")
-    return converted, ToolChoice("named", choice.name)
+    return converted, ToolChoice("named", choice.name, parallel=parallel)
 
 
 def _chat_request(request: MessagesRequest, engine: DllmEngine) -> ChatRequest:

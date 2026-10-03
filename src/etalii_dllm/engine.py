@@ -717,11 +717,12 @@ class DllmEngine:
         if tools and choice.mode in ("required", "named"):
             return TokenConstraint(tooling.forced_grammar(tools, choice, fmt), self._token_trie())
         if tools and answer is not None:
-            either = Grammar.either([tooling.forced_grammar(tools, AUTO, fmt), answer])
+            either = Grammar.either([tooling.forced_grammar(tools, choice, fmt), answer])
             return TokenConstraint(either, self._token_trie())
         if tools:
-            grammar, trigger = tooling.auto_grammar(tools, fmt)
-            return TokenConstraint(grammar, self._token_trie(), trigger=trigger)
+            grammar, trigger = tooling.auto_grammar(tools, fmt, choice)
+            once = trigger is not None and not choice.parallel
+            return TokenConstraint(grammar, self._token_trie(), trigger=trigger, once=once)
         if answer is not None:
             return TokenConstraint(answer, self._token_trie())
         return None
@@ -910,7 +911,7 @@ class DllmEngine:
             text = parts.answer
         finish_reason, calls, content = result.finish_reason, [], text
         if tools:
-            content, parsed = tooling.parse_calls(text, tools, self.tool_format)
+            content, parsed = tooling.parse_calls(text, request.tool_choice.callable(tools), self.tool_format)
             if not content.startswith(streamed):  # pragma: no cover - _answer_prefix guarantees this
                 raise AssertionError("streamed text is not a prefix of the answer")
             if content[len(streamed) :]:

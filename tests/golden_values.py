@@ -386,3 +386,4 @@ COMPLETE_GRAMMAR_FINGERPRINTS = {
 # Phase 52: the SHA-256 of the calls a random bigram model makes in the xml, deepseek and pythonic formats
 # (test_more_tool_formats.py).
 MORE_TOOL_FORMAT_CALLS = "4d90f8d241a325da69aff67e9f35022319f4562477b706ecbd3d3097044f8d6d"
+TOOL_CONTROL_CALLS = "73f6df860b9a1dcd14178e62c23b4366566bb71f581147533ada9882a742a65e"
