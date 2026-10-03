@@ -19,6 +19,7 @@ pytest tests/test_bpe.py -q    # one area
 | Unit | `test_grammar*.py`, `test_tools.py` | JSON-schema constrained decoding and Hermes tool-call parsing |
 | Unit | `test_more_tool_formats.py` | Qwen3-Coder XML, DeepSeek and Python call formats: detection, visible markers, grammars and their values, parsing and broken calls, history rendering, round trips, golden calls |
 | Unit | `test_tool_controls.py` | Strict tools in every format (whole-schema arguments, raw XML strings, refused keywords), at most one call per answer, allowed tools with an unchanged prompt, receipts and cache keys, the OpenAI/Responses/Anthropic fields, golden calls |
+| Unit | `test_remaining_tool_formats.py` | Phi-4-mini, DeepSeek V3.1 and Command R7B formats: detection (V3 vs V3.1), visible markers, tools on the system message, grammars, tool controls, parsing, history, round trips, golden calls |
 | Unit | `test_complete_grammars.py` | GBNF left recursion rewritten into the same language (a fixpoint oracle), token references and negations, lazy grammars and their triggers, APIs, CLI, receipts, golden answers |
 | Unit | `test_adaptive_samplers.py` | Mirostat 1 and 2 (truncation, Zipf fit, mu updates in bits), dynamic temperature, agreement with the reference sampler, APIs, CLI, `verify --reference`, golden answer |
 | Unit | `test_modern_samplers.py` | DRY runs, breakers and caps, XTC, typical-p and top-n-sigma, agreement with the reference sampler on random settings and constraints, APIs, CLI, `verify --reference`, golden answer |

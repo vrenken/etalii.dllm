@@ -667,13 +667,23 @@ format they were trained on, read from the model's own chat template:
 | `xml` | Qwen3-Coder | `<tool_call>` `<function=get_weather>` `<parameter=city>` Paris `</parameter>` `</function>` `</tool_call>`, one tag per line |
 | `deepseek` | DeepSeek V3 and R1, the R1 distills of Qwen and Llama | `<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather`, the arguments in a fenced `json` block, `<｜tool▁call▁end｜><｜tool▁calls▁end｜>` |
 | `pythonic` | Llama 3.2/4-style templates that ask for Python calls | the whole reply is `[get_weather(city="Paris"), is_noon()]` |
+| `deepseek-v3.1` | DeepSeek V3.1 | `<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{...}<｜tool▁call▁end｜><｜tool▁calls▁end｜>` |
+| `phi4-mini` | Phi-4-mini | `functools[{"name": "get_weather", "arguments": {...}}]` |
+| `command-r7b` | Command R7B | `<|START_ACTION|>[{"tool_call_id": "0", "tool_name": "get_weather", "parameters": {...}}]<|END_ACTION|>` |
 
 - The format is detected from the template in a fixed order: `[TOOL_CALLS]` means Mistral, DeepSeek's
-  `<｜tool▁calls▁begin｜>` DeepSeek, `<|tool_call|>` Granite, `<function=` the XML format, `<tool_call>` Hermes, the
+  `<｜tool▁calls▁begin｜>` DeepSeek (V3 and R1 when the template writes a fenced `json` block, else V3.1),
+  `<|START_ACTION|>` Command R7B, `<|tool|>` Phi-4-mini, `<|tool_call|>` Granite, `<function=` the XML format, `<tool_call>` Hermes, the
   Python call example `func_name1(` the Python format, and a template with an `ipython` role and a `"parameters"` key
   Llama 3; anything else is Hermes. `DllmEngine.tool_format` shows the result and may be set (`"hermes"`,
-  `"llama3"`, `"mistral"`, `"granite"`, `"xml"`, `"deepseek"`, `"pythonic"`) for a template the detection gets
-  wrong.
+  `"llama3"`, `"mistral"`, `"granite"`, `"xml"`, `"deepseek"`, `"pythonic"`, `"deepseek-v3.1"`, `"phi4-mini"`,
+  `"command-r7b"`) for a template the detection gets wrong.
+- Phase 54: Phi-4-mini's template takes the tools as a JSON string on the system message (`<|tool|>...<|/tool|>`),
+  so the engine puts them there (adding an empty system message if there is none), and it does not render tool
+  calls, so earlier calls are written into the assistant's text as `functools[...]`; its `functools` marker is
+  plain text. DeepSeek V3.1 writes the arguments as JSON straight after the name, several calls back to back.
+  Command R7B's calls carry a `tool_call_id` call number ("0" to "9", not used: the API's ids come from the
+  request) and its block ends with `<|END_ACTION|>`; text after the block stays answer text.
 - The XML format (Phase 52) writes string parameters as raw text (the grammar keeps them free of `<`, so they cannot
   run into the closing tag) and every other value as JSON; parameters come in schema order, required ones always.
   DeepSeek's arguments are a JSON object in a fenced block, several calls one per line between the begin and end
@@ -684,7 +694,7 @@ format they were trained on, read from the model's own chat template:
 - If the model's chat template supports tools, it presents them, exactly as `transformers` would. Otherwise the
   engine adds the Hermes tool instructions to the system message, shows earlier calls as `<tool_call>` blocks and
   tool results as `<tool_response>` user turns, and the model calls tools in the Hermes format.
-- Mistral's, Granite's and DeepSeek's markers are special tokens, which decoding normally leaves out; the engine keeps
+- Mistral's, Granite's, DeepSeek's and Command R7B's markers are special tokens, which decoding normally leaves out; the engine keeps
   the format's own markers in the generated text, so the constraint and the parser see them.
 - `auto`: the model may answer in text. Once it writes the format's marker, the call is constrained by a grammar
   built from the tool definitions (a known name and arguments that fit its `parameters`/`input_schema`, leniently:

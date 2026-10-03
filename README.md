@@ -211,6 +211,7 @@ module map), with Mermaid diagrams.
 | 51. Exact complete GBNF grammars ✅ | ✅ Left-recursive rules rewritten exactly into the same language (#317); ✅ token references `<[id]>`, `<think>` and their negations `!<...>` (#318); ✅ lazy grammars that start at a trigger word (#319); ✅ in the OpenAI and completions APIs, the CLI, receipts, the specification, docs and golden values (#320). See [grammars](docs/api.md#grammars) |
 | 52. Tool calling in more model formats ✅ | ✅ Qwen3-Coder XML calls with raw string parameters (#322); ✅ DeepSeek V3/R1 tool call markers, kept visible (#323); ✅ Python-style call lists with literal arguments (#324); ✅ in every API, docs, getting started and a golden value (#325). See [tools](docs/api.md#tools) |
 | 53. Exact tool call controls ✅ | ✅ Strict tools whose arguments satisfy the whole JSON Schema in every tool format (#327); ✅ at most one call per answer with `parallel_tool_calls` and `disable_parallel_tool_use` (#328); ✅ allowed tools that narrow the callable set without changing the prompt (#329); ✅ in receipts, the response cache, every API, docs and a golden value (#330). See [tool call controls](docs/api.md#tool-call-controls) |
+| 54. Tool calling in the remaining formats ✅ | ✅ Phi-4-mini's `functools` calls with the tools on the system message (#332); ✅ DeepSeek V3.1's changed markers (#333); ✅ Command R7B's action blocks (#334); ✅ with every tool control, in every API, docs and a golden value (#335). See [tools](docs/api.md#tools) |
 
 ## Working with Claude Code
 
