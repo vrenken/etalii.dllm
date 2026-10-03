@@ -214,9 +214,11 @@ REFERENCE_MODEL_FINGERPRINTS = {
     },
     # BERT encoders: mean pooling (all-MiniLM-L6-v2) and CLS pooling (bge-small-en-v1.5), truncated to max_tokens.
     "minilm": {
+        "import": "7d834ae0cbcc60c8f713a03ec17f90da0ef800ca04fa4f8456cbaf1bc8419716",
         "embedding": "0c76461e13fc920ba32cab5543c752f6cb296cdee5d1e3e5cb266f27711df9cd",
     },
     "bge-small": {
+        "import": "84d2ca3b329c8b989747b0b376b3e97d45b11c8e3da3a14b2b7b8c513f1eb559",
         "embedding": "a3bbe46df62036ce3971d37fd7eebfe87b5ea17e8d4a48975911200770c456d5",
     },
 }
