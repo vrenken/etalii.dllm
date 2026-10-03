@@ -19,7 +19,7 @@ Unsupported components fail at load time instead of tokenizing differently from 
 from __future__ import annotations
 
 import heapq
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
@@ -338,7 +338,9 @@ class BpeTokenizer:
 
         self._vocab: dict[str, int] = {str(k): int(v) for k, v in model["vocab"].items()}
         self._merges: dict[tuple[int, int], tuple[int, int]] = {}
-        for rank, merge in enumerate(model.get("merges", [])):
+        ranks = model.get("merge_ranks")  # SentencePiece models from GGUF: equal scores share a rank
+        for index, merge in enumerate(model.get("merges", [])):
+            rank = index if ranks is None else int(ranks[index])
             left, right = merge.split(" ", 1) if isinstance(merge, str) else merge
             try:
                 pair = (self._vocab[left], self._vocab[right])
@@ -618,11 +620,99 @@ def gguf_pre_tokenizer(pre: str) -> tuple[Any, Any]:
     return without_offsets(normalizer), without_offsets(pre_tokenizer)
 
 
+SENTENCEPIECE_DECODER = {
+    "type": "Sequence",
+    "decoders": [
+        {"type": "Replace", "pattern": {"String": "\u2581"}, "content": " "},
+        {"type": "ByteFallback"},
+        {"type": "Fuse"},
+        {"type": "Strip", "content": " ", "start": 1, "stop": 0},
+    ],
+}
+"""The decoder of a SentencePiece model with a space prefix: ``▁`` back to spaces, ``<0xAB>`` byte tokens, the
+prefix's leading space dropped (without a prefix, the ``Strip`` step is left out)."""
+
+
+def sentencepiece_normalizer(add_space_prefix: bool) -> dict[str, Any]:
+    """SentencePiece's whitespace handling: a ``▁`` in front of every text (and after every special token) when
+    ``add_space_prefix``, and every space escaped as ``▁``."""
+    replace = {"type": "Replace", "pattern": {"String": " "}, "content": "\u2581"}
+    if not add_space_prefix:
+        return replace
+    return {"type": "Sequence", "normalizers": [{"type": "Prepend", "prepend": "\u2581"}, replace]}
+
+
+def sentencepiece_merges(
+    tokens: Sequence[str], scores: Sequence[float], types: Sequence[int]
+) -> tuple[list[list[str]], list[int]]:
+    """The merges of a SentencePiece BPE model, in SentencePiece's own order: every split of a normal piece into two
+    normal pieces, ranked by the merged piece's score (highest first). Equal scores share a rank, so the merge further
+    left wins, as SentencePiece and llama.cpp break ties by position. Returns the merges and their ranks."""
+    normal: dict[str, int] = {}
+    for index, (token, kind) in enumerate(zip(tokens, types, strict=True)):
+        if kind == 1:
+            normal.setdefault(token, index)
+    values = [float(scores[index]) for index in normal.values()]
+    if any(value != value for value in values):
+        raise TokenizerError("a SentencePiece score is not a number")
+    rank_of = {value: rank for rank, value in enumerate(sorted(set(values), reverse=True))}
+    found: list[tuple[int, int, int, str, str]] = []
+    for piece, index in normal.items():
+        for cut in range(1, len(piece)):
+            left, right = piece[:cut], piece[cut:]
+            if left in normal and right in normal:
+                found.append((rank_of[float(scores[index])], index, normal[left], left, right))
+    found.sort()
+    return [[left, right] for *_, left, right in found], [rank for rank, *_ in found]
+
+
+def _sentencepiece_spec(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    tokens: list[str] = list(metadata["tokenizer.ggml.tokens"])
+    scores: list[float] = list(metadata.get("tokenizer.ggml.scores", [0.0] * len(tokens)))
+    types: list[int] = list(metadata.get("tokenizer.ggml.token_type", [1] * len(tokens)))
+    if len(scores) != len(tokens) or len(types) != len(tokens):
+        raise TokenizerError("a SentencePiece vocabulary needs one score and one type per token")
+    merges, ranks = sentencepiece_merges(tokens, scores, types)
+    prefix = bool(metadata.get("tokenizer.ggml.add_space_prefix", True))
+    unknown = metadata.get("tokenizer.ggml.unknown_token_id")
+    if unknown is None:
+        unknown = next((i for i, kind in enumerate(types) if kind == 2), None)
+    added = [
+        {"id": i, "content": token, "special": kind == 3, "lstrip": False, "rstrip": False, "normalized": False,
+         "single_word": False}
+        for i, (token, kind) in enumerate(zip(tokens, types, strict=True))
+        if kind in (3, 4)
+    ]  # fmt: skip
+    return {
+        "added_tokens": added,
+        "normalizer": sentencepiece_normalizer(prefix),
+        "pre_tokenizer": None,
+        "post_processor": None,
+        "decoder": SENTENCEPIECE_DECODER
+        if prefix
+        else {**SENTENCEPIECE_DECODER, "decoders": SENTENCEPIECE_DECODER["decoders"][:3]},
+        "model": {
+            "type": "BPE",
+            "vocab": {token: i for i, token in reversed(list(enumerate(tokens)))},
+            "merges": merges,
+            "merge_ranks": ranks,
+            "unk_token": None if unknown is None else tokens[int(unknown)],
+            "fuse_unk": True,
+            "byte_fallback": 6 in types,
+        },
+    }
+
+
 def spec_from_gguf(metadata: Mapping[str, Any]) -> dict[str, Any]:
-    """A ``tokenizer.json``-shaped description from GGUF ``tokenizer.ggml.*`` metadata (BPE models only)."""
+    """A ``tokenizer.json``-shaped description from GGUF ``tokenizer.ggml.*`` metadata: byte-level BPE (``gpt2``) or
+    SentencePiece BPE (``llama``, :func:`sentencepiece_merges`)."""
     model = metadata.get("tokenizer.ggml.model")
+    if model == "llama":
+        return _sentencepiece_spec(metadata)
     if model != "gpt2":
-        raise TokenizerError(f"GGUF tokenizer model {model!r} is not supported (only gpt2-style BPE)")
+        raise TokenizerError(
+            f"GGUF tokenizer model {model!r} is not supported (gpt2-style BPE and llama SentencePiece)"
+        )
     pre = metadata.get("tokenizer.ggml.pre", "gpt-2")
     if pre not in _GGUF_PRE:
         raise TokenizerError(f"GGUF pre-tokenizer {pre!r} is not supported (supported: {', '.join(sorted(_GGUF_PRE))})")

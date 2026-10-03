@@ -229,6 +229,8 @@ def _tokenizer_files(tokenizer: Mapping[str, Any] | None, chat_template: str | N
         special = tokenizer.get("special_tokens_map") or {}
     else:  # a GGUF import: its tokenizer.ggml.* metadata
         spec = bpe.spec_from_gguf(tokenizer)
+        # SentencePiece ranks (equal scores tie) have no tokenizer.json field; the merges keep their order.
+        spec["model"].pop("merge_ranks", None)
         tokens = list(tokenizer["tokenizer.ggml.tokens"])
         config = {}
         for key, field in (("eos_token", "eos_token_id"), ("bos_token", "bos_token_id")):
@@ -383,17 +385,20 @@ def _value(kind: int, value: Any) -> bytes:
 
 
 def _gguf_tokenizer(tokenizer: Mapping[str, Any] | None, vocabulary_size: int) -> list[tuple[str, int, Any]]:
-    """The ``tokenizer.ggml.*`` metadata for a byte-level BPE tokenizer, checked to encode like the original."""
+    """The ``tokenizer.ggml.*`` metadata for a byte-level BPE or SentencePiece-style tokenizer, checked to encode like
+    the original."""
     if tokenizer is None:
         raise ExportError("the model has no tokenizer to write")
     if tokenizer.get("format") == "gguf":
-        keys = ("model", "pre", "tokens", "token_type", "merges")
+        keys = ("model", "pre", "tokens", "scores", "token_type", "merges", "add_space_prefix")
         present = [key for key in keys if f"tokenizer.ggml.{key}" in tokenizer]
         return [(f"tokenizer.ggml.{key}", *_typed(key, tokenizer[f"tokenizer.ggml.{key}"])) for key in present]
     spec = tokenizer["tokenizer_json"]
     model = spec.get("model") or {}
+    if model.get("type") == "BPE" and (spec.get("decoder") or {}).get("type") not in (None, "ByteLevel"):
+        return _sentencepiece_tokenizer(tokenizer, vocabulary_size)
     if model.get("type") != "BPE" or (spec.get("decoder") or {}).get("type") != "ByteLevel":
-        raise ExportError("only byte-level BPE tokenizers can be written to GGUF")
+        raise ExportError("only byte-level BPE and SentencePiece-style tokenizers can be written to GGUF")
     tokens = {int(i): token for token, i in model["vocab"].items()}
     types = dict.fromkeys(tokens, 1)
     for added in spec.get("added_tokens") or []:
@@ -417,11 +422,56 @@ def _gguf_tokenizer(tokenizer: Mapping[str, Any] | None, vocabulary_size: int) -
     raise ExportError("the tokenizer's pre-tokenizer has no GGUF equivalent")
 
 
+def _sentencepiece_tokenizer(tokenizer: Mapping[str, Any], vocabulary_size: int) -> list[tuple[str, int, Any]]:
+    """A SentencePiece-style tokenizer as a GGUF ``llama`` tokenizer: its pieces, scores from its merge order (the
+    first merge that makes a piece ranks it), token types and the space prefix, checked to encode the probes (also
+    around a special token) exactly like the original (:func:`etalii_dllm.bpe.sentencepiece_merges` reads it back)."""
+    spec = tokenizer["tokenizer_json"]
+    model = spec["model"]
+    tokens = {int(i): str(token) for token, i in model["vocab"].items()}
+    types = {i: 6 if bpe._BYTE_TOKEN.fullmatch(token) else 1 for i, token in tokens.items()}
+    if model.get("unk_token") in model["vocab"]:
+        types[int(model["vocab"][model["unk_token"]])] = 2
+    specials = []
+    for added in spec.get("added_tokens") or []:
+        tokens[int(added["id"])] = added["content"]
+        types[int(added["id"])] = 3 if added.get("special") else 4
+        if added.get("special"):
+            specials.append(added["content"])
+    size = max(vocabulary_size, max(tokens) + 1)
+    merges = [m.split(" ", 1) if isinstance(m, str) else m for m in model.get("merges") or []]
+    rank = {}
+    for index, (left, right) in enumerate(merges):
+        rank.setdefault(left + right, index)
+    names = [tokens.get(i, f"[PAD{i}]") for i in range(size)]
+    kinds = [types.get(i, 5) for i in range(size)]
+    scores = [-float(rank[name]) if kinds[i] == 1 and name in rank else -float(len(merges) + i) if kinds[i] == 1
+              else 0.0 for i, name in enumerate(names)]  # fmt: skip
+    original = bpe.from_model_header(tokenizer)
+    probes = [*_PROBES, *(f"{probe}{special}{probe}" for special in specials[:1] for probe in _PROBES[:2])]
+    for add_space_prefix in (True, False):
+        metadata = {
+            "tokenizer.ggml.model": "llama",
+            "tokenizer.ggml.tokens": names,
+            "tokenizer.ggml.scores": scores,
+            "tokenizer.ggml.token_type": kinds,
+            "tokenizer.ggml.add_space_prefix": add_space_prefix,
+        }
+        candidate = bpe.BpeTokenizer(bpe.spec_from_gguf(metadata))
+        if all(candidate.encode(text) == original.encode(text) for text in probes):
+            return [(key, *_typed(key.removeprefix("tokenizer.ggml."), value)) for key, value in metadata.items()]
+    raise ExportError("the SentencePiece-style tokenizer does not encode like a GGUF llama tokenizer")
+
+
 def _typed(key: str, value: Any) -> tuple[int, Any]:
     if key in ("tokens", "merges"):
         return _ARRAY, (_STRING, list(value))
     if key == "token_type":
         return _ARRAY, (_I32, [int(v) for v in value])
+    if key == "scores":
+        return _ARRAY, (_F32, [float(v) for v in value])
+    if key == "add_space_prefix":
+        return _BOOL, bool(value)
     return _STRING, str(value)
 
 

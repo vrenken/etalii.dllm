@@ -842,6 +842,19 @@ instead. `--mcp-root DIR` offers directories to servers that ask for roots, sort
 the model's answers to the server's sampling and elicitation requests, and `dllm replay` checks them too. Details:
 [MCP](mcp.md#elicitation-and-roots).
 
+## 43. SentencePiece models from GGUF
+
+```bash
+dllm import tinyllama-1.1b-chat-v1.0.Q8_0.gguf -o tinyllama.dllm
+dllm --model tinyllama.dllm chat "Hello"
+dllm export tinyllama.dllm --format gguf -o tinyllama.gguf
+```
+
+GGUF files with a SentencePiece vocabulary (TinyLlama, Llama 2, Mistral, Phi-3) import directly now; the tokenizer
+follows SentencePiece's own merge order, checked token for token against the `sentencepiece` library. Models with a
+SentencePiece-style tokenizer also export back to GGUF. Details:
+[model building](model-building.md#sentencepiece-models-through-gguf).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
@@ -872,8 +885,7 @@ the model's answers to the server's sampling and elicitation requests, and `dllm
   token references (`<...>`) ([grammars](api.md#grammars)). No images or audio.
 - MCP servers' URL-mode elicitations (open a web page) are declined and nobody is asked interactively (the model
   answers forms), and image, audio or binary MCP content is refused.
-- Models with Unigram or WordPiece tokenizers, GGUF files with a SentencePiece vocabulary (convert from the
-  Hugging Face checkpoint instead), dynamic NTK RoPE scaling or other architectures (including DeepSeek's mixtures
+- Models with Unigram or WordPiece tokenizers, dynamic NTK RoPE scaling or other architectures (including DeepSeek's mixtures
   of experts with several shared experts and multi-head latent attention) are refused at import.
 - Granite MoE's experts are stored fused, so a LoRA adapter on them cannot be exported in the PEFT format (the
   merged model exports fine), and llama.cpp has no Granite MoE architecture to export a GGUF file to.
