@@ -569,6 +569,52 @@ def attention(
     return out
 
 
+def biased_attention(
+    q: npt.ArrayLike, k: npt.ArrayLike, v: npt.ArrayLike, bias: npt.ArrayLike, scale: float
+) -> np.ndarray:
+    """DeBERTa's attention: for each query ``t`` and head ``h``, scores ``(sum_i q_i k_ji + bias[h, t, j]) * scale``
+    in double over every key, then the softmax and value sums of :func:`attention`."""
+    qv, kv, vv = (np.asarray(a, dtype=F32) for a in (q, k, v))
+    bv = np.asarray(bias, dtype=F32).astype(F64)
+    q_len, heads, head_dim = qv.shape
+    kv_len = kv.shape[0]
+    out = np.zeros((q_len, heads, vv.shape[2]), dtype=F32)
+    keys = kv.astype(F64)
+    values = vv.astype(F64)
+    for t in range(q_len):
+        qt = qv[t].astype(F64)
+        scores = np.zeros((heads, kv_len), dtype=F64)
+        for i in range(head_dim):
+            scores += qt[:, i : i + 1] * keys[:, :, i].T
+        scores = (scores + bv[:, t, :]) * scale
+        top = scores[:, 0].copy()
+        for j in range(1, kv_len):
+            top = np.where(scores[:, j] > top, scores[:, j], top)
+        p = exp(scores - top[:, None])
+        total = np.zeros(heads, dtype=F64)
+        for j in range(kv_len):
+            total += p[:, j]
+        acc = np.zeros((heads, vv.shape[2]), dtype=F64)
+        for j in range(kv_len):
+            acc += p[:, j : j + 1] * values[j]
+        out[t] = _round(acc * (1.0 / total)[:, None])
+    return out
+
+
+def relative_bucket(distance: int, buckets: int, max_position: int) -> int:
+    """DeBERTa's log bucket of the relative distance ``distance``: itself when ``|distance| <= buckets // 2`` (or
+    without buckets), else ``sign * (ceil(f32(f32(log(f32(|d| / mid))) / f32(log(f32((max - 1) / mid)))) *
+    (mid - 1)) + mid)`` with every step rounded to float32."""
+    mid = buckets // 2
+    if buckets <= 0 or max_position <= 0 or abs(distance) <= mid:
+        return distance
+    ratio = F32(abs(distance)) / F32(mid)
+    numerator = F32(float(log(float(ratio))))
+    denominator = F32(float(log(float(F32((max_position - 1) / mid)))))
+    scaled = F32(numerator / denominator) * F32(mid - 1)
+    return (1 if distance > 0 else -1) * (math.ceil(float(scaled)) + mid)
+
+
 # -- random numbers and sampling ----------------------------------------------------------------------------------
 
 _MASK = (1 << 64) - 1
@@ -1403,6 +1449,8 @@ class ReferenceEncoder:
         config, w = self.config, self.w
         if config.family == "modernbert":
             return self._modernbert_states(tokens)
+        if config.family == "deberta":
+            return self._deberta_states(tokens, types)
         count = len(tokens)
         kinds = np.zeros(count, dtype=np.int64) if types is None else np.asarray(types, dtype=np.int64)
         words = w["token_embedding.weight"][np.asarray(tokens, dtype=np.int64)]
@@ -1431,6 +1479,52 @@ class ReferenceEncoder:
             activated = gelu(up, "tanh" if config.activation == "gelu_tanh" else "none")
             x = norm(x + project(activated, p + "mlp.down"), p + "mlp_norm")
         return x
+
+    def _deberta_states(self, tokens: Sequence[int], types: Sequence[int] | None) -> np.ndarray:
+        """``h = LayerNorm(word (+ type))``; ``R = LayerNorm(relative)``; per layer the BERT layer with attention
+        scores ``(q_i . k_j + q_i . pk[d] + k_j . pq[d]) / sqrt(3 head_dim)``, ``pq``/``pk`` the layer's query and
+        key projections of ``R`` and ``d = clamp(bucket(i - j) + span, 0, 2 span - 1)``; the two position terms
+        each rounded to float32 (a dot in double) and added in float32."""
+        config, w = self.config, self.w
+        count, heads, head_dim = len(tokens), config.heads, config.head_dim
+        x = w["token_embedding.weight"][np.asarray(tokens, dtype=np.int64)]
+        if config.type_vocabulary_size:
+            kinds = np.zeros(count, dtype=np.int64) if types is None else np.asarray(types, dtype=np.int64)
+            x = x + w["token_type_embedding.weight"][kinds]
+
+        def norm(values: np.ndarray, name: str) -> np.ndarray:
+            return layer_norm(values, w[name + ".weight"], w[name + ".bias"], config.rms_norm_eps)
+
+        def project(values: np.ndarray, name: str) -> np.ndarray:
+            return linear(values, w[name + ".weight"], w[name + ".bias"])
+
+        h = norm(x, "embedding_norm")
+        table = norm(w["relative_embedding.weight"], "relative_norm")
+        span = config.relative_span
+        rows = np.zeros((count, count), dtype=np.int64)
+        for i in range(count):
+            for j in range(count):
+                bucket = relative_bucket(i - j, config.position_buckets, config.max_relative_positions)
+                rows[i, j] = min(max(bucket + span, 0), 2 * span - 1)
+        scale = 1.0 / math.sqrt(3 * head_dim)
+        shape = (count, heads, head_dim)
+        for layer in range(config.layers):
+            p = f"layers.{layer}."
+            q, k, v = (project(h, p + f"attention.{n}").reshape(shape) for n in ("q", "k", "v"))
+            pq = project(table, p + "attention.q").reshape(len(table), heads, head_dim)
+            pk = project(table, p + "attention.k").reshape(len(table), heads, head_dim)
+            bias = np.zeros((heads, count, count), dtype=F32)
+            for head in range(heads):
+                c2p = linear(q[:, head], pk[:, head])  # [count, table rows]
+                p2c = linear(k[:, head], pq[:, head])
+                for i in range(count):
+                    for j in range(count):
+                        bias[head, i, j] = c2p[i, rows[i, j]] + p2c[j, rows[i, j]]
+            attended = biased_attention(q, k, v, bias, scale)
+            h = norm(h + project(attended.reshape(count, -1), p + "attention.o"), p + "attention_norm")
+            activated = gelu(project(h, p + "mlp.up"))
+            h = norm(h + project(activated, p + "mlp.down"), p + "mlp_norm")
+        return h
 
     def _modernbert_states(self, tokens: Sequence[int]) -> np.ndarray:
         """``h = LayerNorm(word)``, then per layer ``h = h + o(attention(rope(q(x)), rope(k(x)), v(x)))`` with
@@ -1483,6 +1577,9 @@ class ReferenceEncoder:
             normed = layer_norm(head, w["pooler_norm.weight"], zeros, self.config.rms_norm_eps)
             return linear(normed, w["classifier.weight"], w["classifier.bias"]).reshape(-1)
         first = self.hidden_states(tokens, types)[:1]
+        if self.config.family == "deberta":  # the context pooler: gelu, not tanh
+            return linear(gelu(linear(first, w["pooler.weight"], w["pooler.bias"])), w["classifier.weight"],
+                          w["classifier.bias"]).reshape(-1)  # fmt: skip
         pooled = _round(tanh(linear(first, w["pooler.weight"], w["pooler.bias"])))
         return linear(pooled, w["classifier.weight"], w["classifier.bias"]).reshape(-1)
 

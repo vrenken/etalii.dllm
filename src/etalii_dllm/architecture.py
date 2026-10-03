@@ -27,9 +27,12 @@ from typing import Any
 # RoBERTa and XLM-RoBERTa are "bert" with a ``padding_index``: their positions count from past the padding token.
 # "modernbert" is the other encoder: rotary positions with a global and a local base, pre-norm layers with bias-free
 # LayerNorms, no biases, bidirectional attention that alternates between global and local (windowed) layers and a
-# gated GELU MLP, then a final norm.
+# gated GELU MLP, then a final norm. "deberta" (DeBERTa-v2 and v3) is BERT's post-norm layout without absolute
+# positions: its attention adds content-to-position and position-to-content scores over a shared table of
+# log-bucketed relative position embeddings (disentangled attention).
 FAMILIES = (
     "bert",
+    "deberta",
     "gemma2",
     "gemma3",
     "granite",
@@ -49,7 +52,7 @@ FAMILIES = (
 NORM_PLACEMENTS = ("pre", "post", "sandwich")
 ACTIVATIONS = ("silu", "gelu_tanh", "gelu")
 QK_NORM_SCOPES = ("head", "all")
-ENCODER_FAMILIES = ("bert", "modernbert")
+ENCODER_FAMILIES = ("bert", "deberta", "modernbert")
 CLASSIFIER_POOLINGS = ("cls", "mean")
 ENCODER_ONLY = "an encoder model embeds text and cannot generate; use it with dllm embed, /v1/embeddings or dllm index"
 
@@ -136,6 +139,12 @@ class TransformerConfig:
     classifier_pooling: str | None = None
     """ModernBERT sequence classification: the state the head reads, ``"cls"`` (the first position) or ``"mean"``
     (the mean over every position); ``None`` for BERT, whose head always reads ``[CLS]``."""
+    position_buckets: int = 0
+    """DeBERTa: the log buckets of relative positions (``position_buckets``; relative distances of at least half of
+    it share buckets that grow logarithmically up to ``max_relative_positions``); 0 means no bucketing."""
+    max_relative_positions: int = 0
+    """DeBERTa: the largest relative distance the buckets reach; the relative position table has
+    ``2 * relative_span`` rows (:attr:`relative_span`). 0 for every other family."""
 
     def __post_init__(self) -> None:
         if self.family not in FAMILIES:
@@ -154,6 +163,10 @@ class TransformerConfig:
                 raise ValueError(f"{self.family} needs a gelu or gelu_tanh MLP")
             if self.family == "bert" and self.type_vocabulary_size < 1:
                 raise ValueError("bert needs token types")
+            if (self.family == "deberta") != (self.max_relative_positions > 0) or self.position_buckets < 0:
+                raise ValueError("deberta, and only deberta, needs max_relative_positions (and position_buckets >= 0)")
+            if self.family == "deberta" and self.padding_index is not None:
+                raise ValueError("deberta has no padding positions")
             if self.family == "modernbert" and (self.type_vocabulary_size or self.padding_index is not None):
                 raise ValueError("modernbert has neither token types nor padding positions")
             if self.kv_heads != self.heads or self.experts:
@@ -172,6 +185,8 @@ class TransformerConfig:
             or self.classifier_labels
             or self.padding_index is not None
             or self.classifier_pooling is not None
+            or self.max_relative_positions
+            or self.position_buckets
         ):
             raise ValueError(
                 "the plain gelu MLP, token types, classifiers and padding positions are for bert (and modernbert) "
@@ -226,8 +241,14 @@ class TransformerConfig:
 
     @property
     def is_encoder(self) -> bool:
-        """Whether the model is an encoder, BERT or ModernBERT (it embeds text and does not generate)."""
+        """Whether the model is an encoder, BERT, DeBERTa or ModernBERT (it embeds text and does not generate)."""
         return self.family in ENCODER_FAMILIES
+
+    @property
+    def relative_span(self) -> int:
+        """DeBERTa: half the rows of the relative position table, ``position_buckets`` when bucketed, else
+        ``max_relative_positions``."""
+        return self.position_buckets if self.position_buckets > 0 else self.max_relative_positions
 
     def position_ids(self, tokens: Sequence[int]) -> list[int]:
         """An encoder's position ids for ``tokens``: 0, 1, ... for BERT and ModernBERT; for RoBERTa
@@ -329,6 +350,8 @@ class TransformerConfig:
             ("shared_expert_gate", False),
             ("type_vocabulary_size", 0),
             ("classifier_labels", 0),
+            ("position_buckets", 0),
+            ("max_relative_positions", 0),
         )
         for name, default in defaults:
             if values[name] == default:
@@ -401,16 +424,18 @@ class TransformerConfig:
         if self.family == "modernbert":
             return self._modernbert_shapes()
         hidden = self.hidden_size
-        shapes: dict[str, tuple[int, ...]] = {
-            "token_embedding.weight": (self.vocabulary_size, hidden),
-            "position_embedding.weight": (
-                self.context_length + (0 if self.padding_index is None else self.padding_index + 1),
-                hidden,
-            ),
-            "token_type_embedding.weight": (self.type_vocabulary_size, hidden),
-            "embedding_norm.weight": (hidden,),
-            "embedding_norm.bias": (hidden,),
-        }
+        shapes: dict[str, tuple[int, ...]] = {"token_embedding.weight": (self.vocabulary_size, hidden)}
+        if self.family == "bert":
+            positions = self.context_length + (0 if self.padding_index is None else self.padding_index + 1)
+            shapes["position_embedding.weight"] = (positions, hidden)
+        if self.type_vocabulary_size:
+            shapes["token_type_embedding.weight"] = (self.type_vocabulary_size, hidden)
+        shapes["embedding_norm.weight"] = (hidden,)
+        shapes["embedding_norm.bias"] = (hidden,)
+        if self.family == "deberta":
+            shapes["relative_embedding.weight"] = (2 * self.relative_span, hidden)
+            shapes["relative_norm.weight"] = (hidden,)
+            shapes["relative_norm.bias"] = (hidden,)
         q = self.heads * self.head_dim
         for i in range(self.layers):
             p = f"layers.{i}."

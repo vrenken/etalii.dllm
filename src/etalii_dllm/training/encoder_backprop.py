@@ -83,6 +83,9 @@ class EncoderGradients:
     def __init__(self, config: TransformerConfig) -> None:
         if not config.is_encoder:
             raise ValueError(f"{config.family} is a decoder; its gradients are DecoderGradients")
+        if config.family == "deberta":
+            raise ValueError("fine-tuning DeBERTa encoders is not supported yet (their disentangled attention has no "
+                             "backward pass here)")  # fmt: skip
         self.config = config
         self.modern = config.family == "modernbert"
         if self.modern:

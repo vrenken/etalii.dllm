@@ -110,6 +110,7 @@ dllm export ms-marco-tuned.dllm --format gguf -o ms-marco-tuned.gguf          # 
   `global_attn_every_n_layers` (or `layer_types` when no period fits) and the classifier pooling, plus the
   sentence-transformers modules of an embedder. Before writing, the config is read back through the importer and
   must give the same model. llama.cpp's GGUF layout has no ModernBERT, so `--format gguf` refuses it.
+- **DeBERTa** encoders (Phase 60) do not export yet.
 
 ### SentencePiece models through GGUF
 

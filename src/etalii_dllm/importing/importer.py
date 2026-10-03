@@ -618,9 +618,9 @@ def _embedding_settings(directory: Path) -> dict[str, Any] | None:
 _BERT_ACTIVATIONS = {"gelu": "gelu", "gelu_new": "gelu_tanh", "gelu_pytorch_tanh": "gelu_tanh"}
 
 
-_ENCODER_MODEL_TYPES = ("bert", "modernbert", "roberta", "xlm-roberta")
+_ENCODER_MODEL_TYPES = ("bert", "deberta-v2", "modernbert", "roberta", "xlm-roberta")
 """The ``model_type`` values imported as encoders: RoBERTa and XLM-RoBERTa are BERT with positions counted from
-past the padding token; ModernBERT is an encoder family of its own."""
+past the padding token; DeBERTa-v2/v3 and ModernBERT are encoder families of their own."""
 
 
 def bert_config(config: dict[str, Any], context_length: int | None = None) -> TransformerConfig:
@@ -732,6 +732,111 @@ def modernbert_config(config: dict[str, Any], context_length: int | None = None)
         )
     except ValueError as error:
         raise ModelImportError(str(error)) from error
+
+
+def deberta_config(config: dict[str, Any], context_length: int | None = None) -> TransformerConfig:
+    """Maps a Hugging Face DeBERTa-v2/v3 ``config.json`` (``model_type`` ``deberta-v2``) to our description (family
+    ``deberta``): relative attention over ``position_buckets`` log buckets reaching ``max_relative_positions`` (or
+    ``max_position_embeddings``), with the key and query projections shared with the position terms
+    (``share_att_key``), both ``c2p`` and ``p2c`` terms and the relative-embedding LayerNorm, as DeBERTa-v3 and the
+    larger v2 models have them. Absolute positions, the convolution layer, a factorised embedding, ``z_steps`` and
+    other attention variants are refused."""
+    if context_length is not None:
+        raise ModelImportError("--context-length is for decoders")
+    hf_activation = str(config.get("hidden_act", "gelu"))
+    if hf_activation not in _BERT_ACTIVATIONS:
+        raise ModelImportError(f"activation {hf_activation!r} is not supported")
+    if str(config.get("pooler_hidden_act", hf_activation)) != hf_activation:
+        raise ModelImportError("a pooler activation that differs from the MLP's is not supported")
+    heads, hidden = int(config["num_attention_heads"]), int(config["hidden_size"])
+    if hidden % heads or int(config.get("attention_head_size", hidden // heads)) != hidden // heads:
+        raise ModelImportError("hidden_size must be num_attention_heads times the head size")
+    pos_types = config.get("pos_att_type") or []
+    if isinstance(pos_types, str):
+        pos_types = [part.strip() for part in pos_types.lower().split("|")]
+    norms = [part.strip() for part in str(config.get("norm_rel_ebd", "none")).lower().split("|")]
+    refusals = {
+        "relative_attention": not config.get("relative_attention", False),
+        "position_biased_input": config.get("position_biased_input", True),
+        "share_att_key": not config.get("share_att_key", False),
+        "pos_att_type": sorted(pos_types) != ["c2p", "p2c"],
+        "norm_rel_ebd": "layer_norm" not in norms,
+        "conv_kernel_size": int(config.get("conv_kernel_size", 0) or 0) > 0,
+        "embedding_size": int(config.get("embedding_size", hidden) or hidden) != hidden,
+        "pooler_hidden_size": int(config.get("pooler_hidden_size", hidden) or hidden) != hidden,
+        "z_steps": int(config.get("z_steps", 0) or 0) > 1,
+    }
+    refused = [name for name, bad in refusals.items() if bad]
+    if refused:
+        raise ModelImportError(
+            f"DeBERTa with this {', '.join(refused)} is not supported: relative attention with shared position "
+            "projections, c2p|p2c, the relative LayerNorm and no absolute positions (DeBERTa-v3) is"
+        )
+    positions = int(config.get("max_position_embeddings", 512))
+    max_relative = int(config.get("max_relative_positions", -1))
+    try:
+        return TransformerConfig(
+            family="deberta",
+            vocabulary_size=int(config["vocab_size"]),
+            hidden_size=hidden,
+            intermediate_size=int(config["intermediate_size"]),
+            layers=int(config["num_hidden_layers"]),
+            heads=heads,
+            kv_heads=heads,
+            head_dim=hidden // heads,
+            context_length=positions,
+            rms_norm_eps=float(config.get("layer_norm_eps", 1e-7)),
+            rope_theta=0.0,
+            attention_bias=True,
+            activation=_BERT_ACTIVATIONS[hf_activation],
+            tie_word_embeddings=True,
+            type_vocabulary_size=int(config.get("type_vocab_size", 0)),
+            position_buckets=max(int(config.get("position_buckets", -1)), 0),
+            max_relative_positions=max_relative if max_relative >= 1 else positions,
+        )
+    except ValueError as error:
+        raise ModelImportError(str(error)) from error
+
+
+_DEBERTA_LAYER = re.compile(r"^encoder\.layer\.(\d+)\.(.+)\.(weight|bias)$")
+_DEBERTA_LAYER_NAMES = {
+    "attention.self.query_proj": "attention.q",
+    "attention.self.key_proj": "attention.k",
+    "attention.self.value_proj": "attention.v",
+    "attention.output.dense": "attention.o",
+    "attention.output.LayerNorm": "attention_norm",
+    "intermediate.dense": "mlp.up",
+    "output.dense": "mlp.down",
+    "output.LayerNorm": "mlp_norm",
+}
+_DEBERTA_GLOBAL_NAMES = {
+    "embeddings.word_embeddings": "token_embedding",
+    "embeddings.token_type_embeddings": "token_type_embedding",
+    "embeddings.LayerNorm": "embedding_norm",
+    "encoder.rel_embeddings": "relative_embedding",
+    "encoder.LayerNorm": "relative_norm",
+}
+
+
+def _deberta_name(name: str, classifier: bool = False) -> str | None:
+    """Our name for a DeBERTa-v2/v3 checkpoint tensor (with or without the ``deberta.`` prefix); None for the
+    pre-training heads, buffers and unused absolute positions, and for the pooler unless the model is a
+    ``classifier``."""
+    name = name.removeprefix("deberta.")
+    stem, _, parameter = name.rpartition(".")
+    if stem in ("pooler.dense", "classifier") and parameter in ("weight", "bias"):
+        return f"{'pooler' if stem == 'pooler.dense' else 'classifier'}.{parameter}" if classifier else None
+    if name.startswith(("lm_predictions.", "mask_predictions.", "cls.", "lm_head.")) or name in (
+        "embeddings.position_ids",
+        "embeddings.position_embeddings.weight",
+    ):
+        return None
+    if stem in _DEBERTA_GLOBAL_NAMES and parameter in ("weight", "bias"):
+        return f"{_DEBERTA_GLOBAL_NAMES[stem]}.{parameter}"
+    match = _DEBERTA_LAYER.match(name)
+    if match and match.group(2) in _DEBERTA_LAYER_NAMES:
+        return f"layers.{int(match.group(1))}.{_DEBERTA_LAYER_NAMES[match.group(2)]}.{match.group(3)}"
+    raise ModelImportError(f"unexpected tensor {name!r}")
 
 
 _MODERNBERT_LAYER = re.compile(r"^layers\.(\d+)\.(.+)\.weight$")
@@ -877,9 +982,17 @@ def _convert_bert(directory: Path, raw_config: dict[str, Any], context_length: i
     """A BERT, RoBERTa or XLM-RoBERTa checkpoint (the bare model or a pre-training model; sentence-transformers
     encoders such as all-MiniLM-L6-v2, bge-small-en-v1.5, all-distilroberta-v1 and
     paraphrase-multilingual-MiniLM-L12-v2), a ModernBERT one (gte-modernbert-base, modernbert-embed-base), or a
-    sequence-classification cross-encoder such as ms-marco-MiniLM-L6-v2 or gte-reranker-modernbert-base."""
+    sequence-classification cross-encoder such as ms-marco-MiniLM-L6-v2 or gte-reranker-modernbert-base; DeBERTa-v2
+    and v3 likewise (nli-deberta-v3-small, mxbai-rerank-xsmall-v1)."""
     modern = raw_config.get("model_type") == "modernbert"
-    config = (modernbert_config if modern else bert_config)(raw_config, context_length)
+    deberta = raw_config.get("model_type") == "deberta-v2"
+    mapping = modernbert_config if modern else deberta_config if deberta else bert_config
+    config = mapping(raw_config, context_length)
+    if deberta and not (directory / "tokenizer.json").exists():
+        raise ModelImportError(
+            "this DeBERTa checkpoint has no tokenizer.json (only spm.model); save it with a fast tokenizer first, "
+            "for example AutoTokenizer.from_pretrained(dir).save_pretrained(dir)"
+        )
     checkpoint = open_checkpoint(directory)
     classifier: dict[str, Any] | None = None
     pooling: dict[str, Any] | None = None
@@ -906,7 +1019,7 @@ def _convert_bert(directory: Path, raw_config: dict[str, Any], context_length: i
         if modern:
             tensors.update(_modernbert_tensors(tensor, config, classifier is not None))
             continue
-        name = _bert_name(tensor.name, classifier is not None)
+        name = (_deberta_name if deberta else _bert_name)(tensor.name, classifier is not None)
         if name is None:
             continue
         if tensor.dtype not in ("F32", "F16", "BF16"):

@@ -433,6 +433,19 @@ def attention(
     return Tensor(_kernels.attention(qa, ka, va, s, causal, offset, _window(window), softcap or 0.0))
 
 
+def biased_attention(
+    q: npt.ArrayLike | Tensor,
+    k: npt.ArrayLike | Tensor,
+    v: npt.ArrayLike | Tensor,
+    bias: npt.ArrayLike | Tensor,
+    scale: float,
+) -> Tensor:
+    """Attention over every key with an additive score ``bias[heads, q_len, kv_len]`` (DeBERTa's disentangled
+    attention): ``s_j = (q . k_j + bias_j) * scale`` in double, then the softmax and value sums of :func:`attention`.
+    ``q``, ``k`` and ``v`` are ``[length, heads, dim]`` with the same heads."""
+    return Tensor(_kernels.biased_attention(_float32(q), _float32(k), _float32(v), _float32(bias), float(scale)))
+
+
 def softcap(x: npt.ArrayLike | Tensor, cap: float) -> Tensor:
     """Logit soft-capping (Gemma 2): ``cap * tanh(x / cap)`` elementwise, in double from dllm ``tanh``."""
     return Tensor(_kernels.softcap(_float32(x), float(cap)))

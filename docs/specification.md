@@ -177,6 +177,11 @@ multiple of 32 are quantised. The embedding stays float32, and the LM head is qu
 
 Keys before `first` and after `end` are never read, so a prefill and token-by-token decoding give the same bits.
 
+**Biased attention (DeBERTa).** `biased_attention(q, k, v, bias, scale)` with `q[t, h, d]`, `k[j, h, d]`,
+`v[j, h, dv]` and `bias[h, t, j]` (float32): every key is visible, and for each query and head
+`s_j = (sum_i q_i * k_ji + bias[h, t, j]) * scale`, the dot over `i` ascending in double and the bias added in double
+before the product; steps 2 and 3 above follow.
+
 ## 4. Random numbers and sampling
 
 **Generator.** xoshiro256\*\* seeded through SplitMix64, with 64-bit unsigned wrapping arithmetic.
@@ -470,7 +475,7 @@ Not covered here, but just as fixed:
 
 ## 6. The encoder
 
-A model of family `bert` or `modernbert` is an encoder: it turns all its tokens into hidden states at once, for
+A model of family `bert`, `deberta` or `modernbert` is an encoder: it turns all its tokens into hidden states at once, for
 embeddings, and does not generate. A `bert` encoder, all in float32 unless stated:
 
 1. `x = (word[t] + type[s]) + position[p]` for the token `t` of type `s` with position id `p` (two float32 additions
@@ -504,6 +509,25 @@ with a zero bias, which adds nothing):
       the gated MLP with the exact GELU (`gelu_tanh` for the tanh form), the product a float32 multiplication.
 3. The output is `layer_norm(h, final_norm)`.
 
+A `deberta` encoder (DeBERTa-v2 and v3) is the `bert` encoder without position embeddings (and without type
+embeddings when `type_vocabulary_size` is 0) and with disentangled attention:
+
+1. `x = layer_norm(word[t] (+ type[s]), embedding_norm)`; the relative position table is
+   `R = layer_norm(relative_embedding, relative_norm)`, `2 * span` rows with `span = position_buckets` (or
+   `max_relative_positions` without buckets).
+2. The relative row of query `i` against key `j` is `d(i, j) = min(max(bucket(i - j) + span, 0), 2 * span - 1)`.
+   With `mid = position_buckets // 2` and `M = max_relative_positions`, `bucket(r) = r` when `|r| <= mid` (or there
+   are no buckets), else `sign(r) * (ceil(f32(f32(a / b) * f32(mid - 1))) + mid)` with
+   `a = f32(log(f32(f32(|r|) / f32(mid))))` and `b = f32(log(f32((M - 1) / mid)))`, `(M - 1) / mid` a double
+   division and `log` the portable logarithm in double.
+3. For each layer, as in `bert` but with attention replaced:
+   1. `q, k, v = linear(x, W, bias)`, and the layer's own query and key projections of the table,
+      `pq = linear(R, Wq, bq)` and `pk = linear(R, Wk, bk)` (only the rows some `d(i, j)` reads need computing).
+   2. Per head `h`: `c2p = linear(q_h, pk_h)` and `p2c = linear(k_h, pq_h)` (each a `[positions, rows]` matrix of
+      dot products, rounded to float32), and `bias[h, i, j] = f32(c2p[i, d(i, j)] + p2c[j, d(i, j)])`.
+   3. `a = biased_attention(q, k, v, bias, 1 / sqrt(3 * head_dim))`, the scale a double.
+   4. `x = layer_norm(x + linear(a, Wo, bo), attention_norm)`, then the MLP as in `bert`.
+
 **Embedding.** The text gets the model's prompt for the request's `input_type` (if any) and is encoded with the
 tokenizer; for an encoder its tokens are cut to `max_tokens - s`, where `s` is the number of special tokens the
 tokenizer adds, and the special tokens (`[CLS] … [SEP]`) are then added. The vector is the first state (`cls`
@@ -524,7 +548,9 @@ the template adds `[CLS] A [SEP] B [SEP]` with token types 0 for `[CLS] A [SEP]`
 same computation, stored as the pooler and the classifier. ModernBERT's head reads the first state
 (`classifier_pooling` `cls`) or the mean of every state (`mean`, computed as for an embedding), then
 `logits = linear(layer_norm(gelu(linear(pooled, Wpool)), pooler_norm), Wcls, bcls)`; its pair template is
-`[CLS] A [SEP] B [SEP]` with every token of type 0. A reranking
+`[CLS] A [SEP] B [SEP]` with every token of type 0. DeBERTa's head (the context pooler) is
+`logits = linear(gelu(linear(x[0], Wpool, bpool)), Wcls, bcls)`; its pair template is `[CLS] A [SEP] B [SEP]` with
+types 0 and 1, which only matter when the model has type embeddings. A reranking
 score is the single logit, or `sigmoid(logit)` in double when the model was saved with that activation.
 
 ## Checking an implementation

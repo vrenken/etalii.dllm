@@ -816,6 +816,45 @@ inline void attention_reference(const float* q, const float* k, const float* v, 
     }
 }
 
+// Attention with an additive score bias (DeBERTa's disentangled attention, whose content-to-position and
+// position-to-content terms arrive as bias[heads, q_len, kv_len]).
+//   q [q_len, heads, head_dim]   k [kv_len, heads, head_dim]   v [kv_len, heads, value_dim]
+//   out [q_len, heads, value_dim]
+// Every key is visible. For each (query t, head h) on its own: s_j = (sum_i q_i k_ji + bias[h, t, j]) * scale, the
+// dot over head_dim ascending in double and the bias added in double before the product; then attention_finish():
+// softmax with the maximum subtracted and the sum over keys ascending, the value sum over keys ascending. Threads
+// split the (query, head) rows, so the bits do not depend on the thread count.
+inline void biased_attention(const float* q, const float* k, const float* v, const float* bias, float* out,
+                             std::size_t q_len, std::size_t kv_len, std::size_t heads, std::size_t head_dim,
+                             std::size_t value_dim, double scale) {
+    parallel_for(q_len * heads, [&](std::size_t row) {
+        const std::size_t t = row / heads;
+        const std::size_t h = row % heads;
+        float* oh = out + (t * heads + h) * value_dim;
+        if (kv_len == 0) {
+            for (std::size_t i = 0; i < value_dim; ++i) {
+                oh[i] = 0.0f;
+            }
+            return;
+        }
+        thread_local std::vector<double> scores;
+        thread_local std::vector<double> acc;
+        scores.resize(kv_len);
+        acc.resize(value_dim > 0 ? value_dim : 1);
+        const float* qh = q + (t * heads + h) * head_dim;
+        const float* bh = bias + (h * q_len + t) * kv_len;
+        for (std::size_t j = 0; j < kv_len; ++j) {
+            const float* kj = k + (j * heads + h) * head_dim;
+            double dotp = 0.0;
+            for (std::size_t i = 0; i < head_dim; ++i) {
+                dotp += static_cast<double>(qh[i]) * static_cast<double>(kj[i]);
+            }
+            scores[j] = (dotp + static_cast<double>(bh[j])) * scale;
+        }
+        attention_finish(scores.data(), v, oh, acc.data(), kv_len, heads, h, value_dim, 0.0);
+    });
+}
+
 // Mixture-of-experts routing of rows logits[rows, experts]: per row, the softmax of softmax() (the maximum
 // subtracted, exponentials and their total in double over experts ascending, times the reciprocal, rounded to
 // float), then the k largest probabilities in a total order (larger first, equal ones by lower expert index). With
