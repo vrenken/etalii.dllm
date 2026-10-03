@@ -20,7 +20,7 @@ from etalii_dllm import beam, scoring
 from etalii_dllm.engine import MAX_CHOICES, ChatRequest, DllmEngine, Finished, ResponseFormat, TextDelta
 from etalii_dllm.engine import default_engine as _default_engine
 from etalii_dllm.generation import ContextLengthError, TokenLogprobs
-from etalii_dllm.sampling import SamplingOptions
+from etalii_dllm.sampling import SamplingOptions, sampler_fields
 from etalii_dllm.server.contracts import (
     BeamOptions,
     ContrastOptions,
@@ -66,6 +66,20 @@ class CompletionRequest(BaseModel):
     min_p: float | None = None
     repetition_penalty: float | None = None
     repeat_last_n: int | None = None
+    typical_p: float | None = None
+    """Extension (as in llama.cpp): locally typical sampling (docs/api.md#modern-samplers)."""
+    top_n_sigma: float | None = None
+    """Extension (as in llama.cpp): keep tokens within this many standard deviations of the top logit."""
+    xtc_probability: float | None = None
+    """Extension (as in llama.cpp): XTC, the chance per token of excluding the top choices."""
+    xtc_threshold: float | None = None
+    """Extension (as in llama.cpp): how likely a choice must be for XTC to exclude it."""
+    dry_multiplier: float | None = None
+    """Extension (as in llama.cpp): the DRY repetition penalty (0 disables)."""
+    dry_base: float | None = None
+    dry_allowed_length: int | None = None
+    dry_penalty_last_n: int | None = None
+    dry_sequence_breakers: list[str] | None = None
     guided_regex: str | None = None
     grammar: str | None = None
     """Extension (as in llama.cpp): a GBNF grammar the completion must follow (docs/api.md#grammars)."""
@@ -160,6 +174,7 @@ def _requests(request: CompletionRequest, engine: DllmEngine) -> list[ChatReques
         logit_bias=SamplingOptions.bias(request.logit_bias),
         **(request.watermark.sampling() if request.watermark else {}),
         **guided(request.guidance, request.contrast),
+        **sampler_fields(request),
     )
     if request.guided_regex is not None and request.grammar is not None:
         raise ValueError("guided_regex and grammar cannot be combined")

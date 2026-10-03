@@ -196,7 +196,15 @@ is adjusted on its own, so the order tokens are visited in does not matter:
    `x > 0`, else `x = f32(x * f32(r))`.
 3. Frequency and presence penalties: for every token the output (not the prompt) contains `c > 0` times,
    `x = f32(x - f32(c * frequency_penalty + presence_penalty))`, the penalty computed in double.
-4. Watermark (when a key is set; [watermarks](watermarks.md)): with `K` the first 8 bytes (little-endian) of
+4. DRY (when `dry_multiplier != 0` and `dry_penalty_last_n != 0`): `w` is the last `dry_penalty_last_n` tokens of
+   prompt plus output (all of them when it is -1), and a breaker is a token whose bytes (empty for special tokens)
+   contain the UTF-8 bytes of one of `dry_sequence_breakers`. Nothing happens when `w` has fewer than 2 tokens or
+   its last token is a breaker. Otherwise, for every position `i` from 1 to `len(w) - 1`, the match length `n` is
+   the largest `n <= min(i, 256)` such that, for every `k < n`, `w[i-1-k] == w[len(w)-1-k]` and `w[i-1-k]` is not a
+   breaker. Each token `w[i]` keeps the longest `n` over its positions. A token whose `n >= dry_allowed_length`
+   gets `x = f32(x - f32(dry_multiplier * b))`, where `b` starts at 1.0 and is multiplied by `dry_base`
+   `n - dry_allowed_length` times, all in double.
+5. Watermark (when a key is set; [watermarks](watermarks.md)): with `K` the first 8 bytes (little-endian) of
    `SHA-256("dllm-watermark/1\0" + key)`, `mix` the SplitMix64 finalizer and `G = 0x9E3779B97F4A7C15`, the seed after
    the previous token `p` (the last prompt token for the first output token, -1 without one) is
    `s = mix(K + (p + 1) * G)`, all modulo 2^64. Every token `t` with `mix(s + (t + 1) * G) < floor(gamma * 2^64)` gets
@@ -211,11 +219,24 @@ Log-probabilities reported with an answer come from the unadjusted logits.
   1. `z = f32(logits / temperature)` (a float32 division) and `p = softmax(z)`.
   2. Order the candidates by probability descending, then id ascending.
   3. Keep the first `top_k` candidates (all when `top_k` is 0).
-  4. With `top_p < 1`, keep the shortest prefix whose running double sum of `p` reaches `top_p`.
-  5. With `min_p > 0`, cut the kept prefix before the first candidate (after the first) whose `p` is below
+  4. With `top_n_sigma > 0`: over the finite adjusted logits `x` (before the temperature), in token order and in
+     double, `mean` is their sum divided by their count, `var` the sum of `(x - mean) * (x - mean)` divided by the
+     count, and `m` the number of them at least `max(x) - top_n_sigma * sqrt(var)` (at least 1; IEEE `sqrt`). Keep
+     the first `m` candidates. Without finite logits nothing is cut.
+  5. With `typical_p < 1`: `S` is the kept `p` summed in order and `q = p / S` for each kept candidate.
+     `H` starts at 0 and, in order, `H = H - q * log(q)` for every `q > 0` (the portable `log`). A candidate's score
+     is `|-log(q) - H|` (infinite when `q` is 0). Visit the kept candidates by score ascending, then by their place
+     in the order, until the running double sum of `q` reaches `typical_p`; keep those visited, in their original
+     order.
+  6. With `top_p < 1`, keep the shortest prefix whose running double sum of `p` reaches `top_p`.
+  7. With `min_p > 0`, cut the kept prefix before the first candidate (after the first) whose `p` is below
      `min_p * p[first]` (a double product).
-  6. `total` is the kept probabilities summed in order. With `u = next_double() * total`, the token is the first
-     candidate whose running sum exceeds `u`, or the last kept candidate if none does.
+  8. `total` is the kept probabilities summed in order. With `xtc_probability > 0`, one `next_double()` is drawn;
+     when it is below `xtc_probability`, `a` is the number of leading candidates whose `p` is at least
+     `xtc_threshold * total` (a double product), and when `a >= 2` the first `a - 1` candidates are dropped and
+     `total` is summed again over the rest.
+  9. With `u = next_double() * total`, the token is the first candidate whose running sum exceeds `u`, or the last
+     kept candidate if none does.
 - Constrained decoding restricts the adjusted logits to the allowed ids (ascending) before these steps.
 - **Several choices.** Choice `i` of a request for `n` is the request with the seed `(seed + i) mod 2^64`; nothing
   else differs, so each choice is exactly the answer a single request with that seed gets.
@@ -416,7 +437,8 @@ Not covered here, but just as fixed:
 
 **On one machine.** `dllm --model m.dllm verify --reference` compares this machine's compiled kernels (whatever
 SIMD path, thread count or GPU is in use) with the reference implementation. It checks the prompt's logits and a
-greedy, a sampled and a controlled 16-token answer (every logit adjustment and `min_p` at once) and a greedy answer in a window just
+greedy, a sampled, a controlled (every logit adjustment and `min_p` at once) and a modern 16-token answer (DRY,
+top-n-sigma, typical-p and XTC at once) and a greedy answer in a window just
 longer than the prompt, which rolls it ([the context window](#the-context-window)), and a greedy answer that starts in a
 thinking block with a budget of 2 tokens ([reasoning](#reasoning)), and the prompt's scores ([prompt scoring](#prompt-scoring)), and a sampled answer with classifier-free guidance ([guided decoding](#guided-decoding)), and the three ranked answers of a beam search of width 3 with their score bits ([beam search](#beam-search)), and prints `equal` for each part, or where the two first differ. CI runs it
 for SmolLM2-135M on every release platform and SIMD path, in float32 and Q8_0.
@@ -430,8 +452,8 @@ for SmolLM2-135M on every release platform and SIMD path, in float32 and Q8_0.
   `{file, dtype, shape, sha256}`.
 - **Kernels covered.** The transcendentals, `linear` (float32 and quantised), `quantize`, `matmul`, `rms_norm`, the
   activations, `softmax`, `rope_inv_freq`, `rope`, `attention`, `random` (the `next_u64`, `next_double` and
-  `next_gaussian` streams), `sample`, `sample_controls` (logit adjustments, the watermark included, and `min_p` over a sequence of steps that
-  starts from a `prompt` input), `guided`, `contrasted` and `ensembled` (the [guided decoding](#guided-decoding) combinations), and `decoder`.
+  `next_gaussian` streams), `sample`, `sample_controls` (logit adjustments, the watermark and DRY included, `min_p`, top-n-sigma, typical-p and XTC
+  over a sequence of steps that starts from a `prompt` input; DRY's breaker tokens are given as `dry_breaker_ids`), `guided`, `contrasted` and `ensembled` (the [guided decoding](#guided-decoding) combinations), and `decoder`.
 - **The decoder cases.** Each holds a config, its tensors (inputs named `tensor.<name>`), and the logits after each
   token fed one at a time.
 

@@ -303,6 +303,7 @@ reference implementation repeats bit for bit.
 | [Guided decoding](#guided-decoding): a negative prompt, or contrast against an amateur model | `guidance: {negative_prompt, scale}`, `contrast: {beta, alpha}` (extensions; also on Anthropic messages and completions) | | `--negative-prompt`, `--guidance-scale`, `--contrast BETA`, `--contrast-alpha` |
 | [Length and stop controls](#length-and-stop-controls): a minimum length, writing past the end-of-sequence token, extra stop token ids, the stop string kept | `min_tokens`, `ignore_eos`, `stop_token_ids`, `include_stop_str_in_output` (extensions, as in vLLM; chat completions, completions and Responses) | | `--min-tokens`, `--ignore-eos`, `--stop-token-id`, `--stop`, `--include-stop` |
 | [Token healing](#token-healing) of a prompt or prefill that ends inside a word | `token_healing: true` (extension; also on Responses, Anthropic messages, completions and Ollama) | | `--token-healing` |
+| [Modern samplers](#modern-samplers): DRY, XTC, locally typical, top-n-sigma | `dry_multiplier`, `dry_base`, `dry_allowed_length`, `dry_penalty_last_n`, `dry_sequence_breakers`, `xtc_probability`, `xtc_threshold`, `typical_p`, `top_n_sigma` (extensions, as in llama.cpp; chat completions and completions) | the same names | `--dry-multiplier`, `--dry-base`, `--dry-allowed-length`, `--dry-penalty-last-n`, `--dry-sequence-breaker`, `--xtc-probability`, `--xtc-threshold`, `--typical-p`, `--top-n-sigma` |
 | A keyed [watermark](watermarks.md) | `watermark: {key, gamma, delta}` (extension; also on Anthropic messages) | `watermark_key`, `watermark_gamma`, `watermark_delta` | `--watermark-key`, `--watermark-gamma`, `--watermark-delta` |
 
 - The defaults change nothing: a repetition penalty of 1 (Ollama's own default is 1.1; here it stays off unless asked
@@ -324,6 +325,33 @@ curl -s localhost:5080/v1/chat/completions -H 'content-type: application/json' -
   "temperature": 0.8, "seed": 3, "n": 2, "frequency_penalty": 0.5,
   "response_format": {"type": "regex", "regex": "\\d{4}-\\d{2}-\\d{2}"}
 }'
+```
+
+## Modern samplers
+
+The samplers llama.cpp and text-generation-webui users reach for (Phase 49) are exact here too, with llama.cpp's
+parameter names and defaults, and are repeated bit for bit by the reference implementation
+([specification](specification.md#4-random-numbers-and-sampling)):
+
+- **DRY** ("don't repeat yourself", `dry_multiplier` > 0): a token that would extend a run already seen in the
+  prompt or answer is penalised by `dry_multiplier * dry_base^(n - dry_allowed_length)` for a run of `n >=
+  dry_allowed_length` tokens. A token whose text contains one of `dry_sequence_breakers` (default newline, `:`,
+  `"` and `*`) ends a run; runs count up to 256 tokens; `dry_penalty_last_n` limits how far back it looks (-1: all).
+  DRY changes the logits, so it works with greedy decoding too.
+- **XTC** (exclude top choices, `xtc_probability` > 0): with that chance per token, every candidate at least
+  `xtc_threshold` likely (default 0.1) except the least likely of them is dropped, so the answer avoids the most
+  obvious words. The coin flip comes from the request's seeded stream and is drawn only when XTC is on.
+- **Locally typical sampling** (`typical_p` < 1): keeps the candidates whose surprise is closest to the
+  distribution's entropy, up to `typical_p` of the probability.
+- **Top-n-sigma** (`top_n_sigma` > 0): keeps the tokens whose logit is within `top_n_sigma` standard deviations of
+  the top logit, which makes high temperatures usable.
+
+With a temperature, the steps run in this order: top-k, top-n-sigma, typical-p, top-p, min-p, XTC. They are recorded in
+receipts and cache keys only when set, so earlier receipts keep their bytes.
+
+```bash
+dllm generate --prompt "Once upon a time" --temperature 1.2 --seed 4 --top-n-sigma 1.5 --xtc-probability 0.5 \
+    --dry-multiplier 0.8
 ```
 
 ## Completions API

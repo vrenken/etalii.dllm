@@ -17,6 +17,7 @@ pytest tests/test_bpe.py -q    # one area
 | Unit | `test_kernels.py`, `test_numerics.py` | every C++ kernel against a float64 reference, portable `exp`/`log`/`sqrt` accuracy, fingerprints |
 | Unit | `test_bpe*.py`, `test_chat_template.py` | the tokenizer against the `tokenizers` reference, byte fallback, special tokens, malformed files |
 | Unit | `test_grammar*.py`, `test_tools.py` | JSON-schema constrained decoding and Hermes tool-call parsing |
+| Unit | `test_modern_samplers.py` | DRY runs, breakers and caps, XTC, typical-p and top-n-sigma, agreement with the reference sampler on random settings and constraints, APIs, CLI, `verify --reference`, golden answer |
 | Unit | `test_tool_formats.py` | Tool call formats detected from chat templates (Hermes, Llama 3, Mistral, Granite), calls constrained and parsed in each, visible special markers, nine-character Mistral ids, history rendering, golden calls |
 | Unit | `test_edge_cases.py` | `Tensor`, sampling options, tool-call parsing, prompt cache and MCP host edge cases |
 | Unit | `test_import*.py`, `test_modelfile.py` | safetensors/GGUF readers against the `safetensors`/`gguf` reference writers, `model.dllm` round trips, every malformed-input error |

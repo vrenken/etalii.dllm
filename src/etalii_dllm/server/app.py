@@ -36,7 +36,7 @@ from etalii_dllm.engine import (
     use_model_file,
 )
 from etalii_dllm.generation import ContextLengthError, TokenLogprobs
-from etalii_dllm.sampling import SamplingOptions
+from etalii_dllm.sampling import SamplingOptions, sampler_fields
 from etalii_dllm.server import anthropic_api, batches_api, completions_api, ollama_api, responses_api
 from etalii_dllm.server.contracts import (
     AssistantMessage,
@@ -152,6 +152,7 @@ def _chat_request(request: ChatCompletionRequest, engine: DllmEngine) -> ChatReq
         logit_bias=SamplingOptions.bias(request.logit_bias),
         **(request.watermark.sampling() if request.watermark else {}),
         **guided(request.guidance, request.contrast),
+        **sampler_fields(request),
     )
     functions = [t.function for t in request.tools or ()]
     tools = [Tool(f.name, f.description or "", f.parameters or {}) for f in functions]

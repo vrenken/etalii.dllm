@@ -25,7 +25,7 @@ from etalii_dllm.engine import (
     use_model_file,
 )
 from etalii_dllm.generation import OVERFLOWS
-from etalii_dllm.sampling import SamplingOptions
+from etalii_dllm.sampling import DRY_BREAKERS, SamplingOptions
 
 
 def _rope_note(scaling: dict[str, Any] | None) -> str:
@@ -353,6 +353,20 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("--presence-penalty", type=float, default=0.0)
         command.add_argument(
             "--logit-bias", action="append", default=[], metavar="TOKEN=BIAS", help="add BIAS to a token (repeatable)"
+        )
+        command.add_argument("--typical-p", type=float, default=1.0, help="locally typical sampling mass (1: off)")
+        command.add_argument("--top-n-sigma", type=float, default=0.0, help="keep logits within N deviations (0: off)")
+        command.add_argument("--xtc-probability", type=float, default=0.0, help="chance of excluding top choices")
+        command.add_argument("--xtc-threshold", type=float, default=0.1, help="how likely a choice XTC excludes is")
+        command.add_argument("--dry-multiplier", type=float, default=0.0, help="DRY repetition penalty (0: off)")
+        command.add_argument("--dry-base", type=float, default=1.75, help="DRY penalty growth per repeated token")
+        command.add_argument("--dry-allowed-length", type=int, default=2, help="repeats DRY leaves alone")
+        command.add_argument("--dry-penalty-last-n", type=int, default=-1, help="tokens DRY looks at (-1: all)")
+        command.add_argument(
+            "--dry-sequence-breaker",
+            action="append",
+            metavar="TEXT",
+            help="text that ends a DRY repeat (repeatable; default newline, colon, quote and asterisk)",
         )
         command.add_argument("--regex", help="only produce text matching this regular expression in full")
         command.add_argument(
@@ -807,6 +821,15 @@ def _sampling_options(args: argparse.Namespace) -> SamplingOptions:
         guidance_scale=args.guidance_scale,
         contrast_beta=args.contrast,
         contrast_alpha=args.contrast_alpha,
+        typical_p=args.typical_p,
+        top_n_sigma=args.top_n_sigma,
+        xtc_probability=args.xtc_probability,
+        xtc_threshold=args.xtc_threshold,
+        dry_multiplier=args.dry_multiplier,
+        dry_base=args.dry_base,
+        dry_allowed_length=args.dry_allowed_length,
+        dry_penalty_last_n=args.dry_penalty_last_n,
+        dry_sequence_breakers=tuple(args.dry_sequence_breaker) if args.dry_sequence_breaker else DRY_BREAKERS,
     )
 
 

@@ -38,7 +38,7 @@ from etalii_dllm.engine import (
     default_engine,
 )
 from etalii_dllm.generation import TokenLogprobs
-from etalii_dllm.sampling import SamplingOptions
+from etalii_dllm.sampling import SamplingOptions, sampler_fields
 from etalii_dllm.server.contracts import id_payload
 from etalii_dllm.tools import Tool, ToolChoice
 
@@ -72,6 +72,20 @@ class Options(BaseModel):
     """Extension: watermark the answer with this key (docs/watermarks.md)."""
     watermark_gamma: float | None = None
     watermark_delta: float | None = None
+    typical_p: float | None = None
+    """Extension (as in llama.cpp): locally typical sampling (docs/api.md#modern-samplers)."""
+    top_n_sigma: float | None = None
+    """Extension (as in llama.cpp): keep tokens within this many standard deviations of the top logit."""
+    xtc_probability: float | None = None
+    """Extension (as in llama.cpp): XTC, the chance per token of excluding the top choices."""
+    xtc_threshold: float | None = None
+    """Extension (as in llama.cpp): how likely a choice must be for XTC to exclude it."""
+    dry_multiplier: float | None = None
+    """Extension (as in llama.cpp): the DRY repetition penalty (0 disables)."""
+    dry_base: float | None = None
+    dry_allowed_length: int | None = None
+    dry_penalty_last_n: int | None = None
+    dry_sequence_breakers: list[str] | None = None
 
 
 class OllamaFunctionCall(BaseModel):
@@ -178,6 +192,7 @@ def _options(body: _GenerateBase, engine: DllmEngine) -> tuple[SamplingOptions, 
         watermark_key=options.watermark_key,
         watermark_gamma=options.watermark_gamma if options.watermark_gamma is not None else 0.25,
         watermark_delta=options.watermark_delta if options.watermark_delta is not None else 2.0,
+        **sampler_fields(options),
     )
     context = getattr(getattr(engine.model, "config", None), "context_length", 0) or DEFAULT_NUM_PREDICT
     limit = min(DEFAULT_NUM_PREDICT, context)
