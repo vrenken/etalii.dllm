@@ -7,6 +7,9 @@ general categories in regular expressions all come from ``unicode_data.json.gz``
 ``unicodedata`` by ``scripts/generate_unicode_data.py``. Characters outside those tables (unassigned in
 :func:`unicode_version`) are left unchanged and have category ``Cn``, on every installation.
 
+Grapheme clusters (:func:`graphemes`, for the Unigram normaliser) follow the ``tokenizers`` library instead, from
+the tables of its own segmentation crate in ``grapheme_data.json.gz`` (``scripts/generate_grapheme_data.py``).
+
 The rest of the ``regex`` engine (matching semantics, ``\\s``, case folding) and ``str.isspace`` have not changed in
 the Unicode versions we support; ``tests/test_unicode.py`` pins them so that a change would fail loudly.
 """

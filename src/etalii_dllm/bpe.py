@@ -1,8 +1,9 @@
 """BPE tokenizer driven by a Hugging Face ``tokenizer.json``.
 
-Two families are supported: byte-level BPE (GPT-2, SmolLM2, Qwen2, Llama 3) and the SentencePiece-style BPE that
+Two BPE families are supported: byte-level BPE (GPT-2, SmolLM2, Qwen2, Llama 3) and the SentencePiece-style BPE that
 ``transformers`` converts Llama 2, TinyLlama, Mistral and Phi-3 tokenizers to (spaces become ``▁``, unknown
-characters fall back to ``<0xAB>`` byte tokens).
+characters fall back to ``<0xAB>`` byte tokens). WordPiece (:mod:`etalii_dllm.wordpiece`, BERT) and Unigram
+(:mod:`etalii_dllm.unigram`, XLM-RoBERTa) models plug into the same pipeline.
 
 The pipeline mirrors the ``tokenizers`` library: added tokens are split out first, the rest is normalised,
 pre-tokenised (``Split``, ``Digits``, ``ByteLevel``, ``Metaspace``), mapped to byte-level characters (byte-level
