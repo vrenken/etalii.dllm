@@ -48,7 +48,7 @@ dllm replay tuned.train.json --base base.dllm --data copy-of-notes.txt --json
 A training receipt (format `dllm-train/1`) records:
 
 - the base model's fingerprint;
-- the training data, as the file's SHA-256, the fingerprint of its token windows (or, for a DPO run, its preference pairs) and the path as given;
+- the training data, as the file's SHA-256, the fingerprint of its token windows (or, for a DPO run, its preference pairs; for an encoder run, its examples) and the path as given;
 - every run setting;
 - every step's loss, exactly, as hex floats;
 - the fingerprint of the weights that came out. For a LoRA run these are the merged weights.

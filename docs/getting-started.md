@@ -987,6 +987,23 @@ Multilingual embedders and rerankers now import: models with XLM-RoBERTa's Unigr
 all-distilroberta-v1. They embed and rerank like the BERT models of sections 51 and 52, with the same bits on every
 machine. Details: [RoBERTa and multilingual encoders](retrieval.md#roberta-and-multilingual-encoders).
 
+## 54. Fine-tune and export encoders
+
+```bash
+dllm finetune all-minilm.dllm --data pairs.jsonl -o all-minilm-tuned.dllm --steps 100 --batch-size 16
+dllm finetune ms-marco.dllm --data labels.jsonl -o ms-marco-tuned.dllm --steps 100 --lora-rank 8
+dllm export all-minilm-tuned.dllm --format safetensors -o all-minilm-tuned/
+dllm export ms-marco-tuned.dllm --format gguf -o ms-marco-tuned.gguf
+```
+
+The embedders and rerankers of sections 51 to 53 now fine-tune. An embedder learns from pairs of a text and one that
+belongs with it (`{"anchor": ..., "positive": ...}`, optionally a `"negative"`), with sentence-transformers'
+contrastive loss; a cross-encoder learns from texts or pairs with a label (`{"text": ..., "pair": ..., "label": 1}`).
+`dllm finetune` picks the objective from the model, and checkpoints, receipts and LoRA work as for chat models, with
+the same bits on every run. `dllm export` writes the result back as a directory that transformers and
+sentence-transformers load, or (for BERT models) as a GGUF file for llama.cpp; importing either again gives the same
+model. Details: [fine-tuning encoders](training.md#encoders) and [exporting encoders](model-building.md#encoders).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
@@ -1024,9 +1041,10 @@ machine. Details: [RoBERTa and multilingual encoders](retrieval.md#roberta-and-m
   answers forms), and image, audio or binary MCP content is refused.
 - Models with dynamic NTK RoPE scaling or other architectures (including DeepSeek's mixtures of experts with several
   shared experts and multi-head latent attention, and encoders other than BERT, RoBERTa and XLM-RoBERTa, such as
-  ModernBERT or DeBERTa) are refused at import. Encoders (sections 51 to 53) embed and rerank only, run on the CPU
-  and cannot be fine-tuned, adapted with LoRA or exported yet. Unigram tokenizers come from `tokenizer.json`; GGUF
-  files with a Unigram vocabulary (T5) are refused.
+  ModernBERT or DeBERTa) are refused at import. Encoders (sections 51 to 54) run on the CPU. RoBERTa and XLM-RoBERTa
+  encoders and BERT models with the tanh GELU export to safetensors but not to GGUF (llama.cpp's layout cuts their
+  position rows), and GGUF files of RoBERTa or XLM-RoBERTa written by llama.cpp do not import. Unigram tokenizers
+  come from `tokenizer.json`; GGUF files with a Unigram vocabulary (T5) are refused.
 - Granite MoE's experts are stored fused, so a LoRA adapter on them cannot be exported in the PEFT format (the
   merged model exports fine), and llama.cpp has no Granite MoE architecture to export a GGUF file to.
 - Mixture-of-experts models (sections 38 and 40) are checked against a float64 transcription of `transformers` only on tiny

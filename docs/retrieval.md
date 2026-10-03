@@ -37,7 +37,8 @@ dllm --model minilm.dllm index build docs/ -o docs.index
 dllm --model chat.dllm --index docs.index --embedding-model minilm.dllm chat "What does the guide say about X?"
 ```
 
-An encoder runs on the CPU, embeds only (chat, completions, fine-tuning, LoRA and export refuse it with an error) and
+An encoder runs on the CPU, embeds only (chat and completions refuse it with an error; it fine-tunes, takes LoRA
+adapters and exports since Phase 58: [fine-tuning encoders](training.md#encoders)) and
 gives the same bits on every machine: the encoder's forward pass and pooling are in the
 [specification](specification.md#6-the-encoder) and `dllm verify --reference` checks them against the reference
 implementation. A plain BERT checkpoint without sentence-transformers files pools the mean over all positions.
