@@ -255,7 +255,7 @@ EVAL_FINGERPRINTS = {
 # output file's SHA-256, so it pins the bits of every kernel case, the sampler and the two small decoders. Phase 21
 # added the two sample-penalties cases (penalties, min-p and logit bias); Phase 41 the YaRN and LongRoPE long-factor
 # rope-inv-freq cases; Phase 44 the sigmoid case and the qwen2_moe decoder (a gated shared expert).
-CONFORMANCE_MANIFEST_SHA256 = "b3a484ba0628933d3f3202c28616eac7556b8db083ea6f63d467d64a950c08b6"
+CONFORMANCE_MANIFEST_SHA256 = "0da8421c357a17d2aeec977e000ba73d7ccaee706046b0c6bf854c310025b296"
 
 # Phase 21: the placeholder model continuing "Deterministic decoding controls are" with every decoding control set
 # (tests/test_decoding_controls.py::CONTROLLED): penalties, min-p and logit bias.

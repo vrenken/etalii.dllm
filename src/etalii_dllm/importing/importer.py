@@ -278,7 +278,7 @@ def hf_config(
     family = _HF_MODEL_TYPES.get(model_type)
     if family is None:
         hint = "; import the text-only Gemma 3 checkpoint (model_type gemma3_text)" if model_type == "gemma3" else ""
-        supported = ", ".join(sorted([*_HF_MODEL_TYPES, "bert"]))
+        supported = ", ".join(sorted([*_HF_MODEL_TYPES, *_ENCODER_MODEL_TYPES]))
         raise ModelImportError(f"model_type {model_type!r} is not supported (supported: {supported}){hint}")
     hf_activation = config.get("hidden_activation") or config.get("hidden_act") or "silu"
     activation = _HF_ACTIVATIONS.get(hf_activation)
@@ -618,8 +618,14 @@ def _embedding_settings(directory: Path) -> dict[str, Any] | None:
 _BERT_ACTIVATIONS = {"gelu": "gelu", "gelu_new": "gelu_tanh", "gelu_pytorch_tanh": "gelu_tanh"}
 
 
+_ENCODER_MODEL_TYPES = ("bert", "roberta", "xlm-roberta")
+"""The ``model_type`` values imported as encoders: RoBERTa and XLM-RoBERTa are BERT with positions counted from
+past the padding token."""
+
+
 def bert_config(config: dict[str, Any], context_length: int | None = None) -> TransformerConfig:
-    """Maps a Hugging Face BERT ``config.json`` to our description (family ``bert``)."""
+    """Maps a Hugging Face BERT, RoBERTa or XLM-RoBERTa ``config.json`` to our description (family ``bert``; RoBERTa
+    sets ``padding_index`` and has ``max_position_embeddings - pad_token_id - 1`` usable positions)."""
     if config.get("position_embedding_type", "absolute") != "absolute":
         raise ModelImportError(f"BERT position embeddings {config.get('position_embedding_type')!r} are not supported")
     hf_activation = str(config.get("hidden_act", "gelu"))
@@ -629,6 +635,12 @@ def bert_config(config: dict[str, Any], context_length: int | None = None) -> Tr
     if hidden % heads:
         raise ModelImportError("hidden_size must be a multiple of num_attention_heads")
     positions = int(config.get("max_position_embeddings", 512))
+    padding: int | None = None
+    if config.get("model_type") in ("roberta", "xlm-roberta"):
+        padding = int(config.get("pad_token_id", 1))
+        positions -= padding + 1
+        if positions < 1:
+            raise ModelImportError("max_position_embeddings leaves no positions past the padding token")
     if context_length is not None:
         raise ModelImportError("--context-length is for decoders; an encoder has learned absolute positions")
     try:
@@ -648,6 +660,7 @@ def bert_config(config: dict[str, Any], context_length: int | None = None) -> Tr
             activation=_BERT_ACTIVATIONS[hf_activation],
             tie_word_embeddings=True,
             type_vocabulary_size=int(config.get("type_vocab_size", 2)),
+            padding_index=padding,
         )
     except ValueError as error:
         raise ModelImportError(str(error)) from error
@@ -673,17 +686,27 @@ _BERT_GLOBAL_NAMES = {
 _BERT_PARAMETERS = {"weight": "weight", "bias": "bias", "gamma": "weight", "beta": "bias"}
 
 
-_BERT_HEAD_NAMES = {"pooler.dense": "pooler", "classifier": "classifier"}
+# BERT's pooler and classifier, and RoBERTa's classification head (dense, tanh, out_proj: the same computation).
+_BERT_HEAD_NAMES = {
+    "pooler.dense": "pooler",
+    "classifier": "classifier",
+    "classifier.dense": "pooler",
+    "classifier.out_proj": "classifier",
+}
 
 
 def _bert_name(name: str, classifier: bool = False) -> str | None:
-    """Our name for a BERT checkpoint tensor (with or without the ``bert.`` prefix); None for the pre-training heads
-    and buffers, and for the pooler unless the model is a ``classifier``, which an embedding does not use."""
-    name = name.removeprefix("bert.")
+    """Our name for a BERT, RoBERTa or XLM-RoBERTa checkpoint tensor (with or without the ``bert.``/``roberta.``
+    prefix); None for the pre-training heads and buffers, and for the pooler unless the model is a ``classifier``,
+    which an embedding does not use."""
+    name = name.removeprefix("bert.").removeprefix("roberta.")
     stem, _, parameter = name.rpartition(".")
     if classifier and stem in _BERT_HEAD_NAMES and parameter in ("weight", "bias"):
         return f"{_BERT_HEAD_NAMES[stem]}.{parameter}"
-    if name.startswith(("pooler.", "cls.")) or name == "embeddings.position_ids":
+    if name.startswith(("pooler.", "cls.", "lm_head.")) or name in (
+        "embeddings.position_ids",
+        "embeddings.token_type_ids",
+    ):
         return None
     if stem in _BERT_GLOBAL_NAMES and parameter in _BERT_PARAMETERS:
         return f"{_BERT_GLOBAL_NAMES[stem]}.{_BERT_PARAMETERS[parameter]}"
@@ -723,16 +746,18 @@ def _classifier_settings(directory: Path, raw_config: dict[str, Any], positions:
 
 
 def _convert_bert(directory: Path, raw_config: dict[str, Any], context_length: int | None) -> _Converted:
-    """A BERT checkpoint (``BertModel`` or a pre-training model; sentence-transformers encoders such as
-    all-MiniLM-L6-v2 and bge-small-en-v1.5), or a ``BertForSequenceClassification`` cross-encoder such as
+    """A BERT, RoBERTa or XLM-RoBERTa checkpoint (the bare model or a pre-training model; sentence-transformers
+    encoders such as all-MiniLM-L6-v2, bge-small-en-v1.5, all-distilroberta-v1 and
+    paraphrase-multilingual-MiniLM-L12-v2), or a sequence-classification cross-encoder such as
     ms-marco-MiniLM-L6-v2."""
     config = bert_config(raw_config, context_length)
     checkpoint = open_checkpoint(directory)
     classifier: dict[str, Any] | None = None
     pooling: dict[str, Any] | None = None
-    if "classifier.weight" in checkpoint:
+    head = next((name for name in ("classifier.weight", "classifier.out_proj.weight") if name in checkpoint), None)
+    if head is not None:
         classifier = _classifier_settings(directory, raw_config, config.context_length)
-        rows, named = checkpoint["classifier.weight"].shape[0], len(classifier["labels"])
+        rows, named = checkpoint[head].shape[0], len(classifier["labels"])
         if rows != named:
             raise ModelImportError(f"the classifier has {rows} labels but config.json names {named}")
         config = dataclasses.replace(config, classifier_labels=rows)
@@ -762,7 +787,7 @@ def _convert_huggingface(directory: Path, context_length: int | None = None) -> 
     if not config_path.exists():
         raise ModelImportError(f"{directory}: no config.json")
     raw_config = _read_json(config_path)
-    if raw_config.get("model_type") == "bert":
+    if raw_config.get("model_type") in _ENCODER_MODEL_TYPES:
         return _convert_bert(directory, raw_config, context_length)
     config = hf_config(raw_config, _read_json(directory / "generation_config.json"), context_length=context_length)
     pooling = _embedding_settings(directory)

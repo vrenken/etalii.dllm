@@ -102,12 +102,20 @@ EMBEDDING_MODELS = {
         "sentence-transformers/all-MiniLM-L6-v2", "1110a243fdf4706b3f48f1d95db1a4f5529b4d41", "Apache-2.0"
     ),
     "bge-small": ReferenceModel("BAAI/bge-small-en-v1.5", "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a", "MIT"),
+    # RoBERTa (Phase 57): positions past the padding token, byte-level BPE; and a multilingual BERT encoder with
+    # XLM-RoBERTa's Unigram tokenizer (SentencePiece's precompiled normaliser).
+    "distilroberta": ReferenceModel("sentence-transformers/all-distilroberta-v1", "main", "Apache-2.0"),
+    "multilingual-minilm": ReferenceModel(
+        "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2", "main", "Apache-2.0"
+    ),
 }
 # A BERT cross-encoder (Phase 56): a query and a passage scored together by a sequence-classification head.
 CROSS_ENCODERS = {
     "ms-marco": ReferenceModel(
         "cross-encoder/ms-marco-MiniLM-L6-v2", "233902d25c440f23af6f7d6e94d2946bac0bee0a", "Apache-2.0"
     ),
+    # An XLM-RoBERTa cross-encoder (Phase 57): a multilingual reranker with a Unigram tokenizer.
+    "mmarco": ReferenceModel("cross-encoder/mmarco-mMiniLMv2-L12-H384-v1", "main", "Apache-2.0"),
 }
 _ALL_MODELS = {**REFERENCE_MODELS, **EMBEDDING_MODELS, **CROSS_ENCODERS}
 TOOL_FORMATS = {"qwen2.5": "hermes", "qwen2.5-1.5b": "hermes", "qwen3": "hermes", "llama3.2": "llama3"}
@@ -525,7 +533,8 @@ def test_embeddings_match_reference(embedding_imported):
     engine = DllmEngine.from_model_file(result.path)
     assert engine.embedding is not None
     pooling = engine.embedding["pooling"]
-    assert pooling == {"minilm": "mean", "bge-small": "cls"}.get(key, "last_token")
+    expected_pooling = {"minilm": "mean", "bge-small": "cls", "distilroberta": "mean", "multilingual-minilm": "mean"}
+    assert pooling == expected_pooling.get(key, "last_token")
     prompts = engine.embedding["prompts"]
     limit = engine.embedding.get("max_tokens")
     tokenizer = transformers.AutoTokenizer.from_pretrained(directory)
@@ -594,7 +603,8 @@ def test_cross_encoder_matches_reference(cross_imported):
     expected = []
     for passage in RERANK_PASSAGES:
         batch = tokenizer(RERANK_QUERY, passage, truncation=True, max_length=limit)
-        assert engine.classification_tokens(RERANK_QUERY, passage) == (batch["input_ids"], batch["token_type_ids"])
+        types = batch.get("token_type_ids", [0] * len(batch["input_ids"]))  # XLM-RoBERTa returns no types
+        assert engine.classification_tokens(RERANK_QUERY, passage) == (batch["input_ids"], types)
         with torch.no_grad():
             tensors = {name: torch.tensor([values]) for name, values in batch.items()}
             expected.append(reference(**tensors).logits[0].numpy())

@@ -199,8 +199,8 @@ def test_merges_resolve_by_rank_then_position():
 
 def test_unsupported_components_fail_loudly():
     base = {"model": {"type": "BPE", "vocab": {"a": 0}, "merges": []}, "decoder": {"type": "ByteLevel"}}
-    with pytest.raises(TokenizerError, match="Unigram"):
-        BpeTokenizer({**base, "model": {"type": "Unigram", "vocab": []}})
+    with pytest.raises(TokenizerError, match="WordLevel"):
+        BpeTokenizer({**base, "model": {"type": "WordLevel", "vocab": {}}})
     with pytest.raises(TokenizerError, match="byte-level"):
         BpeTokenizer(base)
     with pytest.raises(TokenizerError, match="Metaspace"):

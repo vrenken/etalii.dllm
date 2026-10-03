@@ -100,9 +100,9 @@ def test_unsupported_normalizer_fails_at_load():
     with pytest.raises(TokenizerError, match="normalizer 'ByteLevel' is not supported"):
         BpeTokenizer(minimal_spec(normalizer={"type": "ByteLevel"}))
     # Also when nested inside a sequence.
-    with pytest.raises(TokenizerError, match="normalizer 'Precompiled' is not supported"):
+    with pytest.raises(TokenizerError, match="normalizer 'Nmt' is not supported"):
         BpeTokenizer(
-            minimal_spec(normalizer={"type": "Sequence", "normalizers": [{"type": "NFC"}, {"type": "Precompiled"}]})
+            minimal_spec(normalizer={"type": "Sequence", "normalizers": [{"type": "NFC"}, {"type": "Nmt"}]})
         )
 
 
@@ -208,10 +208,10 @@ def test_unsupported_decoder_fails_at_load():
 
 
 def test_unsupported_post_processor_fails_at_load():
-    with pytest.raises(TokenizerError, match="post-processor 'RobertaProcessing' is not supported"):
-        BpeTokenizer(minimal_spec(post_processor={"type": "RobertaProcessing"}))
-    nested = {"type": "Sequence", "processors": [{"type": "ByteLevel"}, {"type": "RobertaProcessing"}]}
-    with pytest.raises(TokenizerError, match="post-processor 'RobertaProcessing' is not supported"):
+    with pytest.raises(TokenizerError, match="post-processor 'Custom' is not supported"):
+        BpeTokenizer(minimal_spec(post_processor={"type": "Custom"}))
+    nested = {"type": "Sequence", "processors": [{"type": "ByteLevel"}, {"type": "Custom"}]}
+    with pytest.raises(TokenizerError, match="post-processor 'Custom' is not supported"):
         BpeTokenizer(minimal_spec(post_processor=nested))
 
 

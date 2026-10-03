@@ -1392,13 +1392,20 @@ class ReferenceEncoder:
         return cls(model.config, model.tensors, quantize=model.quantization, embedding=engine.embedding)
 
     def hidden_states(self, tokens: Sequence[int], types: Sequence[int] | None = None) -> np.ndarray:
-        """``LayerNorm((word + type) + position)``, then per layer ``h = LayerNorm(h + o(attention))`` (every key
-        visible) and ``h = LayerNorm(h + down(gelu(up(h))))``; additions in float32. ``types`` default to 0."""
+        """``LayerNorm((word + type) + position)`` (positions past the padding id for RoBERTa), then per layer
+        ``h = LayerNorm(h + o(attention))`` (every key visible) and ``h = LayerNorm(h + down(gelu(up(h))))``;
+        additions in float32. ``types`` default to 0."""
         config, w = self.config, self.w
         count = len(tokens)
         kinds = np.zeros(count, dtype=np.int64) if types is None else np.asarray(types, dtype=np.int64)
         words = w["token_embedding.weight"][np.asarray(tokens, dtype=np.int64)]
-        x = (words + w["token_type_embedding.weight"][kinds]) + w["position_embedding.weight"][:count]
+        ids = np.asarray(tokens, dtype=np.int64)
+        if config.padding_index is None:
+            positions = np.arange(count, dtype=np.int64)
+        else:  # RoBERTa: cumsum of the non-padding mask, times the mask, plus the padding id
+            mask = (ids != config.padding_index).astype(np.int64)
+            positions = np.cumsum(mask) * mask + config.padding_index
+        x = (words + w["token_type_embedding.weight"][kinds]) + w["position_embedding.weight"][positions]
 
         def norm(values: np.ndarray, name: str) -> np.ndarray:
             return layer_norm(values, w[name + ".weight"], w[name + ".bias"], config.rms_norm_eps)

@@ -7,6 +7,7 @@ Imported models are mapped onto this one description and onto one set of tensor 
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -23,6 +24,7 @@ from typing import Any
 # "granitemoe" is "granite" (with or without a shared expert). "bert" is the one encoder: absolute position and token
 # type embeddings, LayerNorms with biases after the embeddings, attention and the MLP, bidirectional attention and
 # a plain (ungated) GELU MLP, all with biases (:mod:`etalii_dllm.encoder`); it embeds text and does not generate.
+# RoBERTa and XLM-RoBERTa are "bert" with a ``padding_index``: their positions count from past the padding token.
 FAMILIES = (
     "bert",
     "gemma2",
@@ -119,6 +121,10 @@ class TransformerConfig:
     classifier_labels: int = 0
     """BERT sequence classification (cross-encoders): the number of labels of the classifier on the pooled
     ``[CLS]`` state; 0 for an encoder without a classification head."""
+    padding_index: int | None = None
+    """RoBERTa and XLM-RoBERTa: the padding token's id, which their position ids count from (the first ordinary
+    token sits at ``padding_index + 1``, a padding token at ``padding_index``; :meth:`position_ids`); ``None`` for
+    BERT's positions 0, 1, ... The position table then has ``context_length + padding_index + 1`` rows."""
 
     def __post_init__(self) -> None:
         if self.family not in FAMILIES:
@@ -139,8 +145,15 @@ class TransformerConfig:
                 raise ValueError("bert has neither grouped-query attention nor experts")
             if self.classifier_labels < 0:
                 raise ValueError("classifier_labels must not be negative")
-        elif self.activation == "gelu" or self.type_vocabulary_size or self.classifier_labels:
-            raise ValueError("the plain gelu MLP, token types and classifiers are for bert (encoders) only")
+            if self.padding_index is not None and self.padding_index < 0:
+                raise ValueError("padding_index must not be negative")
+        elif (
+            self.activation == "gelu"
+            or self.type_vocabulary_size
+            or self.classifier_labels
+            or self.padding_index is not None
+        ):
+            raise ValueError("the plain gelu MLP, token types, classifiers and padding positions are for bert only")
         if self.qk_norm_scope not in QK_NORM_SCOPES:
             raise ValueError(f"unsupported qk_norm_scope {self.qk_norm_scope!r}")
         if self.norm_placement not in NORM_PLACEMENTS:
@@ -192,6 +205,22 @@ class TransformerConfig:
     def is_encoder(self) -> bool:
         """Whether the model is a BERT-style encoder (it embeds text and does not generate)."""
         return self.family == "bert"
+
+    def position_ids(self, tokens: Sequence[int]) -> list[int]:
+        """An encoder's position ids for ``tokens``: 0, 1, ... for BERT; for RoBERTa (``padding_index``) the running
+        count of non-padding tokens past ``padding_index``, and ``padding_index`` itself for a padding token, as
+        transformers' ``create_position_ids_from_input_ids`` computes them."""
+        if self.padding_index is None:
+            return list(range(len(tokens)))
+        out: list[int] = []
+        count = 0
+        for token in tokens:
+            if token == self.padding_index:
+                out.append(self.padding_index)
+            else:
+                count += 1
+                out.append(self.padding_index + count)
+        return out
 
     @property
     def attention_scale(self) -> float:
@@ -257,6 +286,7 @@ class TransformerConfig:
             "expert_intermediate_size",
             "dense_layers",
             "shared_expert_intermediate_size",
+            "padding_index",
         )
         for name in (*optional, "attention_softcap", "logits_softcap"):  # likewise
             if values[name] is None:
@@ -347,7 +377,10 @@ class TransformerConfig:
         hidden = self.hidden_size
         shapes: dict[str, tuple[int, ...]] = {
             "token_embedding.weight": (self.vocabulary_size, hidden),
-            "position_embedding.weight": (self.context_length, hidden),
+            "position_embedding.weight": (
+                self.context_length + (0 if self.padding_index is None else self.padding_index + 1),
+                hidden,
+            ),
             "token_type_embedding.weight": (self.type_vocabulary_size, hidden),
             "embedding_norm.weight": (hidden,),
             "embedding_norm.bias": (hidden,),

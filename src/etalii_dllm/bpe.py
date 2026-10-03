@@ -18,6 +18,7 @@ Unsupported components fail at load time instead of tokenizing differently from 
 
 from __future__ import annotations
 
+import base64
 import copy as _copy
 import heapq
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -27,7 +28,7 @@ from typing import Any
 
 import regex
 
-from etalii_dllm import unicode, wordpiece
+from etalii_dllm import unicode, unigram, wordpiece
 
 GPT2_PATTERN = r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"
 
@@ -71,6 +72,11 @@ def _normalizer(spec: Mapping[str, Any] | None) -> Callable[[str], str]:
         return unicode.lower
     if kind == "BertNormalizer":
         return wordpiece.normalizer(spec)
+    if kind == "Precompiled":
+        try:
+            return unigram.Precompiled(base64.b64decode(spec.get("precompiled_charsmap") or ""))
+        except ValueError as error:
+            raise TokenizerError(f"Precompiled normalizer: {error}") from error
     if kind == "Prepend":
         prefix = spec["prepend"]
         return lambda text: prefix + text if text else text
@@ -176,6 +182,8 @@ def _pre_tokenizer(spec: Mapping[str, Any] | None) -> tuple[PreTokenizer, bool]:
         return run, any(byte_level for _, byte_level in steps)
     if kind == "BertPreTokenizer":
         return (lambda pieces, _: [p for piece in pieces for p in wordpiece.pre_tokenize(piece)]), False
+    if kind == "WhitespaceSplit":
+        return (lambda pieces, _: [p for piece in pieces for p in _whitespace_split(piece)]), False
     if kind == "Split":
         pattern = _pattern(spec["pattern"])
         behavior, invert = spec.get("behavior", "Isolated"), bool(spec.get("invert", False))
@@ -213,6 +221,20 @@ def _pre_tokenizer(spec: Mapping[str, Any] | None) -> tuple[PreTokenizer, bool]:
 
         return byte_level, True
     raise TokenizerError(f"pre-tokenizer {kind!r} is not supported")
+
+
+def _whitespace_split(text: str) -> list[str]:
+    """``WhitespaceSplit``: the runs between whitespace characters (Rust's ``char::is_whitespace``)."""
+    pieces: list[str] = []
+    start = 0
+    for i, character in enumerate(text):
+        if ord(character) in wordpiece.WHITESPACE:
+            if i > start:
+                pieces.append(text[start:i])
+            start = i + 1
+    if start < len(text):
+        pieces.append(text[start:])
+    return pieces
 
 
 def _prepend_scheme(spec: Mapping[str, Any]) -> str:
@@ -361,7 +383,23 @@ class BpeTokenizer:
     ) -> None:
         model = spec.get("model") or {}
         self._wordpiece: wordpiece.WordPiece | None = None
-        if model.get("type") == "WordPiece":
+        self._unigram: unigram.Unigram | None = None
+        if model.get("type") == "Unigram":
+            try:
+                pieces = [(str(piece), float(score)) for piece, score in model["vocab"]]
+                unk_id = model.get("unk_id")
+                self._unigram = unigram.Unigram(
+                    pieces, None if unk_id is None else int(unk_id), bool(model.get("byte_fallback", False))
+                )
+            except ValueError as error:
+                raise TokenizerError(str(error)) from error
+            model = {
+                "vocab": self._unigram.ids,
+                "merges": [],
+                "byte_fallback": self._unigram.byte_fallback,
+                "unk_token": None,
+            }
+        elif model.get("type") == "WordPiece":
             try:
                 self._wordpiece = wordpiece.WordPiece(
                     {str(k): int(v) for k, v in model["vocab"].items()},
@@ -373,7 +411,7 @@ class BpeTokenizer:
                 raise TokenizerError(str(error)) from error
             model = {**model, "merges": [], "unk_token": None}
         elif model.get("type") != "BPE":
-            raise TokenizerError(f"model {model.get('type')!r} is not supported (only BPE and WordPiece)")
+            raise TokenizerError(f"model {model.get('type')!r} is not supported (only BPE, WordPiece and Unigram)")
         for option in ("continuing_subword_prefix", "end_of_word_suffix"):
             if model.get(option) and self._wordpiece is None:
                 raise TokenizerError(f"BPE option {option} is not supported")
@@ -435,6 +473,8 @@ class BpeTokenizer:
         """Special tokens that decoding keeps (tool call markers, :meth:`showing`)."""
 
         self._id_to_token: dict[int, str] = {}
+        if self._unigram is not None:  # a Unigram id names its own piece, even one repeated later in the vocabulary
+            self._id_to_token.update(enumerate(self._unigram.pieces))
         for token, index in sorted(self._vocab.items(), key=lambda item: (item[1], item[0])):
             self._id_to_token.setdefault(index, token)
         self._byte_tokens = {
@@ -502,6 +542,15 @@ class BpeTokenizer:
                 return [*ids, *second, sep], [0] * len(ids) + [1] * (len(second) + 1)
 
             return bert
+        if spec.get("type") == "RobertaProcessing":
+            # RoBERTa gives every token type 0: <s> A </s> and, for a pair, </s> B </s> after it.
+            cls, sep = int(spec["cls"][1]), int(spec["sep"][1])
+
+            def roberta(first: list[int], second: list[int] | None) -> tuple[list[int], list[int]]:
+                ids = [cls, *first, sep] if second is None else [cls, *first, sep, sep, *second, sep]
+                return ids, [0] * len(ids)
+
+            return roberta
         raise TokenizerError(f"post-processor {spec.get('type')!r} is not supported")
 
     @property
@@ -555,6 +604,11 @@ class BpeTokenizer:
             return cached
         if self._wordpiece is not None:
             result: tuple[int, ...] = tuple(self._wordpiece.tokenize(piece))
+        elif self._unigram is not None:
+            try:
+                result = tuple(self._unigram.tokenize(piece))
+            except ValueError as error:
+                raise TokenizerError(str(error)) from error
         elif self._ignore_merges and piece in self._vocab:
             result = (self._vocab[piece],)
         else:

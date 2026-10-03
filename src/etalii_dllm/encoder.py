@@ -1,10 +1,12 @@
-"""BERT-style encoders (BERT, all-MiniLM, bge) running on the deterministic kernels.
+"""BERT-style encoders (BERT, all-MiniLM, bge, RoBERTa, XLM-RoBERTa) running on the deterministic kernels.
 
 An encoder turns a whole input into one hidden state per position and is used for embeddings only. Its forward pass,
 as Hugging Face's ``BertModel`` defines it:
 
-1. ``h = LayerNorm((word[t] + type[s]) + position[i])``: the three embedding rows added in float32 in that order,
-   ``s`` the token's type (0, or 1 for the second text of a pair);
+1. ``h = LayerNorm((word[t] + type[s]) + position[p])``: the three embedding rows added in float32 in that order,
+   ``s`` the token's type (0, or 1 for the second text of a pair) and ``p`` its position id: ``i`` for BERT, and
+   for RoBERTa and XLM-RoBERTa the count of non-padding tokens up to ``i`` past the padding id
+   (:meth:`~etalii_dllm.architecture.TransformerConfig.position_ids`);
 2. per layer, ``h = LayerNorm(h + o(attention(q(h), k(h), v(h))))`` with every projection carrying a bias and
    attention seeing every position (bidirectional, no causal mask), then
    ``h = LayerNorm(h + down(gelu(up(h))))``, the MLP ungated with the exact (erf) GELU.
@@ -105,7 +107,7 @@ class Encoder:
         w = self._w
         words = np.asarray(w["token_embedding.weight"])[np.asarray(tokens, dtype=np.int64)]
         typed = words + np.asarray(w["token_type_embedding.weight"])[kinds]
-        positions = np.asarray(w["position_embedding.weight"])[: len(tokens)]
+        positions = np.asarray(w["position_embedding.weight"])[np.asarray(config.position_ids(tokens), dtype=np.int64)]
         h = self._norm(typed + positions, "embedding_norm")
         heads, head_dim = config.heads, config.head_dim
         for i in range(config.layers):
