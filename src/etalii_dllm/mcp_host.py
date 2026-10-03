@@ -15,6 +15,11 @@ Given an engine, the host also answers servers' sampling requests (``sampling/cr
 seed derives from the request's content, so an identical request always gets the identical answer
 (:func:`sampling_request`). Prompts and resources are listed in (server, name) and (server, URI) order and turn into
 chat messages (:meth:`McpHost.prompt`, :meth:`McpHost.resource`); docs/mcp.md#sampling-prompts-and-resources.
+
+Servers' form elicitations (``elicitation/create``) are answered by the engine too, greedily and constrained by the
+requested schema (:func:`elicitation_request`), and the host offers the filesystem roots it was given sorted by URI
+(``roots/list``); docs/mcp.md#elicitation-and-roots. :attr:`McpHost.answers` lists every sampling and elicitation in
+the order the servers asked, for agent transcripts (:mod:`etalii_dllm.transcripts`).
 """
 
 from __future__ import annotations
@@ -29,11 +34,16 @@ from pathlib import Path
 from typing import Any
 
 from etalii_dllm.chat import ChatMessage, ToolCall
-from etalii_dllm.engine import ChatEvent, ChatRequest, DllmEngine, Finished, TextDelta, ToolCallEvent
+from etalii_dllm.engine import ChatEvent, ChatRequest, DllmEngine, Finished, ResponseFormat, TextDelta, ToolCallEvent
 from etalii_dllm.sampling import SamplingOptions
 from etalii_dllm.tools import AUTO, Tool
 
 DEFAULT_MAX_ROUNDS = 8
+ELICITATIONS = ("engine", "decline")
+"""How the host answers form elicitations: with the engine, or by declining every one."""
+ELICITATION_MAX_TOKENS = 512
+"""The longest answer the engine gives to an elicitation; one that does not fit is cancelled."""
+ELICITATION_SYSTEM = "An MCP server asks for information. Answer with a JSON object that fits this schema:\n{schema}"
 
 
 class McpHostError(Exception):
@@ -121,6 +131,28 @@ class Sampling:
 
 
 @dataclass(frozen=True)
+class Elicitation:
+    """An elicitation a server made and the host's answer: ``accept`` with the engine's ``content``, ``decline``
+    (URL mode, or the host declines every elicitation) or ``cancel`` (the answer did not fit in
+    :data:`ELICITATION_MAX_TOKENS`). ``request`` and ``fingerprint`` are ``None`` when the engine did not run."""
+
+    server: str
+    message: str
+    action: str
+    content: Mapping[str, Any] | None
+    request: ChatRequest | None
+    fingerprint: str | None
+
+
+@dataclass(frozen=True)
+class RootInfo:
+    """A filesystem root the host offers its servers."""
+
+    uri: str
+    name: str
+
+
+@dataclass(frozen=True)
 class PromptInfo:
     """A prompt a server offers: its name as the host exposes it, the server and the prompt's own name."""
 
@@ -168,16 +200,68 @@ def sampling_request(params: Any) -> ChatRequest:
     messages = [ChatMessage("system", params.system_prompt)] if params.system_prompt else []
     for message in params.messages:
         messages.append(ChatMessage(message.role, _text_blocks(message.content, "a sampling message")))
+    seed = _canonical_seed(params)
+    options = SamplingOptions(temperature=params.temperature or 0.0, seed=seed)
+    return ChatRequest(messages, params.max_tokens, options, stop=tuple(params.stop_sequences or ()),
+                       request_id=f"mcp-sampling-{seed:08x}")  # fmt: skip
+
+
+def _canonical_seed(params: Any) -> int:
     canonical = json.dumps(
         params.model_dump(mode="json", by_alias=True, exclude_none=True, exclude={"meta"}),
         sort_keys=True,
         ensure_ascii=False,
         separators=(",", ":"),
     )
-    seed = int(hashlib.sha256(canonical.encode()).hexdigest()[:8], 16)
-    options = SamplingOptions(temperature=params.temperature or 0.0, seed=seed)
-    return ChatRequest(messages, params.max_tokens, options, stop=tuple(params.stop_sequences or ()),
-                       request_id=f"mcp-sampling-{seed:08x}")  # fmt: skip
+    return int(hashlib.sha256(canonical.encode()).hexdigest()[:8], 16)
+
+
+def form_schema(requested: Mapping[str, Any]) -> dict[str, Any]:
+    """The JSON schema an elicitation's answer is constrained by: the requested schema (a flat object of strings,
+    numbers, booleans and enums) without the display-only ``enumNames`` and, unless it says otherwise, without
+    properties it does not name."""
+    if requested.get("type") != "object" or not isinstance(requested.get("properties", {}), Mapping):
+        raise ValueError("an elicitation's requested schema must be an object schema")
+    schema = json.loads(json.dumps(requested))
+    for value in schema.get("properties", {}).values():
+        if isinstance(value, dict):
+            value.pop("enumNames", None)
+    schema.setdefault("additionalProperties", False)
+    return schema
+
+
+def elicitation_request(params: Any) -> ChatRequest:
+    """The engine request for an MCP form elicitation: a system prompt holding the requested schema, the server's
+    message as the user message, greedy decoding constrained by :func:`form_schema` and at most
+    :data:`ELICITATION_MAX_TOKENS` tokens, with a request id from the SHA-256 of the request's canonical JSON. Raises
+    ``ValueError`` for URL-mode elicitations and schemas that are not object schemas."""
+    if getattr(params, "mode", "form") != "form":
+        raise ValueError("only form elicitations can be answered by the engine")
+    schema = form_schema(params.requested_schema)
+    seed = _canonical_seed(params)
+    text = json.dumps(params.requested_schema, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    messages = [ChatMessage("system", ELICITATION_SYSTEM.format(schema=text)), ChatMessage("user", params.message)]
+    return ChatRequest(messages, ELICITATION_MAX_TOKENS, SamplingOptions(temperature=0.0, seed=seed),
+                       response_format=ResponseFormat("json_schema", schema),
+                       request_id=f"mcp-elicitation-{seed:08x}")  # fmt: skip
+
+
+def answer_sampling(engine: DllmEngine, server: str, request: ChatRequest) -> Sampling:
+    """The engine's answer to a sampling request (:func:`sampling_request`) with its MCP stop reason."""
+    result = engine.chat_completion(request)
+    stop_reason = "maxTokens" if result.finish_reason == "length" else "endTurn"
+    if result.stop_sequence is not None:
+        stop_reason = "stopSequence"
+    return Sampling(server, request, result.content, stop_reason, result.fingerprint)
+
+
+def answer_elicitation(engine: DllmEngine, server: str, message: str, request: ChatRequest) -> Elicitation:
+    """The engine's answer to a form elicitation (:func:`elicitation_request`): ``accept`` with the JSON object it
+    wrote, or ``cancel`` when the object did not fit in the request's tokens."""
+    result = engine.chat_completion(request)
+    if result.finish_reason == "length":
+        return Elicitation(server, message, "cancel", None, request, result.fingerprint)
+    return Elicitation(server, message, "accept", json.loads(result.content), request, result.fingerprint)
 
 
 def result_text(content: Sequence[Any], structured: Any = None) -> str:
@@ -202,8 +286,15 @@ class McpHost:
     """
 
     def __init__(
-        self, servers: Sequence[McpServerConfig] | Mapping[str, Any], engine: DllmEngine | None = None
+        self,
+        servers: Sequence[McpServerConfig] | Mapping[str, Any],
+        engine: DllmEngine | None = None,
+        *,
+        elicitation: str = "engine",
+        roots: Sequence[str | Path] = (),
     ) -> None:
+        if elicitation not in ELICITATIONS:
+            raise McpHostError(f"elicitation must be one of {', '.join(ELICITATIONS)}")
         if isinstance(servers, Mapping):
             self._targets = {name: servers[name] for name in sorted(servers)}
         else:
@@ -223,6 +314,13 @@ class McpHost:
         """Answers the servers' sampling requests; without one, the host does not offer sampling."""
         self.samplings: list[Sampling] = []
         """Every sampling request answered, in the order the servers made them."""
+        self._elicitation = elicitation
+        self.elicitations: list[Elicitation] = []
+        """Every elicitation answered, in the order the servers made them."""
+        self.answers: list[Sampling | Elicitation] = []
+        """Every sampling and elicitation, in the order the servers made them."""
+        self.roots = _roots(roots)
+        """The roots offered to the servers, sorted by URI; without any the host does not offer roots."""
 
     async def __aenter__(self) -> McpHost:
         from mcp import Client
@@ -239,8 +337,11 @@ class McpHost:
                             command=target.command, args=list(target.args), env=dict(target.env) or None
                         )
                 sampler = self._sampler(name) if self._engine is not None else None
+                elicitor = self._elicitor(name) if self._engine is not None else None
+                lister = self._list_roots if self.roots else None
                 try:
-                    client = Client(target, cache=None, sampling_callback=sampler)
+                    client = Client(target, cache=None, sampling_callback=sampler, elicitation_callback=elicitor,
+                                    list_roots_callback=lister)  # fmt: skip
                     self._clients[name] = await self._stack.enter_async_context(client)
                 except Exception as error:  # any start-up failure names the server
                     raise McpHostError(f"cannot connect to MCP server {name!r}: {error}") from error
@@ -285,22 +386,44 @@ class McpHost:
 
         async def sample(context: Any, params: types.CreateMessageRequestParams) -> Any:
             try:
-                request = sampling_request(params)
-                result = engine.chat_completion(request)
+                sampling = answer_sampling(engine, server, sampling_request(params))
             except ValueError as error:
                 return types.ErrorData(code=types.INVALID_PARAMS, message=str(error))
-            stop_reason = "maxTokens" if result.finish_reason == "length" else "endTurn"
-            if result.stop_sequence is not None:
-                stop_reason = "stopSequence"
-            self.samplings.append(Sampling(server, request, result.content, stop_reason, result.fingerprint))
+            self.samplings.append(sampling)
+            self.answers.append(sampling)
             return types.CreateMessageResult(
                 role="assistant",
-                content=types.TextContent(type="text", text=result.content),
+                content=types.TextContent(type="text", text=sampling.content),
                 model=engine.model.id,
-                stop_reason=stop_reason,
+                stop_reason=sampling.stop_reason,
             )
 
         return sample
+
+    def _elicitor(self, server: str) -> Any:
+        from mcp import types
+
+        engine = self._engine
+        assert engine is not None
+
+        async def elicit(context: Any, params: Any) -> Any:
+            if self._elicitation == "decline" or getattr(params, "mode", "form") != "form":
+                elicitation = Elicitation(server, params.message, "decline", None, None, None)
+            else:
+                try:
+                    elicitation = answer_elicitation(engine, server, params.message, elicitation_request(params))
+                except ValueError as error:
+                    return types.ErrorData(code=types.INVALID_PARAMS, message=str(error))
+            self.elicitations.append(elicitation)
+            self.answers.append(elicitation)
+            return types.ElicitResult(action=elicitation.action, content=elicitation.content)  # type: ignore[arg-type]
+
+        return elicit
+
+    async def _list_roots(self, context: Any) -> Any:
+        from mcp import types
+
+        return types.ListRootsResult(roots=[types.Root(uri=root.uri, name=root.name) for root in self.roots])  # type: ignore[arg-type]
 
     async def _list_prompts(self) -> None:
         listed: list[tuple[str, Any]] = []
@@ -415,6 +538,18 @@ class McpHost:
         except Exception as error:  # reported to the model
             return ToolResult(call, server, f"{type(error).__name__}: {error}", True)
         return ToolResult(call, server, result_text(result.content, result.structured_content), bool(result.is_error))
+
+
+def _roots(paths: Sequence[str | Path]) -> list[RootInfo]:
+    """Each directory as its absolute ``file://`` URI and name, without duplicates, sorted by URI."""
+    roots: dict[str, RootInfo] = {}
+    for path in paths:
+        directory = Path(path).resolve()
+        if not directory.is_dir():
+            raise McpHostError(f"MCP root {str(path)!r} is not a directory")
+        uri = directory.as_uri()
+        roots[uri] = RootInfo(uri, directory.name or uri)
+    return [roots[uri] for uri in sorted(roots)]
 
 
 async def chat(

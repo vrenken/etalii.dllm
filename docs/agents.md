@@ -38,6 +38,10 @@ JSON, with nothing from a clock or a random source, so the same run writes the s
 - Every round holds its [receipt](receipts.md), the assistant text and tool calls in full, and the tool results.
 - `id` is `trn_` plus the first 32 hex digits of the SHA-256 of the canonical JSON of everything else, so an edit
   is detected.
+- `server_requests` (only when a server asked) lists every [sampling and elicitation](mcp.md#elicitation-and-roots)
+  request the engine answered during the run, in the order they arrived: the kind, the server, the engine request
+  it became (as in a receipt), the answer and its fingerprint (`message` and `action` for elicitations; a declined
+  elicitation has no request).
 
 `dllm replay` recognises a transcript by its `transcript` key. It runs the same loop again, but no MCP server is
 started: every tool call is answered with the recorded result of the same position in the run. It then compares
@@ -48,7 +52,9 @@ each round's receipt with the recorded one and fails, with the reasons listed, w
 - the engine runs other weights or settings (another `system_fingerprint`);
 - a round diverges: `round N diverges: its conversation differs` when the request differs (an edited tool result,
   say), `the model's answer differs` when only the output does; `diverged_at` is that round;
-- the run has a different number of rounds.
+- the run has a different number of rounds;
+- `server request N (sampling|elicitation for SERVER): the engine's answer differs`: replay runs each recorded
+  server request again on the engine (offline: the request is in the transcript) and compares the answer.
 
 From Python: `transcripts.Recorder` builds a transcript from the events of `mcp_host.chat`, `transcripts.replay`
 checks one, and `transcripts.RecordedTools` stands in for an `McpHost` with the recorded results.

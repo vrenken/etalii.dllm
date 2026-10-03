@@ -301,6 +301,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     chat.add_argument("--mcp-list", action="store_true", help="list the MCP servers' tools, prompts and resources")
     chat.add_argument(
+        "--mcp-elicit",
+        choices=("engine", "decline"),
+        default="engine",
+        help="answer MCP servers' form elicitations with the model, constrained by their schema (default), or decline",
+    )
+    chat.add_argument(
+        "--mcp-root", action="append", default=[], metavar="DIR", help="offer this directory to MCP servers as a root"
+    )
+    chat.add_argument(
         "--tool",
         action="append",
         default=[],
@@ -1364,9 +1373,10 @@ def _chat(engine: DllmEngine, args: argparse.Namespace, options: SamplingOptions
     )
     if args.mcp_config or args.mcp_server or args.tool:
         return _chat_with_mcp(engine, args, request)
-    if args.mcp_prompt or args.mcp_resource or args.mcp_list:
+    if args.mcp_prompt or args.mcp_resource or args.mcp_list or args.mcp_root:
         print(
-            "dllm chat: --mcp-prompt, --mcp-resource and --mcp-list need --mcp-config or --mcp-server", file=sys.stderr
+            "dllm chat: --mcp-prompt, --mcp-resource, --mcp-root and --mcp-list need --mcp-config or --mcp-server",
+            file=sys.stderr,
         )
         return 1
     if args.vote is not None:
@@ -1433,7 +1443,8 @@ def _chat_with_mcp(engine: DllmEngine, args: argparse.Namespace, request: ChatRe
             if len(set(names)) != len(names) or "tools" in names:
                 raise mcp_host.McpHostError("MCP server names must be unique ('tools' is the built-in tools)")
             servers = {**{c.name: c for c in configs}, "tools": builtin_tools.server(args.tool, engine)}
-        async with mcp_host.McpHost(servers, engine) as host:
+        host_options = {"elicitation": args.mcp_elicit, "roots": args.mcp_root}
+        async with mcp_host.McpHost(servers, engine, **host_options) as host:
             if args.mcp_list:
                 _list_mcp(host)
                 return 0
@@ -1442,8 +1453,10 @@ def _chat_with_mcp(engine: DllmEngine, args: argparse.Namespace, request: ChatRe
             request = await _with_mcp_context(host, args, request)
             recorder = None
             if args.transcript:
-                recorder = transcripts.Recorder(engine, request, host.tools, args.max_tool_rounds, host.servers)
-            sampled = 0
+                recorder = transcripts.Recorder(
+                    engine, request, host.tools, args.max_tool_rounds, host.servers, host.answers
+                )
+            answered = 0
             async for event in mcp_host.chat(engine, request, host, args.max_tool_rounds):
                 if recorder is not None:
                     recorder.add(event)
@@ -1456,9 +1469,9 @@ def _chat_with_mcp(engine: DllmEngine, args: argparse.Namespace, request: ChatRe
                 elif isinstance(event, mcp_host.ToolResult):
                     marker = "error" if event.is_error else "result"
                     print(f"<- {marker}: {event.content}", file=sys.stderr)
-                    for sampling in host.samplings[sampled:]:
-                        print(f"   sampled for {sampling.server}: {sampling.fingerprint}", file=sys.stderr)
-                    sampled = len(host.samplings)
+                    for answer in host.answers[answered:]:
+                        print(f"   {_answer_line(answer)}", file=sys.stderr)
+                    answered = len(host.answers)
                 else:
                     finished = event
         assert finished is not None
@@ -1483,6 +1496,18 @@ def _chat_with_mcp(engine: DllmEngine, args: argparse.Namespace, request: ChatRe
         return 1
 
 
+def _answer_line(answer: Any) -> str:
+    """How ``dllm chat`` reports a server's sampling or elicitation request the engine answered."""
+    from etalii_dllm import mcp_host
+
+    if isinstance(answer, mcp_host.Sampling):
+        return f"sampled for {answer.server}: {answer.fingerprint}"
+    if answer.action == "accept":
+        content = json.dumps(answer.content, ensure_ascii=False, sort_keys=True)
+        return f"elicited for {answer.server}: {content} ({answer.fingerprint})"
+    return f"elicitation for {answer.server}: {answer.action}"
+
+
 def _list_mcp(host: Any) -> None:
     """``dllm chat --mcp-list``: the tools, prompts and resources the MCP servers offer."""
     print("tools:")
@@ -1495,6 +1520,10 @@ def _list_mcp(host: Any) -> None:
     print("resources:")
     for resource in host.resources:
         print(f"  {resource.uri} ({resource.server}): {resource.name}")
+    if host.roots:
+        print("roots:")
+        for root in host.roots:
+            print(f"  {root.uri}: {root.name}")
 
 
 async def _with_mcp_context(host: Any, args: argparse.Namespace, request: ChatRequest) -> ChatRequest:

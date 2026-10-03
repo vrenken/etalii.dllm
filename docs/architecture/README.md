@@ -166,7 +166,7 @@ AdamW from `grad.hpp`.
 | `interpret/` | Interpretability tools on the decoder's own pass: activation tracing through `LayerHook` (observation cannot change a bit), the logit lens, the embedding explorer, attention maps and their HTML/SVG views (`dllm lens`, `attention`, `neighbours`), expert routing (`experts`), steering vectors (`steer`, `--steer`), ROME edits (`edit`, of the routed expert in mixture-of-experts layers) and sparse autoencoders (`sae`); [interpretability](../interpretability.md). |
 | `evaluation.py` | `dllm eval`: log-likelihood scoring (perplexity and multiple choice, as lm-evaluation-harness does) with fixed-order sums and a fingerprint over every log-probability; [evaluation](../evaluation.md). |
 | `receipts.py` | Generation receipts: the engine request and hashes of the output as content-addressed JSON, and `verify`, which replays a receipt (`dllm replay`, `POST /v1/receipts/verify`); [receipts](../receipts.md). |
-| `transcripts.py`, `builtin_tools.py` | Agent transcripts and their offline replay; deterministic built-in tools ([reproducible agents](../agents.md)). |
+| `transcripts.py`, `builtin_tools.py` | Agent transcripts (with the engine's answers to servers' sampling and elicitation requests) and their offline replay; deterministic built-in tools ([reproducible agents](../agents.md)). |
 | `signing.py` | Deterministic Ed25519 signatures on receipts, transcripts and model files (`dllm sign`, `--sign-key`, `--trust`); [verifiable models](../provenance.md#signatures). |
 | `merging.py`, `exporting.py` | Exact model merges (`dllm merge`: linear, SLERP, TIES) and exports to Hugging Face safetensors and GGUF (`dllm export`); distillation lives in `training/distill.py` (`dllm distill`). [Building models](../model-building.md). |
 | `serving.py` | Deterministic serving at scale: the exact response cache (`--response-cache`), coalescing of identical in-flight requests, the self-audit (`--audit-every`, `GET /v1/audit`) and `dllm audit`; [serving at scale](../serving.md). |
@@ -179,7 +179,7 @@ AdamW from `grad.hpp`.
 | `training/` | Gradients of the decoder for every model family (mixtures of experts through the `moe_route_backward` kernel and shared experts through their sigmoid gate, with the router load-balancing loss), AdamW, fixed data order and checkpoints that resume bit for bit (`dllm finetune`), for all parameters or LoRA adapters; training receipts that replay a run (`training/receipt.py`). |
 | `server/` | The OpenAI Chat Completions (`app.py`, `contracts.py`), OpenAI Completions (`completions_api.py`), OpenAI Responses (`responses_api.py`), Anthropic (`anthropic_api.py`, `anthropic_contracts.py`) and Ollama (`ollama_api.py`) wire formats, and the chat page `static/chat.html`. |
 | `mcp_server.py` | The model as an MCP server over stdio (tools, prompts, resources). |
-| `mcp_host.py` | The MCP client host: the model calls external MCP tools in a loop over `chat_stream`; the engine answers servers' sampling requests, and the servers' prompts and resources feed `dllm chat`. |
+| `mcp_host.py` | The MCP client host: the model calls external MCP tools in a loop over `chat_stream`; the engine answers servers' sampling requests and form elicitations (constrained by their schema), offers roots sorted by URI, and the servers' prompts and resources feed `dllm chat`. |
 | `cli.py` | The `dllm` command. |
 
 ### C++ kernels `cpp/`

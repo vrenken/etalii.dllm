@@ -828,6 +828,20 @@ much less memory (QLoRA). The run is defined exactly as LoRA on the dequantised 
 every machine and replays from its receipt. `dllm import my-adapter --base qwen2.5-1.5b.dllm --base-quantize q4_0`
 rebuilds the merged model from the adapter. Details: [training](training.md#quantised-bases).
 
+## 42. MCP servers that ask questions
+
+```bash
+dllm chat "Set up my profile" --mcp-server "forms=python forms_server.py" --mcp-root ./project \
+    --transcript run.json
+dllm replay run.json
+```
+
+When an MCP server asks for structured input (an elicitation form), the model fills it in, constrained by the
+form's schema and greedy, so the same form always gets the same answer; `--mcp-elicit decline` declines every form
+instead. `--mcp-root DIR` offers directories to servers that ask for roots, sorted by URI. The transcript records
+the model's answers to the server's sampling and elicitation requests, and `dllm replay` checks them too. Details:
+[MCP](mcp.md#elicitation-and-roots).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
@@ -856,8 +870,8 @@ rebuilds the merged model from the adapter. Details: [training](training.md#quan
   be negated (such as `not` of an array schema) and keywords like `dependentSchemas` are refused with an error
   (see [HTTP API](api.md#structured-output)). GBNF grammars may not be left-recursive and cannot use llama.cpp's
   token references (`<...>`) ([grammars](api.md#grammars)). No images or audio.
-- MCP servers that ask the client for elicitation or roots are not supported, and image, audio or binary MCP
-  content is refused.
+- MCP servers' URL-mode elicitations (open a web page) are declined and nobody is asked interactively (the model
+  answers forms), and image, audio or binary MCP content is refused.
 - Models with Unigram or WordPiece tokenizers, GGUF files with a SentencePiece vocabulary (convert from the
   Hugging Face checkpoint instead), dynamic NTK RoPE scaling or other architectures (including DeepSeek's mixtures
   of experts with several shared experts and multi-head latent attention) are refused at import.
