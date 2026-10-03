@@ -129,6 +129,29 @@ The reference values go into checkpoints as exact hexadecimal doubles, so a resu
 recomputing them from trained weights. Receipts, `dllm replay` and the model file record the objective and `beta`;
 language-model runs omit them and keep their old bytes.
 
+## Encoders
+
+`RunConfig.objective = "embedding"` or `"classifier"` trains a BERT, RoBERTa or XLM-RoBERTa encoder on
+`EncoderData` (`training/encoder_data.py`): anchor/positive(/negative) texts, or labelled texts and pairs, tokenized
+with the model's own recipe. `EncoderGradients` (`training/encoder_backprop.py`) runs the encoder's forward pass
+kernel for kernel and its backward pass with `layer_norm_backward`, `gelu_backward` and the bidirectional
+`attention_backward`.
+
+```mermaid
+flowchart LR
+    ex["a step's examples<br/>(seeded per-epoch order)"] --> enc["EncoderGradients.encode / classify<br/>per text, saved activations"]
+    enc -->|embedding| pool["pool + L2-normalise<br/>(the model's pooling)"]
+    pool --> mnrl["scores = scale * anchors @ candidates^T<br/>(linear kernel); mean cross-entropy"]
+    enc -->|classifier| head["logits of the head<br/>BCE with logits, or label cross-entropy"]
+    mnrl --> back["pool_backward, then the encoder's backward pass<br/>per text; g += text gradients (float32, batch order)"]
+    head --> back
+    back --> adam["AdamW, as for any run"]
+```
+
+Everything after the gradients is shared with decoder runs: AdamW, checkpoints, receipts (which count `"examples"`),
+exports and LoRA, which adapts the encoder's `q k v o up down` under `transformers`' module names. The tuned model
+keeps its pooling or classifier settings.
+
 ## Checkpoints and resume
 
 ```mermaid

@@ -9,8 +9,9 @@ This is roadmap Phase 3, with LoRA added in Phase 8, every dense model family in
 Phase 43. It trains either every parameter of the decoder or [LoRA adapters](#lora-adapters) on its linear layers, for
 every architecture the engine runs: Llama, Mistral, Qwen2, Qwen3, OLMo 2, Granite, Gemma 2, Gemma 3, Phi-3/Phi-4-mini
 (with LongRoPE) and the [mixture-of-experts](#mixtures-of-experts) models Mixtral, OLMoE, Qwen3-MoE, Qwen2-MoE and
-Granite MoE. There is
-no pre-training from scratch (weights come from [importing open models](research/model-import.md)).
+Granite MoE. Since Phase 58 it also fine-tunes [encoders](#encoders): BERT, RoBERTa and XLM-RoBERTa embedders and
+cross-encoders. There is no pre-training from scratch (weights come from
+[importing open models](research/model-import.md)).
 
 ## Usage
 
@@ -29,7 +30,9 @@ dllm finetune smollm2-135m.dllm --data my-data.jsonl -o smollm2-135m-tuned.dllm 
 | --- | --- | --- |
 | `--steps` | 100 | Optimizer steps |
 | `--batch-size` | 8 | Windows per step |
-| `--sequence-length` | 128 | Tokens per window (at most the model's context length) |
+| `--sequence-length` | 128 | Tokens per window (at most the model's context length); for encoders, per text (default: the model's own limit) |
+| `--objective` | follows the model | `lm` (decoders), `dpo`, `embedding` (embedders) or `classifier` (cross-encoders) |
+| `--similarity-scale` | 20 | Embedding runs: the factor on cosine similarities (sentence-transformers' `scale`) |
 | `--learning-rate`, `--min-learning-rate` | 1e-4, 0 | Peak and final learning rate |
 | `--warmup-steps` | 0 | Linear warmup from 0 |
 | `--schedule` | `cosine` | `cosine` (decay to the minimum at the last step) or `constant` after warmup |
@@ -199,6 +202,58 @@ dllm finetune olmoe.dllm --data my-data.jsonl --lora-rank 8 -o olmoe-lora.dllm -
   as `mlp.shared_expert.gate_proj`/`up_proj`/`down_proj`. Granite MoE keeps all its experts in one fused parameter,
   which PEFT cannot adapt expert by expert: LoRA runs train and merge as usual, but exporting their adapter in the
   PEFT format is refused unless they adapt only the attention projections.
+
+## Encoders
+
+Embedders (all-MiniLM, bge, all-distilroberta, multilingual MiniLM) and cross-encoders (ms-marco-MiniLM, mmarco)
+fine-tune with the same command, the same options, checkpoints, receipts and LoRA. The objective follows the model:
+
+```bash
+# an embedder: anchors and the texts that belong with them (and optionally a hard negative)
+dllm finetune all-minilm.dllm --data pairs.jsonl -o all-minilm-tuned.dllm --steps 100 --batch-size 16
+# a cross-encoder: texts or pairs with a label
+dllm finetune ms-marco.dllm --data labels.jsonl -o ms-marco-tuned.dllm --steps 100 --lora-rank 8
+```
+
+```jsonl
+{"anchor": "how do I reset my password", "positive": "Open Settings, then Account, then Reset password."}
+{"anchor": "capital of France", "positive": "Paris is the capital of France.", "negative": "Lyon is in France."}
+```
+
+```jsonl
+{"text": "how do I reset my password", "pair": "Open Settings, then Account, then Reset password.", "label": 1}
+{"text": "how do I reset my password", "pair": "Paris is the capital of France.", "label": 0}
+```
+
+- **Embedding** (`--objective embedding`) is sentence-transformers' `MultipleNegativesRankingLoss`: each of a step's
+  `batch-size` anchors is scored against every positive of the step, then every hard negative, by
+  `similarity_scale` times their cosine similarity, and the loss is the mean cross-entropy of picking the anchor's
+  own positive. The other examples of the step are its negatives, so use a batch size of at least 2. Sentence
+  vectors are pooled as the model pools them (mean, CLS or last token) and L2-normalised; the scores are one
+  `linear` kernel of the normalised vectors.
+- **Classification** (`--objective classifier`) is what sentence-transformers' `CrossEncoder` trains with: binary
+  cross-entropy with logits for a model with one output (the label a number from 0 to 1, a reranker's relevance),
+  else softmax cross-entropy over the labels (the label an index). The loss is the mean over the step's examples.
+- **Texts** are tokenized with the model's own recipe (its default prompt and special tokens, or the pair template)
+  and cut to `--sequence-length` (by default the model's limit) as sentence-transformers cuts them.
+- **The backward pass** (`training/encoder_backprop.py`) is the encoder's own forward pass, kernel for kernel, then
+  `layer_norm_backward`, `attention_backward` without the causal mask, `gelu_backward` (the exact erf GELU),
+  `linear_backward` with biases and `embedding_backward` for the word, token-type and position tables. As in
+  `transformers`, whose embeddings have a `padding_idx`, RoBERTa's padding row gets no gradient. Each text's
+  gradients are computed on their own and summed elementwise in batch order (anchor, positive, negative).
+- **LoRA** adapts the attention projections and the MLP (`q k v o up down`; `gate` is skipped) under
+  `transformers`' names, `encoder.layer.N.attention.self.query` and so on, with `bert.` or `roberta.` in front for a
+  cross-encoder. PEFT's `target_modules` is a regular expression over those names, so the pooler and the classifier
+  (both `dense` layers too) stay frozen, as in a LoRA run here. `--adapter` and `dllm import ADAPTER --base` apply an
+  encoder adapter like a decoder one.
+- **Outputs** keep the model's pooling or classifier settings, so the tuned model serves embeddings, reranking and
+  `dllm embed` as before; the receipt counts `"examples"`. [`dllm export`](model-building.md#encoders) writes it back
+  to Hugging Face and sentence-transformers, or to GGUF.
+
+`tests/test_encoder_training.py` checks the new kernels and the encoder's gradients against `transformers`' autograd
+and finite differences (BERT and XLM-RoBERTa with padding inside the sequence), both losses and their gradients
+against the `torch` formulas sentence-transformers uses, bit-exact resumption, receipts, golden hashes of a short run
+of each objective, and LoRA adapters whose names are `transformers`' own modules.
 
 ## What makes it reproducible
 

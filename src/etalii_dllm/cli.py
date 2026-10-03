@@ -179,8 +179,19 @@ def _finetune(args: argparse.Namespace) -> int:
         return 1
     try:
         base = ModelFile(args.base)
+        objective = args.objective or ("dpo" if args.dpo else "lm")
+        if args.objective is None and not args.dpo and base.config.is_encoder:
+            objective = "classifier" if base.config.classifier_labels else "embedding"
+        if args.dpo and objective != "dpo":
+            raise ValueError(f"--dpo and --objective {objective} are different objectives")
+        if base.config.is_encoder and objective in ("lm", "dpo"):
+            raise ValueError("an encoder trains with the embedding or classifier objective, not language modelling")
+        if args.sequence_length is None:  # an encoder's own limit, else 128
+            limits = base.classifier or base.embedding or {}
+            args.sequence_length = int(limits.get("max_tokens") or base.config.context_length)
+            args.sequence_length = args.sequence_length if base.config.is_encoder else 128
         engine = DllmEngine.from_model_file(args.base, verify=False)
-        data = load_data(engine, base, args.data, args.sequence_length, "dpo" if args.dpo else "lm")
+        data = load_data(engine, base, args.data, args.sequence_length, objective)
         if args.resume:
             tuner = FineTuner.load_checkpoint(args.resume, data, base)
         else:
@@ -204,7 +215,9 @@ def _finetune(args: argparse.Namespace) -> int:
                 args.seed,
                 optimizer,
                 lora,
-                **({"objective": "dpo", "beta": args.beta} if args.dpo else {}),
+                objective=objective,
+                beta=args.beta,
+                similarity_scale=args.similarity_scale,
                 router_aux_loss=args.router_aux_loss,
                 base_quantize=args.base_quantize,
             )
@@ -219,7 +232,7 @@ def _finetune(args: argparse.Namespace) -> int:
             f"base:               {tuner.base.kind}, {tuner.base.nbytes / 2**20:.1f} MiB of matrices"
             f" (float32: {tuner.base.float_nbytes / 2**20:.1f} MiB)"
         )
-    unit = "pairs" if args.dpo else "windows"
+    unit = {"dpo": "pairs", "embedding": "examples", "classifier": "examples"}.get(objective, "windows")
     print(f"data:               {len(data)} {unit} of up to {data.sequence_length} tokens, {data.fingerprint[:16]}")
     total = tuner.run.steps
 
@@ -538,7 +551,9 @@ def main(argv: list[str] | None = None) -> int:
     finetune.add_argument("-o", "--output", help="the fine-tuned model.dllm file to write (LoRA: adapters merged)")
     finetune.add_argument("--steps", type=int, default=100)
     finetune.add_argument("--batch-size", type=int, default=8)
-    finetune.add_argument("--sequence-length", type=int, default=128)
+    finetune.add_argument(
+        "--sequence-length", type=int, help="tokens per window (default 128) or per encoder text (the model's limit)"
+    )
     finetune.add_argument("--learning-rate", type=float, default=1e-4)
     finetune.add_argument("--min-learning-rate", type=float, default=0.0)
     finetune.add_argument("--warmup-steps", type=int, default=0)
@@ -560,6 +575,15 @@ def main(argv: list[str] | None = None) -> int:
         "--dpo", action="store_true", help="preference tuning: --data holds prompt/chosen/rejected pairs (JSONL)"
     )
     finetune.add_argument("--beta", type=float, default=0.1, help="DPO: how close to stay to the base model")
+    finetune.add_argument(
+        "--objective",
+        choices=("lm", "dpo", "embedding", "classifier"),
+        help="what to train: lm (decoders' default), dpo, embedding (an embedder's default: anchor/positive pairs) "
+        "or classifier (a cross-encoder's default: labelled texts or pairs)",
+    )
+    finetune.add_argument(
+        "--similarity-scale", type=float, default=20.0, help="embedding runs: the factor on cosine similarities"
+    )
     finetune.add_argument(
         "--router-aux-loss",
         type=float,

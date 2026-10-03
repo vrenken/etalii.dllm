@@ -1010,8 +1010,152 @@ def gguf_config(gguf: GgufFile) -> TransformerConfig:
     )
 
 
+def _gguf_bert(gguf: GgufFile, path: Path, context_length: int | None) -> _Converted:
+    """A GGUF file in llama.cpp's ``bert`` layout (as ``dllm export`` writes it, or as llama.cpp's converter does:
+    WordPiece vocabularies; :mod:`etalii_dllm.encoder_export`). The tokenizer is ``tokenizer.huggingface.json`` when
+    the file has one, else the WordPiece vocabulary with BERT's lower-casing normaliser, as llama.cpp tokenizes."""
+    from etalii_dllm.encoder_export import (
+        GGUF_ENCODER_LAYER_NAMES,
+        GGUF_ENCODER_NAMES,
+        GGUF_POOLING,
+        wordpiece_vocabulary,
+    )
+
+    metadata = gguf.metadata
+    if context_length is not None:
+        raise ModelImportError("--context-length is for decoders; an encoder has learned absolute positions")
+    if metadata.get("bert.attention.causal", False):
+        raise ModelImportError("a causal bert GGUF is not an encoder")
+
+    def key(name: str) -> Any:
+        value = metadata.get(f"bert.{name}")
+        if value is None:
+            raise ModelImportError(f"GGUF metadata bert.{name} is missing")
+        return value
+
+    by_gguf = {gguf_name: ours for ours, gguf_name in GGUF_ENCODER_NAMES.items()}
+    for layer in range(int(key("block_count"))):
+        for ours, gguf_name in GGUF_ENCODER_LAYER_NAMES.items():
+            for parameter in ("weight", "bias"):
+                by_gguf[f"blk.{layer}.{gguf_name}.{parameter}"] = f"layers.{layer}.{ours}.{parameter}"
+    tensors: dict[str, TensorSource] = {}
+    for tensor in gguf:
+        if tensor.name not in by_gguf:
+            raise ModelImportError(f"unexpected tensor {tensor.name!r}")
+        tensors[by_gguf[tensor.name]] = TensorSource(tuple(tensor.shape), tensor.to_float32, tensor.type_name)
+    if ("classifier.weight" in tensors) != ("pooler.weight" in tensors):
+        raise ModelImportError("a classifier without its pooler (cls) is not supported")
+    labels = tensors["classifier.weight"].shape[0] if "classifier.weight" in tensors else 0
+    hidden, heads = int(key("embedding_length")), int(key("attention.head_count"))
+    eps = metadata.get("dllm.attention.layer_norm_epsilon", key("attention.layer_norm_epsilon"))
+    try:
+        config = TransformerConfig(
+            family="bert",
+            vocabulary_size=tensors["token_embedding.weight"].shape[0],
+            hidden_size=hidden,
+            intermediate_size=int(key("feed_forward_length")),
+            layers=int(key("block_count")),
+            heads=heads,
+            kv_heads=heads,
+            head_dim=hidden // heads,
+            context_length=int(key("context_length")),
+            rms_norm_eps=float(eps),
+            rope_theta=0.0,
+            attention_bias=True,
+            activation="gelu",
+            tie_word_embeddings=True,
+            type_vocabulary_size=tensors["token_type_embedding.weight"].shape[0],
+            classifier_labels=labels,
+        )
+    except (KeyError, ValueError) as error:
+        raise ModelImportError(f"the bert GGUF does not describe an encoder: {error}") from error
+    if "tokenizer.huggingface.json" in metadata:
+        spec = json.loads(str(metadata["tokenizer.huggingface.json"]))
+    elif metadata.get("tokenizer.ggml.model") == "bert":
+        spec = _wordpiece_spec(metadata, wordpiece_vocabulary)
+    else:
+        raise ModelImportError(f"GGUF bert tokenizer {metadata.get('tokenizer.ggml.model')!r} is not supported")
+    tokenizer = {"format": "huggingface", "tokenizer_json": spec, "tokenizer_config": {}, "special_tokens_map": {}}
+    embedding: dict[str, Any] | None = None
+    classifier: dict[str, Any] | None = None
+    if labels:
+        names = [str(label) for label in metadata.get("bert.classifier.output_labels") or []]
+        classifier = {"labels": names or [f"LABEL_{i}" for i in range(labels)], "activation": "none"}
+        classifier["max_tokens"] = config.context_length
+        classifier |= json.loads(str(metadata.get("dllm.classifier", "{}")))
+    else:
+        pooling = {value: mode for mode, value in GGUF_POOLING.items()}.get(int(metadata.get("bert.pooling_type", 1)))
+        if pooling is None:
+            raise ModelImportError(f"GGUF pooling type {metadata.get('bert.pooling_type')} is not supported")
+        embedding = {"pooling": pooling, "normalize": True, "prompts": {}, "default_prompt_name": None}
+        embedding["max_tokens"] = config.context_length
+        embedding |= json.loads(str(metadata.get("dllm.embedding", "{}")))
+    source: dict[str, Any] = {"format": "gguf", "files": _file_hashes([path], path.parent)}
+    return _Converted(
+        config=config,
+        tensors=tensors,
+        source=source,
+        licence_id=metadata.get("general.license"),
+        licence_text=None,
+        licence_link=metadata.get("general.license.link"),
+        name=metadata.get("general.name") or path.stem,
+        tokenizer=tokenizer,
+        chat_template=None,
+        embedding=embedding,
+        classifier=classifier,
+    )
+
+
+def _wordpiece_spec(metadata: dict[str, Any], pieces_of: Callable[..., list[str]]) -> dict[str, Any]:
+    """A ``tokenizer.json`` for llama.cpp's ``bert`` vocabulary: WordPiece pieces, BERT's normaliser (lower case,
+    accents stripped, Chinese characters split) and pre-tokenizer, ``[CLS] A [SEP] B [SEP]``."""
+    tokens = [str(token) for token in metadata["tokenizer.ggml.tokens"]]
+    types = [int(kind) for kind in metadata.get("tokenizer.ggml.token_type", [1] * len(tokens))]
+    pieces = pieces_of(tokens, types)
+
+    def special(field: str, fallback: str) -> tuple[str, int]:
+        index = metadata.get(f"tokenizer.ggml.{field}")
+        if index is None:
+            if fallback not in pieces:
+                raise ModelImportError(f"the bert GGUF names no {field} and has no {fallback}")
+            index = pieces.index(fallback)
+        return pieces[int(index)], int(index)
+
+    cls = special("cls_token_id" if "tokenizer.ggml.cls_token_id" in metadata else "bos_token_id", "[CLS]")
+    sep = special("seperator_token_id", "[SEP]")
+    unknown = special("unknown_token_id", "[UNK]")[0]
+    added = [
+        {"id": i, "content": piece, "single_word": False, "lstrip": False, "rstrip": False, "normalized": False,
+         "special": True}
+        for i, (piece, kind) in enumerate(zip(pieces, types, strict=True))
+        if kind == 3
+    ]  # fmt: skip
+    return {
+        "added_tokens": added,
+        "normalizer": {
+            "type": "BertNormalizer",
+            "clean_text": True,
+            "handle_chinese_chars": True,
+            "strip_accents": None,
+            "lowercase": True,
+        },
+        "pre_tokenizer": {"type": "BertPreTokenizer"},
+        "post_processor": {"type": "BertProcessing", "sep": list(sep), "cls": list(cls)},
+        "decoder": {"type": "WordPiece", "prefix": "##", "cleanup": True},
+        "model": {
+            "type": "WordPiece",
+            "unk_token": unknown,
+            "continuing_subword_prefix": "##",
+            "max_input_chars_per_word": 100,
+            "vocab": {piece: i for i, piece in enumerate(pieces)},
+        },
+    }
+
+
 def _convert_gguf(path: Path, context_length: int | None = None) -> _Converted:
     gguf = GgufFile(path)
+    if gguf.metadata.get("general.architecture") == "bert":
+        return _gguf_bert(gguf, path, context_length)
     config = gguf_config(gguf)
     if context_length is not None:
         config = with_context_length(config, context_length)
@@ -1230,6 +1374,7 @@ def _import_adapter(
     if base_quantize is not None:
         adapter["base_quantize"] = base_quantize
     metadata = {key: base.header.get(key) for key in ("source", "tokenizer", "chat_template", "fine_tuning")}
+    metadata |= {key: base.header[key] for key in ("embedding", "classifier") if base.header.get(key) is not None}
     metadata["licence"] = record
     metadata["adapter"] = adapter
     metadata["lineage"] = extend_lineage(lineage(base.header), base.fingerprint, adapter_step(adapter))

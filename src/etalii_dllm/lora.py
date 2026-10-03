@@ -12,7 +12,12 @@ gradients from the merged weight's gradient (:func:`adapter_gradients`).
 
 On disk an adapter is a PEFT directory: ``adapter_config.json`` and ``adapter_model.safetensors`` with keys such
 as ``base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight``, so adapters trained here load in PEFT and
-adapters trained with PEFT import here.
+adapters trained with PEFT import here. Encoders (BERT, RoBERTa, XLM-RoBERTa) adapt their attention projections and
+MLP (``q k v o up down``; there is no ``gate``) under transformers' names, e.g.
+``base_model.model.encoder.layer.0.attention.self.query.lora_A.weight`` (an embedder's ``BertModel``) or
+``base_model.model.bert.encoder.layer.0.output.dense.lora_B.weight`` (a cross-encoder's
+``BertForSequenceClassification``; ``roberta.`` for RoBERTa and XLM-RoBERTa). The pooler and classifier stay
+frozen.
 """
 
 from __future__ import annotations
@@ -61,6 +66,19 @@ _MIXTRAL_EXPERTS = {"gate": "w1", "up": "w3", "down": "w2"}
 _BY_MIXTRAL_EXPERT = {module: target for target, module in _MIXTRAL_EXPERTS.items()}
 _EXPERT_TARGETS = ("gate", "up", "down")
 # A shared expert (Qwen2-MoE): mlp.shared_expert.gate_proj/up_proj/down_proj.
+# Encoders: transformers' BERT module names.
+ENCODER_MODULES = {
+    "q": "attention.self.query",
+    "k": "attention.self.key",
+    "v": "attention.self.value",
+    "o": "attention.output.dense",
+    "up": "intermediate.dense",
+    "down": "output.dense",
+}
+_BY_ENCODER_MODULE = {module: target for target, module in ENCODER_MODULES.items()}
+_ENCODER_PEFT_KEY = re.compile(
+    r"^(?:base_model\.model\.)?((?:bert|roberta)\.)?encoder\.layer\.(\d+)\.(\w+\.\w+(?:\.\w+)?)\.lora_([AB])\.weight$"
+)
 _PEFT_KEY = re.compile(
     r"^(?:base_model\.model\.)?model\.layers\.(\d+)\.(self_attn|mlp|block_sparse_moe)\."
     r"(?:experts\.(\d+)\.|(shared_expert)\.)?(\w+)\.lora_([AB])\.weight$"
@@ -108,7 +126,10 @@ def target_weights(config: TransformerConfig, lora: LoraConfig) -> list[str]:
     every expert's projection (``layers.N.mlp.experts.E.gate.weight``) and the shared expert's
     (``layers.N.mlp.shared.gate.weight``); the router and the shared expert's gate are never adapted."""
     if config.is_encoder:
-        raise ValueError("LoRA adapters are for decoders; encoder models cannot be adapted yet")
+        targets = [t for t in lora.targets if t in ENCODER_MODULES]
+        if not targets:
+            raise AdapterError("an encoder has no gate projection; adapt q, k, v, o, up or down")
+        return tensor_order([f"layers.{i}.{_WEIGHT_NAMES[t]}" for i in range(config.layers) for t in targets])
     names = []
     for layer in range(config.layers):
         for target in lora.targets:
@@ -276,6 +297,9 @@ def peft_key(name: str, config: TransformerConfig | None = None) -> str:
     layer, rest = name.split(".", 2)[1:]
     weight, kind = rest.rsplit(".", 1)
     suffix = f"lora_{kind[-1].upper()}.weight"
+    if config is not None and config.is_encoder:
+        target = next(t for t, w in _WEIGHT_NAMES.items() if w == weight)
+        return f"base_model.model.{_encoder_prefix(config)}encoder.layer.{layer}.{ENCODER_MODULES[target]}.{suffix}"
     if weight.startswith(("mlp.experts.", "mlp.shared.")) and config is not None and config.family == "granitemoe":
         raise AdapterError("Granite MoE's experts are fused, so PEFT cannot adapt one; export the merged model")
     if weight.startswith("mlp.shared."):
@@ -292,8 +316,20 @@ def peft_key(name: str, config: TransformerConfig | None = None) -> str:
     return f"base_model.model.model.layers.{layer}.{MODULES[target]}.{suffix}"
 
 
-def target_modules(config: TransformerConfig | None, lora: LoraConfig) -> list[str]:
-    """PEFT's ``target_modules``: the module names of the adapted layers."""
+def _encoder_prefix(config: TransformerConfig) -> str:
+    """Where transformers keeps an encoder's layers: at the top of an embedder's bare model, under ``bert.`` or
+    ``roberta.`` in a sequence-classification model."""
+    if not config.classifier_labels:
+        return ""
+    return "roberta." if config.padding_index is not None else "bert."
+
+
+def target_modules(config: TransformerConfig | None, lora: LoraConfig) -> list[str] | str:
+    """PEFT's ``target_modules``: the module names of the adapted layers. For an encoder, a regular expression over
+    the full module names (``dense`` alone would also adapt the pooler and the classifier)."""
+    if config is not None and config.is_encoder:
+        names = "|".join(ENCODER_MODULES[t].replace(".", r"\.") for t in lora.targets if t in ENCODER_MODULES)
+        return rf".*encoder\.layer\.\d+\.(?:{names})"
     modules = set()
     for target in lora.targets:
         if config is not None and config.family == "mixtral" and target in _EXPERT_TARGETS:
@@ -328,7 +364,7 @@ def write_peft(
         "peft_type": "LORA",
         "r": lora.rank,
         "target_modules": target_modules(config, lora),
-        "task_type": "CAUSAL_LM",
+        "task_type": _task_type(config),
         "use_dora": False,
         "use_rslora": lora.rslora,
     }
@@ -337,6 +373,12 @@ def write_peft(
     write_safetensors(
         directory / ADAPTER_WEIGHTS, {peft_key(name, config): adapters[name] for name in adapters}, {"format": "pt"}
     )
+
+
+def _task_type(config: TransformerConfig | None) -> str:
+    if config is None or not config.is_encoder:
+        return "CAUSAL_LM"
+    return "SEQ_CLS" if config.classifier_labels else "FEATURE_EXTRACTION"
 
 
 def _unsupported(config: Mapping[str, Any]) -> str | None:
@@ -360,6 +402,14 @@ def _unsupported(config: Mapping[str, Any]) -> str | None:
 def _adapter_name(key: str, config: TransformerConfig, directory: Path) -> tuple[str, str]:
     """(our adapter name, its target) for the PEFT tensor ``key``; refuses modules this engine does not adapt and
     ones that do not fit ``config``."""
+    if config.is_encoder:
+        found = _ENCODER_PEFT_KEY.match(key)
+        target = _BY_ENCODER_MODULE.get(found.group(3)) if found else None
+        if found is None or target is None:
+            raise AdapterError(f"{directory}: unsupported adapter tensor {key!r}")
+        if not 0 <= int(found.group(2)) < config.layers:
+            raise AdapterError(f"{directory}: tensor {key!r} does not fit the model")
+        return f"layers.{int(found.group(2))}.{_WEIGHT_NAMES[target]}.lora_{found.group(4).lower()}", target
     match = _PEFT_KEY.match(key)
     if match is None:
         raise AdapterError(f"{directory}: unsupported adapter tensor {key!r}")

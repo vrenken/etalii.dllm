@@ -110,6 +110,69 @@ inline void rms_norm_backward(const float* x, const float* weight, const float* 
     }
 }
 
+// Gradients of LayerNorm y = (x - mean) inv_std w + b (layer_norm in nn.hpp), with xhat_i = (x_i - mean) inv_std,
+// mean and inv_std recomputed exactly as the forward kernel computes them, and g_i = w_i dy_i:
+//   dx_i = inv_std (g_i - (sum_j g_j) / dim - xhat_i (sum_j g_j xhat_j) / dim)   (j ascending)
+//   dw_i = sum_r dy[r, i] xhat[r, i],  db_i = sum_r dy[r, i]                      (r ascending)
+// Every value is a double until the one rounding of each output; dx, dw and db may each be null.
+inline void layer_norm_backward(const float* x, const float* weight, const float* dy, float* dx, float* dw, float* db,
+                                std::size_t rows, std::size_t dim, double eps) {
+    std::vector<double> dw_acc(dim, 0.0);
+    std::vector<double> db_acc(dim, 0.0);
+    std::vector<double> xhat(dim);
+    for (std::size_t r = 0; r < rows; ++r) {
+        const float* xr = x + r * dim;
+        const float* dyr = dy + r * dim;
+        double total = 0.0;
+        for (std::size_t i = 0; i < dim; ++i) {
+            total += static_cast<double>(xr[i]);
+        }
+        const double mean = total / static_cast<double>(dim);
+        double sum_sq = 0.0;
+        for (std::size_t i = 0; i < dim; ++i) {
+            const double centred = static_cast<double>(xr[i]) - mean;
+            sum_sq += centred * centred;
+        }
+        const double inv_std = 1.0 / std::sqrt(sum_sq / static_cast<double>(dim) + eps);
+        double g_sum = 0.0;
+        double gx_sum = 0.0;
+        for (std::size_t i = 0; i < dim; ++i) {
+            xhat[i] = (static_cast<double>(xr[i]) - mean) * inv_std;
+            const double g = static_cast<double>(weight[i]) * static_cast<double>(dyr[i]);
+            g_sum += g;
+            gx_sum += g * xhat[i];
+            dw_acc[i] += static_cast<double>(dyr[i]) * xhat[i];
+            db_acc[i] += static_cast<double>(dyr[i]);
+        }
+        if (dx != nullptr) {
+            const double g_mean = g_sum / static_cast<double>(dim);
+            const double gx_mean = gx_sum / static_cast<double>(dim);
+            for (std::size_t i = 0; i < dim; ++i) {
+                const double g = static_cast<double>(weight[i]) * static_cast<double>(dyr[i]);
+                dx[r * dim + i] = static_cast<float>(inv_std * (g - g_mean - xhat[i] * gx_mean));
+            }
+        }
+    }
+    for (std::size_t i = 0; i < dim; ++i) {
+        if (dw != nullptr) {
+            dw[i] = static_cast<float>(dw_acc[i]);
+        }
+        if (db != nullptr) {
+            db[i] = static_cast<float>(db_acc[i]);
+        }
+    }
+}
+
+// d gelu(x) / dx for the exact GELU 0.5 x erfc(-x / sqrt(2)):
+//   0.5 erfc(-x / sqrt(2)) + x exp(-x^2 / 2) / sqrt(2 pi); returns dy times that in double, rounded once.
+inline float gelu_backward(float x, float dy) {
+    constexpr double inv_sqrt2 = 7.07106781186547524401e-01;
+    constexpr double inv_sqrt_2pi = 3.98942280401432677940e-01;
+    const double d = x;
+    const double slope = 0.5 * dllm::erfc(-d * inv_sqrt2) + d * dllm::exp(-0.5 * d * d) * inv_sqrt_2pi;
+    return static_cast<float>(static_cast<double>(dy) * slope);
+}
+
 // d silu(x) / dx = s (1 + x (1 - s)) with s = sigmoid(x); returns dy times that, rounded once.
 inline float silu_backward(float x, float dy) {
     const double d = x;

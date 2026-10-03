@@ -30,7 +30,7 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
 ## Layout
 
 - `cpp/include/dllm/`: header-only C++ kernels (`random.hpp`, `math.hpp` transcendentals, `nn.hpp` matmul/RMSNorm/LayerNorm/RoPE/
-  attention, `grad.hpp` their gradients (also tanh GELU, soft-caps, unit-offset norms, MoE routing) plus cross-entropy and AdamW, `quant.hpp` Q8_0, `interp.hpp` attention probabilities/cosine/Cholesky for interpretability, `parallel.hpp` the thread pool, `fpenv.hpp` the
+  attention, `grad.hpp` their gradients (also tanh and erf GELU, soft-caps, unit-offset norms, LayerNorm, MoE routing) plus cross-entropy and AdamW, `quant.hpp` Q8_0, `interp.hpp` attention probabilities/cosine/Cholesky for interpretability, `parallel.hpp` the thread pool, `fpenv.hpp` the
   floating point environment every binding runs in,
   `simd.hpp` the per-machine AVX2/SSE2/NEON dispatch, `cuda.hpp` the CUDA backend; evaluation orders in `docs/kernels.md`);
   `cpp/kernels.cpp` binds them as `etalii_dllm._kernels`. `cpp/cuda/kernels.cu` holds the GPU kernels: CMake embeds it
@@ -49,8 +49,8 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
   ops; `--device cuda`/`DLLM_DEVICE`), `architecture` (`TransformerConfig`), `modelfile`
   (the `model.dllm` container, `docs/model-format.md`), `importing` (safetensors/GGUF readers and `dllm import`),
   `training` (gradients of every model family, mixtures of experts and the router load-balancing loss included, AdamW, data order, checkpoints and `dllm finetune`, DPO on preference pairs in
-  `training/preference.py`, `docs/training.md`), `lora` (LoRA
-  adapters, always merged into the weights; Q8_0/Q4_0 bases for `--base-quantize`; the PEFT format), `grammar`
+  `training/preference.py`, encoders in `training/encoder_backprop.py`/`encoder_data.py` (`--objective embedding|classifier`, `docs/training.md#encoders`), `docs/training.md`), `lora` (LoRA
+  adapters, always merged into the weights; Q8_0/Q4_0 bases for `--base-quantize`; the PEFT format, encoders under `transformers`' module names), `grammar`
   (JSON-schema constrained decoding over a token trie), `tools` (tool calling in each model's own format: Hermes `<tool_call>`, Llama 3 JSON, Mistral `[TOOL_CALLS]`, Granite `<|tool_call|>`, Qwen3-Coder XML, DeepSeek V3/R1 and V3.1 markers, Python call lists, Phi-4-mini `functools`, Command R7B actions, detected from the chat template; strict tools, allowed tools and the one-call limit in `ToolChoice`; `docs/api.md#tools`), `interpret/` (activation tracing via `LayerHook`, logit lens,
   embedding explorer, attention maps, expert routing, steering vectors, ROME edits, sparse autoencoders; `dllm lens|attention|
   experts|neighbours|steer|edit|sae`, `docs/interpretability.md`), `receipts` (generation receipts, receipt chains and `dllm replay`, `docs/receipts.md`), `transcripts` (agent transcripts
@@ -59,7 +59,7 @@ Cloud sessions: `.claude/hooks/session-start.sh` creates `.venv`, installs the p
   `docs/provenance.md`; model lineage lives in `modelfile`, training receipts in `training/receipt.py`), `serving` (exact
   response cache, coalescing of identical in-flight requests, `--audit-every`/`GET /v1/audit`, `dllm audit`, `dllm cache`;
   `docs/serving.md`; `chat_stream(fresh=True)` bypasses both and is what replays use), `merging`/`exporting`
-  (`dllm merge`, `dllm export` to safetensors/GGUF; distillation in `training/distill.py`; `docs/model-building.md`),
+  (`dllm merge`, `dllm export` to safetensors/GGUF, encoders in `encoder_export.py`; distillation in `training/distill.py`; `docs/model-building.md`),
   `reference` (an independent second implementation of `docs/specification.md` in Python/elementwise NumPy that must
   give the kernels' bits; `dllm verify --reference`) and `conformance` (`dllm conformance write|check` test vectors), `batch_jobs` (`dllm batch`, byte-identical OpenAI batch output, resume, digests; the Files/Batches API is
   `server/batches_api.py`; `docs/batches.md`), `evaluation` (`dllm eval`,

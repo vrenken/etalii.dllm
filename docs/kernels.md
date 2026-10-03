@@ -347,6 +347,12 @@ element, a fixed order, one rounding.
   summed over rows ascending; `dlogits = (softmax - onehot) * scale`. Negative targets are skipped.
 - **`embedding_backward`**: rows grouped per token id by a counting sort that keeps positions ascending, then
   summed in double.
+- **`layer_norm_backward`** (encoders): the mean and `inv_std` recomputed as in the forward kernel; with
+  `xhat_i = (x_i - mean) inv_std` and `g_i = w_i dy_i`, `dx_i = inv_std (g_i - (sum_j g_j) / dim - xhat_i
+  (sum_j g_j xhat_j) / dim)` (`j` ascending, all in double); `dw_i = sum_r dy xhat` and `db_i = sum_r dy` over rows
+  ascending.
+- **`gelu_backward`** (the exact GELU): `dy * (0.5 erfc(-x / sqrt(2)) + x exp(-x^2 / 2) / sqrt(2 pi))` with the
+  portable `erfc` and `exp`, in double.
 - **`moe_route_backward`**: per row, in row order, the probabilities `p` are recomputed exactly as `moe_route` does;
   then in double `S = sum_j p[i_j]` and `C = sum_j dw_j p[i_j]` over the chosen experts in rank order (renormalised
   routing only), `dp_e` = the optional gradient of the probabilities plus `dw_j / S - C / S^2` (renormalised) or

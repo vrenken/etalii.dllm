@@ -424,3 +424,12 @@ ENCODER_EMBEDDINGS = "10d1c4b9b1f7efe88100ad9797bd25dfaba1e8b11bdc8dca38caefa4f5
 
 # Phase 56: the float32 bits of the tiny cross-encoder's logits for tests/test_cross_encoders.py PAIRS.
 CROSS_ENCODER_SCORES = "66f0ff950da621c1128b07409d0654f1c1e7a38b4d937153dc4064f5f2a082ac"
+
+# Phase 58. Fingerprints of the model.dllm files exported after the encoder runs of
+# tests/test_encoder_training.py::test_runs_resume_bit_for_bit_and_are_golden: 4 AdamW steps of the contrastive
+# (MultipleNegativesRankingLoss) objective on the tiny BERT embedder, and of binary cross-entropy on the tiny BERT
+# cross-encoder.
+ENCODER_FINETUNE_FINGERPRINT = {
+    "embedding": "68279dcbedcea26d622225cfc5ebe20516607d4a0c0e8c721e0c4131f8472631",
+    "classifier": "d06f16ca5521e1fe3230c898ba0b02349e10bb64db1972619fc240ce6fa0c8f2",
+}

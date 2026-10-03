@@ -812,6 +812,38 @@ NB_MODULE(_kernels, module) {
         "Gradients (dx, dweight) of rms_norm(); fixed order, double accumulators.");
 
     m.def(
+        "layer_norm_backward",
+        [](FloatTensor x, FloatVector weight, FloatTensor dy, double eps) {
+            require(x.ndim() >= 1, "x must have at least one dimension");
+            const std::size_t dim = x.shape(x.ndim() - 1);
+            require(dy.size() == x.size() && dy.shape(dy.ndim() - 1) == dim, "dy must have the shape of x");
+            require(weight.shape(0) == dim, "weight length must equal the last dimension of x");
+            float* dx;
+            float* dw;
+            float* db;
+            auto dx_array = make_array(shape_of(x), &dx);
+            auto dw_array = make_array({dim}, &dw);
+            auto db_array = make_array({dim}, &db);
+            dllm::layer_norm_backward(x.data(), weight.data(), dy.data(), dx, dw, db, leading_rows(x), dim, eps);
+            return std::make_tuple(dx_array, dw_array, db_array);
+        },
+        nb::arg("x"), nb::arg("weight"), nb::arg("dy"), nb::arg("eps") = 1e-12,
+        "Gradients (dx, dweight, dbias) of layer_norm(); fixed order, double accumulators.");
+
+    m.def(
+        "gelu_backward",
+        [](FloatTensor x, FloatTensor dy) {
+            require(x.size() == dy.size(), "x and dy must have the same size");
+            float* out;
+            auto result = make_array(shape_of(x), &out);
+            for (std::size_t i = 0; i < x.size(); ++i) {
+                out[i] = dllm::gelu_backward(x.data()[i], dy.data()[i]);
+            }
+            return result;
+        },
+        nb::arg("x"), nb::arg("dy"), "dy * gelu'(x) for the exact (erf) GELU, elementwise.");
+
+    m.def(
         "silu_backward",
         [](FloatTensor x, FloatTensor dy) {
             require(x.size() == dy.size(), "x and dy must have the same size");

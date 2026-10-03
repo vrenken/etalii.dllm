@@ -64,7 +64,8 @@ skip = ["*-musllinux_*"]
 # 64-bit only (no win32 or i686): the dev dependencies used by the tests have no 32-bit wheels.
 archs = ["auto64"]
 test-extras = ["dev"]
-test-sources = ["tests"]
+# README.md and docs/getting-started.md are the tokenizer training and sample text of tests/test_unigram.py.
+test-sources = ["tests", "README.md", "docs/getting-started.md"]
 test-command = "pytest tests -q -p no:cacheprovider"
 
 [tool.cibuildwheel.macos.environment]

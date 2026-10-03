@@ -17,6 +17,15 @@ log-probabilities are computed once, from the base weights, when the run starts 
 gradient of a pair is ``w * grad CE(chosen) - w * grad CE(rejected)`` with ``w = beta * (1 - sigmoid(z)) /
 batch_size``, computed in double and applied as an elementwise float32 multiply; pairs are summed in batch order.
 
+Encoders (BERT, RoBERTa, XLM-RoBERTa; :mod:`etalii_dllm.training.encoder_backprop`) train on
+:class:`~etalii_dllm.training.encoder_data.EncoderData`. ``RunConfig.objective == "embedding"`` is
+sentence-transformers' MultipleNegativesRankingLoss: a step's ``batch_size`` anchors are scored against every
+positive of the step (and every hard negative) by ``similarity_scale`` times their cosine similarity, and the loss is
+the mean cross-entropy of picking each anchor's own positive. ``"classifier"`` trains a cross-encoder: binary
+cross-entropy with logits for a model with one output (the label a number from 0 to 1), else softmax cross-entropy
+over the labels; the mean over the step's examples. Each text's gradients are computed on their own and summed
+elementwise in batch order (anchor, positive, negative).
+
 Checkpoint file (``.dllmckpt``): the magic ``DLLMCKPT``, a uint32 format version, a uint64 header length, a canonical
 JSON header (run settings, step, loss history, base model metadata, tensor index, fingerprint) padded to 64 bytes,
 then the parameters and both AdamW moments as aligned little-endian float32. As with ``model.dllm``, nothing comes
@@ -57,9 +66,11 @@ from etalii_dllm.modelfile import (
     tensor_order,
     write_model_file,
 )
-from etalii_dllm.numerics import QUANTIZATIONS, FloatArray, cross_entropy, sigmoid
+from etalii_dllm.numerics import QUANTIZATIONS, FloatArray, cross_entropy, linear, linear_backward, sigmoid
 from etalii_dllm.training.backprop import DecoderGradients
 from etalii_dllm.training.data import TrainingData
+from etalii_dllm.training.encoder_backprop import EncoderGradients, EncoderPass, pool, pool_backward
+from etalii_dllm.training.encoder_data import ENCODER_OBJECTIVES, EncoderData
 from etalii_dllm.training.optimizer import AdamW, AdamWConfig
 from etalii_dllm.training.preference import PreferenceData, PreferencePair, log_sigmoid
 
@@ -70,6 +81,8 @@ _ALIGNMENT = 64
 _PLACEHOLDER = "0" * 64
 _DTYPE = np.dtype("<f4")
 _METADATA_KEYS = ("source", "licence", "tokenizer", "chat_template")
+_ENCODER_METADATA_KEYS = ("embedding", "classifier")  # kept only when the base has them
+_OBJECTIVES = ("lm", "dpo", *ENCODER_OBJECTIVES)
 
 
 class CheckpointError(ValueError):
@@ -86,9 +99,14 @@ class RunConfig:
     lora: LoraConfig | None = None
     """Train LoRA adapters of this shape instead of every parameter."""
     objective: str = "lm"
-    """``lm`` (next-token cross-entropy on windows) or ``dpo`` (direct preference optimization on pairs)."""
+    """``lm`` (next-token cross-entropy on windows) or ``dpo`` (direct preference optimization on pairs) for
+    decoders; ``embedding`` (contrastive, on anchor/positive pairs) or ``classifier`` (labelled texts or pairs) for
+    encoders."""
     beta: float = 0.1
     """DPO: how far the model may move from the reference (larger keeps it closer)."""
+    similarity_scale: float = 20.0
+    """Embedding runs: the factor on the cosine similarities before the softmax (the inverse temperature;
+    sentence-transformers' ``scale``)."""
     router_aux_loss: float = 0.0
     """Mixture-of-experts models: the coefficient of the router load-balancing loss added to the language-model
     loss (transformers' ``router_aux_loss_coef``; 0 adds none)."""
@@ -99,10 +117,12 @@ class RunConfig:
     def __post_init__(self) -> None:
         if self.steps < 1 or self.batch_size < 1 or self.sequence_length < 1:
             raise ValueError("steps, batch_size and sequence_length must be positive")
-        if self.objective not in ("lm", "dpo"):
-            raise ValueError(f"unknown training objective {self.objective!r} (expected 'lm' or 'dpo')")
+        if self.objective not in _OBJECTIVES:
+            raise ValueError(f"unknown training objective {self.objective!r} (expected {', '.join(_OBJECTIVES)})")
         if not (math.isfinite(self.beta) and self.beta > 0.0):
             raise ValueError("beta must be a positive number")
+        if not (math.isfinite(self.similarity_scale) and self.similarity_scale > 0.0):
+            raise ValueError("the similarity scale must be a positive number")
         if not (math.isfinite(self.router_aux_loss) and self.router_aux_loss >= 0.0):
             raise ValueError("the router load-balancing coefficient must be a number of at least 0")
         if self.router_aux_loss and self.objective != "lm":
@@ -121,7 +141,11 @@ class RunConfig:
         else:
             values["lora"] = self.lora.to_dict()
         if self.objective == "lm":  # likewise: language-model runs keep their settings and receipts
-            del values["objective"], values["beta"]
+            del values["objective"]
+        if self.objective != "dpo":
+            del values["beta"]
+        if self.objective != "embedding":
+            del values["similarity_scale"]
         if not self.router_aux_loss:
             del values["router_aux_loss"]
         if self.base_quantize is None:
@@ -153,16 +177,27 @@ class FineTuner:
         self,
         config: TransformerConfig,
         params: Mapping[str, np.ndarray],
-        data: TrainingData | PreferenceData,
+        data: TrainingData | PreferenceData | EncoderData,
         run: RunConfig,
         *,
         base_fingerprint: str,
         metadata: Mapping[str, Any],
         reference: Sequence[tuple[float, float]] | None = None,
     ) -> None:
-        if config.is_encoder:
-            raise ValueError("fine-tuning is for decoders; encoder models cannot be fine-tuned yet")
-        if isinstance(data, PreferenceData) != (run.objective == "dpo"):
+        encoder_run = run.objective in ENCODER_OBJECTIVES
+        if config.is_encoder != encoder_run:
+            if config.is_encoder:
+                raise ValueError("an encoder trains with the embedding or classifier objective, not language modelling")
+            raise ValueError(f"the {run.objective} objective trains encoders; this model is a decoder")
+        if encoder_run and not (isinstance(data, EncoderData) and data.objective == run.objective):
+            raise ValueError(f"a {run.objective} run trains on {run.objective} examples")
+        if run.objective == "classifier" and not config.classifier_labels:
+            raise ValueError("the model has no classification head; train it with the embedding objective")
+        if run.objective == "embedding" and config.classifier_labels:
+            raise ValueError("the model is a cross-encoder; train it with the classifier objective")
+        if not encoder_run and isinstance(data, EncoderData):
+            raise ValueError("encoder examples train encoders")
+        if not encoder_run and isinstance(data, PreferenceData) != (run.objective == "dpo"):
             raise ValueError("a DPO run trains on preference pairs, a language-model run on text windows")
         if data.sequence_length != run.sequence_length:
             raise ValueError("the data was windowed for a different sequence length")
@@ -179,6 +214,9 @@ class FineTuner:
         self.base_fingerprint = base_fingerprint
         self.metadata = {key: metadata.get(key) for key in _METADATA_KEYS}
         self.metadata["lineage"] = lineage(metadata)
+        for key in _ENCODER_METADATA_KEYS:
+            if metadata.get(key) is not None:
+                self.metadata[key] = metadata[key]
         self.lora = run.lora
         self.base: Mapping[str, np.ndarray] | None = None
         if self.lora is None:
@@ -196,6 +234,9 @@ class FineTuner:
         """Where the training data came from when it is a teacher's answers (:mod:`etalii_dllm.training.distill`)."""
         self.losses: list[float] = []
         self._gradients = DecoderGradients(config)
+        self._encoder = EncoderGradients(config) if encoder_run else None
+        self.pooling = str((metadata.get("embedding") or {}).get("pooling", "mean"))
+        """Embedding runs: how sentence vectors are pooled (the model's own pooling)."""
         self.reference: list[tuple[float, float]] | None = None
         """DPO: the base model's log-probabilities of every pair's chosen and rejected answer."""
         if isinstance(data, PreferenceData):
@@ -210,7 +251,9 @@ class FineTuner:
             self.reference = [(float(chosen), float(rejected)) for chosen, rejected in reference]
 
     @classmethod
-    def from_model_file(cls, model: ModelFile, data: TrainingData | PreferenceData, run: RunConfig) -> FineTuner:
+    def from_model_file(
+        cls, model: ModelFile, data: TrainingData | PreferenceData | EncoderData, run: RunConfig
+    ) -> FineTuner:
         return cls(
             model.config,
             model.tensors,
@@ -226,7 +269,11 @@ class FineTuner:
         """Runs the next step and returns its loss (before the update), learning rate and gradient norm."""
         if self.step >= self.run.steps:
             raise RuntimeError("the run has already completed all of its steps")
-        if isinstance(self.data, PreferenceData):
+        if isinstance(self.data, EncoderData) and self.data.objective == "embedding":
+            loss, gradients = self._embedding_gradients(self.data)
+        elif isinstance(self.data, EncoderData):
+            loss, gradients = self._classifier_gradients(self.data)
+        elif isinstance(self.data, PreferenceData):
             loss, gradients = self._preference_gradients(self.data)
         else:
             loss, gradients = self._language_model_gradients(self.data)
@@ -283,6 +330,62 @@ class FineTuner:
                     else:
                         gradients[name] = gradient * sign
         return loss_total / self.run.batch_size, gradients
+
+    def _embedding_gradients(self, data: EncoderData) -> tuple[float, dict[str, FloatArray]]:
+        """MultipleNegativesRankingLoss: anchors ``a_i`` against the candidates ``c_j`` (every positive of the step
+        in batch order, then every hard negative): ``scores = scale * a_hat @ c_hat^T`` (the ``linear`` kernel of the
+        normalised sentence vectors), the mean cross-entropy of each anchor's own positive."""
+        assert self._encoder is not None
+        weights = self.weights()
+        scale = np.float32(self.run.similarity_scale)
+        examples = [data.examples[index] for index in data.batch(self.step, self.run.batch_size, self.run.seed)]
+        count = len(examples)
+        # the sentence vectors in candidate order: anchors, positives, negatives (each in batch order)
+        order = [(i, 0) for i in range(count)] + [(i, 1) for i in range(count)]
+        order += [(i, 2) for i, example in enumerate(examples) if len(example.texts) > 2]
+        passes: dict[tuple[int, int], tuple[EncoderPass, FloatArray, np.float32]] = {}
+        for i, which in order:
+            result = self._encoder.encode(weights, examples[i].texts[which], examples[i].types[which])
+            normalized, _, norm = pool(result.states, self.pooling)
+            passes[(i, which)] = (result, normalized, norm)
+        anchors = np.stack([passes[key][1] for key in order[:count]])
+        candidates = np.stack([passes[key][1] for key in order[count:]])
+        scores = linear(anchors, candidates).numpy() * scale
+        loss, dscores = cross_entropy(scores, np.arange(count, dtype=np.int64), scale=1.0 / count)
+        danchors, dcandidates, _ = linear_backward(anchors, candidates, dscores.numpy() * scale)
+        dvectors = dict(zip(order, [*danchors.numpy(), *dcandidates.numpy()], strict=True))
+        gradients: dict[str, FloatArray] = {}
+        for i in range(count):  # each example's texts in order: anchor, positive, negative
+            for which in range(len(examples[i].texts)):
+                result, normalized, norm = passes[(i, which)]
+                dstates = pool_backward(normalized, norm, dvectors[(i, which)], len(result.tokens), self.pooling)
+                _accumulate(gradients, self._encoder.gradients(weights, result, dstates))
+        return loss / count, gradients
+
+    def _classifier_gradients(self, data: EncoderData) -> tuple[float, dict[str, FloatArray]]:
+        """The mean over the step's examples of binary cross-entropy with logits (one output: ``-y log s(z) -
+        (1 - y) log s(-z)`` in double) or softmax cross-entropy over the labels."""
+        assert self._encoder is not None
+        weights = self.weights()
+        indices = data.batch(self.step, self.run.batch_size, self.run.seed)
+        count = len(indices)
+        loss_total = 0.0
+        gradients: dict[str, FloatArray] = {}
+        for index in indices:
+            example = data.examples[index]
+            assert example.label is not None
+            result = self._encoder.classify(weights, example.texts[0], example.types[0])
+            logits = result.logits
+            if len(logits) == 1:
+                z, y = float(logits[0]), example.label
+                loss_total += -(y * log_sigmoid(z) + (1.0 - y) * log_sigmoid(-z))
+                dlogits = np.array([(sigmoid(z) - y) / count], dtype=np.float32)
+            else:
+                loss, dlogits_t = cross_entropy(logits.reshape(1, -1), [int(example.label)], scale=1.0 / count)
+                loss_total += loss
+                dlogits = dlogits_t.numpy().reshape(-1)
+            _accumulate(gradients, self._encoder.gradients(weights, result, dlogits=dlogits))
+        return loss_total / count, gradients
 
     def log_probability(self, weights: Mapping[str, np.ndarray], pair: PreferencePair, which: str) -> float:
         """The log-probability (double) that ``weights`` give the ``chosen`` or ``rejected`` answer of ``pair``."""
@@ -408,7 +511,7 @@ class FineTuner:
 
     @classmethod
     def load_checkpoint(
-        cls, path: str | Path, data: TrainingData | PreferenceData, base: ModelFile | None = None
+        cls, path: str | Path, data: TrainingData | PreferenceData | EncoderData, base: ModelFile | None = None
     ) -> FineTuner:
         """Restores a run from a checkpoint; ``data`` must be the data the run was started with. A LoRA checkpoint
         holds only the adapters, so it also needs ``base``, the model the run started from."""
@@ -463,3 +566,12 @@ class FineTuner:
         tuner.step = int(header["step"])
         tuner.losses = [float(loss) for loss in header["losses"]]
         return tuner
+
+
+def _accumulate(total: dict[str, FloatArray], gradients: Mapping[str, FloatArray]) -> None:
+    """Adds ``gradients`` into ``total`` elementwise (float32), name by name."""
+    for name, gradient in gradients.items():
+        if name in total:
+            total[name] += gradient
+        else:
+            total[name] = gradient.copy()

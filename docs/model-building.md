@@ -80,6 +80,32 @@ same weights fingerprint. Two values can come back changed, as with any GGUF:
 - `rms_norm_eps` is stored as float32;
 - only two end-of-sequence ids are kept (`eos` and `eot`).
 
+### Encoders
+
+BERT, RoBERTa and XLM-RoBERTa embedders and cross-encoders export too (Phase 58), for example after
+[fine-tuning one](training.md#encoders):
+
+```bash
+dllm export all-minilm-tuned.dllm --format safetensors -o all-minilm-tuned/   # transformers + sentence-transformers
+dllm export ms-marco-tuned.dllm --format gguf -o ms-marco-tuned.gguf          # llama.cpp's bert layout
+```
+
+- **Safetensors** writes `BertModel`, `RobertaModel` or `XLMRobertaModel` (or their `...ForSequenceClassification`
+  with the labels and the CrossEncoder activation) under `transformers`' own tensor names, and for an embedder the
+  sentence-transformers modules: `modules.json`, the pooling module, `Normalize` when the model normalises, the
+  prompts and `max_seq_length`. `SentenceTransformer(dir)`, `CrossEncoder(dir)` and `AutoModel.from_pretrained(dir)`
+  load it, and importing it again gives the same weights, settings and fingerprint.
+- **GGUF** writes llama.cpp's `bert` layout (`token_embd`, `token_types`, `position_embd`, `token_embd_norm`,
+  `blk.N.attn_q` ... `layer_output_norm`), the pooling type (mean, CLS, last token, or rank for a cross-encoder) and
+  the WordPiece vocabulary in llama.cpp's phantom-space form. A cross-encoder's pooler and classifier become `cls`
+  and `cls.output`, so llama.cpp computes the same head `cls.output(tanh(cls(h[0])))` (its own converter drops a
+  BERT pooler). The file also carries `tokenizer.huggingface.json` and `dllm.*` keys with the exact tokenizer, the
+  float64 LayerNorm epsilon and the pooling or classifier settings, which llama.cpp ignores: importing the file
+  gives back the same model exactly. GGUF files of BERT models written by llama.cpp's converter import too; their
+  tokenizer is the WordPiece vocabulary with BERT's lower-casing normaliser, as llama.cpp tokenizes. RoBERTa and
+  XLM-RoBERTa cannot be written to GGUF exactly (llama.cpp's layout cuts the position rows before the padding
+  token), nor can BERT models with the tanh GELU; export those to safetensors.
+
 ### SentencePiece models through GGUF
 
 GGUF files of TinyLlama, Llama 2, Mistral or Phi-3 usually carry a SentencePiece vocabulary
