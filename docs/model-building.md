@@ -68,13 +68,37 @@ described exactly is refused rather than exported approximately. Importing the d
 weights fingerprint and the same model description.
 
 **GGUF** writes one GGUF v3 file the way llama.cpp's converter does: Llama's Q/K rows are permuted, and the vocabulary
-is padded to the embedding size. Llama, Qwen2 and Qwen3 models with byte-level BPE tokenizers are supported. The
-`tokenizer.ggml.pre` value is the one whose description matches the original tokenizer, and the export also checks
-that the GGUF tokenizer encodes a set of probe texts exactly as the original does. Importing the file again gives the
+is padded to the embedding size. Llama, Qwen2 and Qwen3 models with byte-level BPE or SentencePiece-style tokenizers
+are supported. For byte-level BPE, the `tokenizer.ggml.pre` value is the one whose description matches the original
+tokenizer. A SentencePiece-style tokenizer (TinyLlama, Llama 2) becomes a `llama` tokenizer: its pieces, scores from
+its merge order (the first merge that makes a piece ranks it), token types and the space prefix
+([SentencePiece models through GGUF](#sentencepiece-models-through-gguf)). Either way the export checks that the GGUF
+tokenizer encodes a set of probe texts (and text around a special token) exactly as the original does, and refuses
+the export otherwise. Importing the file again gives the
 same weights fingerprint. Two values can come back changed, as with any GGUF:
 
 - `rms_norm_eps` is stored as float32;
 - only two end-of-sequence ids are kept (`eos` and `eot`).
+
+### SentencePiece models through GGUF
+
+GGUF files of TinyLlama, Llama 2, Mistral or Phi-3 usually carry a SentencePiece vocabulary
+(`tokenizer.ggml.model = llama`: pieces, scores and token types) rather than merges. `dllm import` reads it and
+tokenizes exactly as SentencePiece (and llama.cpp) do:
+
+- every text gets a `▁` in front (also after a special token) when `tokenizer.ggml.add_space_prefix` is true (the
+  default), and every space becomes `▁`;
+- adjacent pieces merge into the normal piece with the highest score first; two candidates with the same score merge
+  left to right, as SentencePiece breaks ties by position;
+- characters no piece covers fall back to the `<0xAB>` byte pieces (or `<unk>` without them), and decoding drops the
+  prefix's leading space.
+
+Tests check this against the `sentencepiece` library itself, token for token, on models trained with it. A
+safetensors export of such an import writes the merges in that order as a `tokenizer.json`; the Hugging Face
+tokenizers library resolves two merges with exactly equal scores by list order instead of position, the one case
+where the two can differ. A Hugging Face tokenizer whose `Metaspace` adds the space prefix only to the first text
+(`prepend_scheme: first`, newer Mistral files) cannot be written as a GGUF `llama` tokenizer, which adds it after
+special tokens too, so that export is refused.
 
 ## Distilling
 

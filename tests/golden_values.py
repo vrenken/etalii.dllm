@@ -361,3 +361,7 @@ QLORA_FINETUNE_FINGERPRINT = {
     "qwen3": "e1f6052b5280a50649557dba9aa7f180ef5dfda324771bb7860cc7377d7469f0",
     "qwen3_moe": "1da5d76291b692c57f4e9269c5bbaac1b86dfacd5657cf02a7decb2dcebf9107",
 }
+
+SENTENCEPIECE_GGUF_TOKENS = "ae5ae2d61ca9f2412dd492f23a87cd1d368e1cffb66ea76dcc5cbb336282bc06"
+"""Phase 47: SHA-256 of the token ids test_bpe.SAMPLES encode to with a SentencePiece tokenizer read from GGUF
+(test_sentencepiece_gguf.py)."""

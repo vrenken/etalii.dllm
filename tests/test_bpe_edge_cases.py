@@ -387,7 +387,7 @@ def test_gguf_without_token_types_or_merges():
     assert BpeTokenizer(spec).encode("ab") == [0, 1]
 
 
-@pytest.mark.parametrize("model", ["llama", "bert", None])
+@pytest.mark.parametrize("model", ["bert", "t5", None])
 def test_gguf_non_bpe_model_is_rejected(model):
     with pytest.raises(TokenizerError, match=f"GGUF tokenizer model {model!r} is not supported"):
         spec_from_gguf({"tokenizer.ggml.model": model, "tokenizer.ggml.tokens": ["a"]})
