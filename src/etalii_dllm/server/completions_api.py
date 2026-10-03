@@ -80,6 +80,13 @@ class CompletionRequest(BaseModel):
     dry_allowed_length: int | None = None
     dry_penalty_last_n: int | None = None
     dry_sequence_breakers: list[str] | None = None
+    mirostat: int | None = None
+    """Extension (as in llama.cpp and Ollama): Mirostat 1 or 2 (docs/api.md#adaptive-samplers)."""
+    mirostat_tau: float | None = None
+    mirostat_eta: float | None = None
+    dynatemp_range: float | None = None
+    """Extension (as in llama.cpp): dynamic temperature between temperature - range and temperature + range."""
+    dynatemp_exponent: float | None = None
     guided_regex: str | None = None
     grammar: str | None = None
     """Extension (as in llama.cpp): a GBNF grammar the completion must follow (docs/api.md#grammars)."""

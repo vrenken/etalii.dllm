@@ -183,6 +183,10 @@ def cases() -> list[tuple[str, str, dict[str, Any], Arrays]]:
         "sample-modern": {"temperature": 1.0, "top_k": 0, "top_p": 1.0, "seed": 21, "top_n_sigma": 1.5,
                           "typical_p": 0.8, "xtc_probability": 0.6, "xtc_threshold": 0.05, "dry_multiplier": 0.9,
                           "dry_allowed_length": 1, "dry_breaker_ids": [9, 100]},
+        "sample-mirostat-1": {"temperature": 1.0, "top_k": 0, "top_p": 1.0, "seed": 31, "mirostat": 1,
+                              "mirostat_tau": 4.0, "mirostat_eta": 0.2},
+        "sample-mirostat-2": {"temperature": 0.8, "top_k": 0, "top_p": 1.0, "seed": 32, "mirostat": 2,
+                              "mirostat_tau": 2.5, "dynatemp_range": 0.6, "dynatemp_exponent": 1.5},
         "sample-modern-greedy": {"temperature": 0.0, "top_k": 0, "top_p": 1.0, "seed": 0, "dry_multiplier": 6.0,
                                  "dry_base": 2.0, "dry_penalty_last_n": 12, "dry_breaker_ids": [9]},
     }.items():  # fmt: skip

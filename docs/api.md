@@ -304,6 +304,7 @@ reference implementation repeats bit for bit.
 | [Length and stop controls](#length-and-stop-controls): a minimum length, writing past the end-of-sequence token, extra stop token ids, the stop string kept | `min_tokens`, `ignore_eos`, `stop_token_ids`, `include_stop_str_in_output` (extensions, as in vLLM; chat completions, completions and Responses) | | `--min-tokens`, `--ignore-eos`, `--stop-token-id`, `--stop`, `--include-stop` |
 | [Token healing](#token-healing) of a prompt or prefill that ends inside a word | `token_healing: true` (extension; also on Responses, Anthropic messages, completions and Ollama) | | `--token-healing` |
 | [Modern samplers](#modern-samplers): DRY, XTC, locally typical, top-n-sigma | `dry_multiplier`, `dry_base`, `dry_allowed_length`, `dry_penalty_last_n`, `dry_sequence_breakers`, `xtc_probability`, `xtc_threshold`, `typical_p`, `top_n_sigma` (extensions, as in llama.cpp; chat completions and completions) | the same names | `--dry-multiplier`, `--dry-base`, `--dry-allowed-length`, `--dry-penalty-last-n`, `--dry-sequence-breaker`, `--xtc-probability`, `--xtc-threshold`, `--typical-p`, `--top-n-sigma` |
+| [Adaptive samplers](#adaptive-samplers): Mirostat 1 and 2, dynamic temperature | `mirostat`, `mirostat_tau`, `mirostat_eta`, `dynatemp_range`, `dynatemp_exponent` (extensions, as in llama.cpp; chat completions and completions) | the same names | `--mirostat`, `--mirostat-tau`, `--mirostat-eta`, `--dynatemp-range`, `--dynatemp-exponent` |
 | A keyed [watermark](watermarks.md) | `watermark: {key, gamma, delta}` (extension; also on Anthropic messages) | `watermark_key`, `watermark_gamma`, `watermark_delta` | `--watermark-key`, `--watermark-gamma`, `--watermark-delta` |
 
 - The defaults change nothing: a repetition penalty of 1 (Ollama's own default is 1.1; here it stays off unless asked
@@ -352,6 +353,26 @@ receipts and cache keys only when set, so earlier receipts keep their bytes.
 ```bash
 dllm generate --prompt "Once upon a time" --temperature 1.2 --seed 4 --top-n-sigma 1.5 --xtc-probability 0.5 \
     --dry-multiplier 0.8
+```
+
+## Adaptive samplers
+
+Samplers that adapt to the distribution token by token (Phase 50), with llama.cpp's and Ollama's names and defaults,
+exact and repeated bit for bit by the reference implementation
+([specification](specification.md#4-random-numbers-and-sampling)):
+
+- **Mirostat** (`mirostat` 1 or 2): keeps the answer's surprise near `mirostat_tau` bits (default 5) by cutting the
+  candidates and moving its limit `mu` after every token by `mirostat_eta` (default 0.1) times the error. Mirostat 2
+  cuts candidates whose surprise exceeds `mu`; Mirostat 1 fits a Zipf exponent to the top 100 candidates and keeps a
+  matching number. Mirostat replaces top-k, top-n-sigma, typical-p, top-p, min-p and XTC, as in llama.cpp; logit
+  bias, penalties and DRY still apply.
+- **Dynamic temperature** (`dynatemp_range` > 0): the temperature moves between `temperature - dynatemp_range` and
+  `temperature + dynatemp_range` with the distribution's normalised entropy raised to `dynatemp_exponent` (default
+  1): confident steps run cool, uncertain ones warm.
+
+```bash
+dllm generate --prompt "Once upon a time" --temperature 0.9 --seed 4 --mirostat 2 --mirostat-tau 3 \
+    --dynatemp-range 0.5
 ```
 
 ## Completions API

@@ -880,6 +880,17 @@ in the OpenAI, completions and Ollama APIs, and give the same bits on every run 
 repeating earlier runs of text, XTC skips the most obvious word now and then, and top-n-sigma keeps high
 temperatures coherent. Details: [modern samplers](api.md#modern-samplers).
 
+## 46. Adaptive samplers
+
+```bash
+dllm generate --prompt "Once upon a time" --temperature 0.9 --seed 4 \
+    --mirostat 2 --mirostat-tau 3 --dynatemp-range 0.5
+```
+
+Mirostat keeps the text's surprise near a target you choose (`--mirostat-tau`, in bits), and a dynamic temperature
+runs cooler where the model is sure and warmer where it is not. Both use llama.cpp's and Ollama's names in every API
+and give the same bits on every run and machine. Details: [adaptive samplers](api.md#adaptive-samplers).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,

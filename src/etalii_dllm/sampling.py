@@ -9,12 +9,16 @@ from dataclasses import dataclass, replace
 import numpy as np
 
 from etalii_dllm import watermark
-from etalii_dllm.numerics import DeterministicRandom, FloatArray, argmax, log, softmax
+from etalii_dllm.numerics import DeterministicRandom, FloatArray, argmax, exp, log, softmax
 
 DRY_BREAKERS = ("\n", ":", '"', "*")
 """llama.cpp's default DRY sequence breakers."""
 DRY_MAX_MATCH = 256
 """The longest repeat DRY measures (longer repeats count as this long)."""
+LN2 = 0.6931471805599453
+"""The double nearest ln 2: surprises are ``-log(p) / LN2`` bits."""
+MIROSTAT_M = 100
+"""How many of the most likely candidates Mirostat 1.0 fits its Zipf exponent to."""
 
 
 @dataclass(frozen=True)
@@ -80,6 +84,17 @@ class SamplingOptions:
     """DRY: how many of the latest tokens it looks at; -1 means all of them, 0 none."""
     dry_sequence_breakers: tuple[str, ...] = DRY_BREAKERS
     """DRY: a token whose text contains one of these ends a repeat."""
+    mirostat: int = 0
+    """Mirostat version: 1 or 2 keep the surprise near ``mirostat_tau`` (and replace top-k to XTC); 0 disables."""
+    mirostat_tau: float = 5.0
+    """Mirostat's target surprise, in bits."""
+    mirostat_eta: float = 0.1
+    """Mirostat's learning rate."""
+    dynatemp_range: float = 0.0
+    """Dynamic temperature: the temperature moves between ``temperature - range`` and ``temperature + range`` with
+    the distribution's normalised entropy; 0 disables."""
+    dynatemp_exponent: float = 1.0
+    """Dynamic temperature: the normalised entropy is raised to this power."""
 
     def __post_init__(self) -> None:
         if self.temperature < 0:
@@ -131,6 +146,12 @@ class SamplingOptions:
             raise ValueError("dry_penalty_last_n must be -1 or more")
         if not all(isinstance(b, str) and b for b in self.dry_sequence_breakers):
             raise ValueError("dry_sequence_breakers must be non-empty strings")
+        if self.mirostat not in (0, 1, 2):
+            raise ValueError("mirostat must be 0, 1 or 2")
+        for name in ("mirostat_tau", "mirostat_eta", "dynatemp_range", "dynatemp_exponent"):
+            value = getattr(self, name)
+            if not (math.isfinite(value) and value >= 0):
+                raise ValueError(f"{name} must be non-negative")
 
     @staticmethod
     def bias(values: Mapping[int, float] | Mapping[str, float] | None) -> tuple[tuple[int, float], ...]:
@@ -215,6 +236,11 @@ _DEFAULTS = {
     "dry_allowed_length": 2,
     "dry_penalty_last_n": -1,
     "dry_sequence_breakers": DRY_BREAKERS,
+    "mirostat": 0,
+    "mirostat_tau": 5.0,
+    "mirostat_eta": 0.1,
+    "dynatemp_range": 0.0,
+    "dynatemp_exponent": 1.0,
 }
 
 SAMPLER_FIELDS = (
@@ -227,12 +253,17 @@ SAMPLER_FIELDS = (
     "dry_allowed_length",
     "dry_penalty_last_n",
     "dry_sequence_breakers",
+    "mirostat",
+    "mirostat_tau",
+    "mirostat_eta",
+    "dynatemp_range",
+    "dynatemp_exponent",
 )
-"""The Phase 49 sampler controls, named as in llama.cpp's server and every API."""
+"""The Phase 49 and 50 sampler controls, named as in llama.cpp's server and every API."""
 
 
 def sampler_fields(source: object) -> dict[str, object]:
-    """The Phase 49 controls an API request or option object sets (attributes that are not ``None``)."""
+    """The Phase 49 and 50 controls an API request or option object sets (attributes that are not ``None``)."""
     values: dict[str, object] = {}
     for name in SAMPLER_FIELDS:
         value = getattr(source, name, None)
@@ -311,6 +342,8 @@ class Sampler:
         self._previous = prompt[-1] if prompt else -1
         self._watermark = None if options.watermark_key is None else watermark.key_hash(options.watermark_key)
         self._breakers = frozenset(breakers)
+        self.mu = 2.0 * options.mirostat_tau
+        """Mirostat's running surprise limit."""
 
     def accept(self, token: int) -> None:
         """Records a generated token for the penalties."""
@@ -375,14 +408,51 @@ class Sampler:
             return int(ids[self._sample(subset)])
         return self._sample(logits)
 
+    def _mirostat(self, order: list[int], probabilities: list[float]) -> int:
+        """Mirostat: keep the first ``k`` candidates (1.0: :func:`mirostat_k`; 2.0: up to the first after the first
+        whose surprise ``-log(p) / LN2`` exceeds ``mu``), draw among them, then ``mu -= eta * (surprise - tau)`` with
+        the drawn token's surprise under the kept, renormalised probabilities."""
+        options = self._options
+        if options.mirostat == 1:
+            keep = mirostat_k(probabilities, order, self.mu)
+        else:
+            keep = len(order)
+            for i in range(1, len(order)):
+                p = probabilities[order[i]]
+                if p <= 0 or -log(p) / LN2 > self.mu:
+                    keep = i
+                    break
+        total = 0.0
+        for i in range(keep):
+            total += probabilities[order[i]]
+        target = self._random.next_double() * total
+        running = 0.0
+        chosen = keep - 1
+        for i in range(keep):
+            running += probabilities[order[i]]
+            if target < running:
+                chosen = i
+                break
+        token = order[chosen]
+        surprise = -log(probabilities[token] / total) / LN2
+        self.mu = self.mu - options.mirostat_eta * (surprise - options.mirostat_tau)
+        return token
+
     def _sample(self, logits: FloatArray) -> int:
         options = self._options
         if options.temperature == 0:
             return argmax(logits)
 
-        scaled = (np.asarray(logits, dtype=np.float32) / np.float32(options.temperature)).astype(np.float32)
+        temperature = options.temperature
+        if options.dynatemp_range > 0:
+            temperature = dynamic_temperature(logits, temperature, options.dynatemp_range, options.dynatemp_exponent)
+            if np.float32(temperature) == 0:
+                return argmax(logits)
+        scaled = (np.asarray(logits, dtype=np.float32) / np.float32(temperature)).astype(np.float32)
         probabilities = softmax(scaled).tolist()
         order = sorted(range(len(probabilities)), key=lambda i: (-probabilities[i], i))
+        if options.mirostat:
+            return self._mirostat(order, probabilities)
 
         keep = len(order)
         if options.top_k > 0:
@@ -428,6 +498,60 @@ class Sampler:
             if target < running:
                 return kept[i]
         return kept[keep - 1]
+
+
+def power(a: float, b: float) -> float:
+    """``a^b`` for ``a >= 0`` from the portable ``exp`` and ``log``: 1 when ``b`` is 0, 0 when ``a`` is 0, else
+    ``exp(b * log(a))``."""
+    if b == 0:
+        return 1.0
+    if a == 0:
+        return 0.0
+    return exp(b * log(a))
+
+
+def dynamic_temperature(logits: FloatArray, temperature: float, spread: float, exponent: float) -> float:
+    """Entropy-based dynamic temperature: with ``p = softmax(logits)``, ``H = -sum p log p`` (token order, double,
+    ``p > 0`` only) and ``n`` tokens, the temperature is ``low + (high - low) * (H / log(n))^exponent`` for ``low =
+    max(0, temperature - spread)`` and ``high = temperature + spread`` (``temperature`` itself for one token)."""
+    probabilities = softmax(np.asarray(logits, dtype=np.float32)).tolist()
+    if len(probabilities) < 2:
+        return temperature
+    entropy = 0.0
+    for p in probabilities:
+        if p > 0:
+            entropy -= p * log(p)
+    low, high = max(0.0, temperature - spread), temperature + spread
+    return low + (high - low) * power(entropy / log(float(len(probabilities))), exponent)
+
+
+def mirostat_k(probabilities: Sequence[float], order: Sequence[int], mu: float) -> int:
+    """Mirostat 1.0's candidate count: the Zipf exponent ``s`` fitted to the first :data:`MIROSTAT_M` candidates
+    (``t = log((i + 2) / (i + 1))``, ``b = log(p_i / p_i+1)``, ``s = sum(t b) / sum(t t)`` over the pairs with both
+    probabilities above 0), ``e = s - 1`` and ``k = ((e 2^mu) / (1 - n^-e))^(1 / s)`` truncated, between 1 and ``n``;
+    ``n`` when the fit or the power is undefined."""
+    n = len(order)
+    products = squares = 0.0
+    for i in range(min(MIROSTAT_M, n) - 1):
+        first, second = probabilities[order[i]], probabilities[order[i + 1]]
+        if first > 0 and second > 0:
+            t = log((i + 2) / (i + 1))
+            products += t * log(first / second)
+            squares += t * t
+    if squares == 0:
+        return n
+    s = products / squares
+    e = s - 1
+    denominator = 1 - power(float(n), -e) if e != 0 else 0.0
+    if s <= 0 or denominator == 0:
+        return n
+    ratio = e * power(2.0, mu) / denominator
+    if not (ratio > 0 and math.isfinite(ratio)):
+        return n
+    k = power(ratio, 1 / s)
+    if not math.isfinite(k) or k >= n:
+        return n
+    return max(1, int(k))
 
 
 def sigma_count(logits: Sequence[float], n: float) -> int:

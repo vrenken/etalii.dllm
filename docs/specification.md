@@ -216,8 +216,15 @@ Log-probabilities reported with an answer come from the unadjusted logits.
 
 - With temperature 0, the token is `argmax(logits)`.
 - Otherwise the sampler, seeded with `seed mod 2^64`, makes one draw per token:
-  1. `z = f32(logits / temperature)` (a float32 division) and `p = softmax(z)`.
-  2. Order the candidates by probability descending, then id ascending.
+  1. `z = f32(logits / f32(T))` (a float32 division) and `p = softmax(z)`. `T` is the temperature, or with
+     `dynatemp_range > 0` the dynamic temperature: with `q = softmax(logits)` (the adjusted logits), `H` starting at
+     0 and `H = H - q * log(q)` for every `q > 0` in token order (double, the portable `log`), and `n` the number of
+     tokens, `T = low + (high - low) * pow(H / log(n), dynatemp_exponent)` for `low = max(0, temperature -
+     dynatemp_range)` and `high = temperature + dynatemp_range` (`T = temperature` when `n < 2`). Here and below
+     `pow(a, b)` is 1 when `b` is 0, 0 when `a` is 0, else `exp(b * log(a))` with the portable functions. When
+     `f32(T)` is 0 the token is `argmax(logits)` and nothing is drawn.
+  2. Order the candidates by probability descending, then id ascending. With `mirostat` 1 or 2 the steps below
+     are replaced by Mirostat (next paragraph).
   3. Keep the first `top_k` candidates (all when `top_k` is 0).
   4. With `top_n_sigma > 0`: over the finite adjusted logits `x` (before the temperature), in token order and in
      double, `mean` is their sum divided by their count, `var` the sum of `(x - mean) * (x - mean)` divided by the
@@ -237,6 +244,18 @@ Log-probabilities reported with an answer come from the unadjusted logits.
      `total` is summed again over the rest.
   9. With `u = next_double() * total`, the token is the first candidate whose running sum exceeds `u`, or the last
      kept candidate if none does.
+- **Mirostat.** The sampler keeps `mu`, first `2 * mirostat_tau`. A surprise is `-log(p) / 0.6931471805599453`
+  (bits). Over the ordered candidates (`n` of them):
+  - Mirostat 2: keep the candidates before the first one (after the first) whose `p` is 0 or whose surprise
+    exceeds `mu`.
+  - Mirostat 1: over `i = 0 … min(100, n) - 2` with `p[i] > 0` and `p[i+1] > 0`, in order and in double,
+    `t = log((i + 2) / (i + 1))`, `sum_tb += t * log(p[i] / p[i+1])` and `sum_tt += t * t`. If `sum_tt` is 0, keep
+    all. Else `s = sum_tb / sum_tt`, `e = s - 1`, `d = 1 - pow(n, -e)` (0 when `e` is 0); if `s <= 0` or `d` is 0,
+    keep all; else `r = e * pow(2, mu) / d`; if `r` is not finite and above 0, keep all; else `k = pow(r, 1 / s)`,
+    and keep all when `k` is not finite or at least `n`, else the first `max(1, trunc(k))`.
+  - `total` is the kept `p` summed in order; with `u = next_double() * total` the token is the first kept candidate
+    whose running sum exceeds `u`, else the last kept one. Then `mu = mu - mirostat_eta * (-log(p_token / total) /
+    0.6931471805599453 - mirostat_tau)`.
 - Constrained decoding restricts the adjusted logits to the allowed ids (ascending) before these steps.
 - **Several choices.** Choice `i` of a request for `n` is the request with the seed `(seed + i) mod 2^64`; nothing
   else differs, so each choice is exactly the answer a single request with that seed gets.
@@ -437,8 +456,8 @@ Not covered here, but just as fixed:
 
 **On one machine.** `dllm --model m.dllm verify --reference` compares this machine's compiled kernels (whatever
 SIMD path, thread count or GPU is in use) with the reference implementation. It checks the prompt's logits and a
-greedy, a sampled, a controlled (every logit adjustment and `min_p` at once) and a modern 16-token answer (DRY,
-top-n-sigma, typical-p and XTC at once) and a greedy answer in a window just
+greedy, a sampled, a controlled (every logit adjustment and `min_p` at once), a modern (DRY, top-n-sigma,
+typical-p and XTC at once) and an adaptive 16-token answer (Mirostat 2 with a dynamic temperature) and a greedy answer in a window just
 longer than the prompt, which rolls it ([the context window](#the-context-window)), and a greedy answer that starts in a
 thinking block with a budget of 2 tokens ([reasoning](#reasoning)), and the prompt's scores ([prompt scoring](#prompt-scoring)), and a sampled answer with classifier-free guidance ([guided decoding](#guided-decoding)), and the three ranked answers of a beam search of width 3 with their score bits ([beam search](#beam-search)), and prints `equal` for each part, or where the two first differ. CI runs it
 for SmolLM2-135M on every release platform and SIMD path, in float32 and Q8_0.
@@ -452,7 +471,8 @@ for SmolLM2-135M on every release platform and SIMD path, in float32 and Q8_0.
   `{file, dtype, shape, sha256}`.
 - **Kernels covered.** The transcendentals, `linear` (float32 and quantised), `quantize`, `matmul`, `rms_norm`, the
   activations, `softmax`, `rope_inv_freq`, `rope`, `attention`, `random` (the `next_u64`, `next_double` and
-  `next_gaussian` streams), `sample`, `sample_controls` (logit adjustments, the watermark and DRY included, `min_p`, top-n-sigma, typical-p and XTC
+  `next_gaussian` streams), `sample`, `sample_controls` (logit adjustments, the watermark and DRY included, `min_p`, top-n-sigma, typical-p, XTC, Mirostat
+  and dynamic temperature
   over a sequence of steps that starts from a `prompt` input; DRY's breaker tokens are given as `dry_breaker_ids`), `guided`, `contrasted` and `ensembled` (the [guided decoding](#guided-decoding) combinations), and `decoder`.
 - **The decoder cases.** Each holds a config, its tensors (inputs named `tensor.<name>`), and the logits after each
   token fed one at a time.
