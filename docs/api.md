@@ -579,27 +579,39 @@ every concurrency; `dllm batch` does the same from the command line. See [batch 
 ## Tools
 
 OpenAI `tools`/`tool_choice` and Anthropic `tools`/`tool_choice` map onto one mechanism. Models call tools in the
-Hermes format used by Qwen2.5 and most tool-trained small models:
+format they were trained on, read from the model's own chat template:
 
-```text
-<tool_call>
-{"name": "get_weather", "arguments": {"city": "Paris"}}
-</tool_call>
-```
+| Format | Models | A call looks like |
+|---|---|---|
+| `hermes` | Qwen2.5, Qwen3, Hermes and most tool-trained small models | `<tool_call>{"name": "get_weather", "arguments": {...}}</tool_call>` |
+| `llama3` | Llama 3.1, 3.2 and 3.3 | the whole reply is `{"name": "get_weather", "parameters": {...}}` |
+| `mistral` | Mistral, Mixtral, Ministral | `[TOOL_CALLS][{"name": "get_weather", "arguments": {...}}]` |
+| `granite` | IBM Granite 3 | `<|tool_call|>[{"name": "get_weather", "arguments": {...}}]` |
 
+- The format is detected from the template in a fixed order: `[TOOL_CALLS]` means Mistral, `<|tool_call|>` Granite,
+  `<tool_call>` Hermes, and a template with an `ipython` role and a `"parameters"` key Llama 3; anything else is
+  Hermes. `DllmEngine.tool_format` shows the result and may be set (`"hermes"`, `"llama3"`, `"mistral"`,
+  `"granite"`) for a template the detection gets wrong.
 - If the model's chat template supports tools, it presents them, exactly as `transformers` would. Otherwise the
   engine adds the Hermes tool instructions to the system message, shows earlier calls as `<tool_call>` blocks and
-  tool results as `<tool_response>` user turns.
-- `auto`: the model may answer in text. Once it writes `<tool_call>`, the call is constrained by a grammar built
-  from the tool definitions (a known name and arguments that fit its `parameters`/`input_schema`, leniently: keywords
-  the grammar cannot check are ignored for tools). Several calls in one answer are fine.
-- `required` (OpenAI) / `any` (Anthropic), or a named tool: the answer is exactly one call, constrained from the
-  first token.
+  tool results as `<tool_response>` user turns, and the model calls tools in the Hermes format.
+- Mistral's and Granite's markers are special tokens, which decoding normally leaves out; the engine keeps the
+  format's own marker in the generated text, so the constraint and the parser see it.
+- `auto`: the model may answer in text. Once it writes the format's marker, the call is constrained by a grammar
+  built from the tool definitions (a known name and arguments that fit its `parameters`/`input_schema`, leniently:
+  keywords the grammar cannot check are ignored for tools). Several calls in one answer are fine (one `<tool_call>`
+  block each, or several entries in the Mistral and Granite lists). Llama 3 calls have no marker, so its answer is
+  constrained from the first token: either text that does not start with `{`, or exactly one call.
+- `required` (OpenAI) / `any` (Anthropic), or a named tool: the answer is exactly one call (one list for Mistral
+  and Granite), constrained from the first token.
 - `none`: the tools are not shown to the model.
-- A reply that is nothing but a JSON object `{"name": ..., "arguments"|"parameters": ...}` naming a known tool (the
-  Llama 3 style) also counts as a call.
+- In every format, a reply that is nothing but a JSON object `{"name": ..., "arguments"|"parameters": ...}` naming
+  a known tool also counts as a call.
 - `finish_reason` is `tool_calls` (OpenAI) and `stop_reason` is `tool_use` (Anthropic) when the answer has calls.
   Send results back as `tool` messages (OpenAI) or `tool_result` blocks (Anthropic).
+- Call ids come from the request and the call's position. Mistral's template accepts only ids of nine letters and
+  digits, so earlier calls and their results are shown to it with nine-character ids derived from the ids you send
+  (`tools.template_id`); the ids in the API stay as they are.
 
 When streaming with tools, text is streamed until the model starts a tool call (or starts its answer with `{`, which
 could be a bare JSON call); the rest is decided when generation ends.

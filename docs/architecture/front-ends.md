@@ -138,18 +138,20 @@ flowchart TB
     req["ChatRequest"] --> which{"tools?<br/>response_format?"}
     which -->|"tool_choice required or named"| forced["grammar: exactly one<br/>call of the allowed tool(s)"]
     which -->|"tools + JSON format"| either["grammar: a call OR<br/>the JSON answer"]
-    which -->|"tools, auto"| trigger["free text; the call grammar<br/>switches on after &lt;tool_call&gt;"]
+    which -->|"tools, auto"| trigger["free text; the call grammar switches on<br/>after the format's marker (&lt;tool_call&gt;, [TOOL_CALLS], ...)"]
     which -->|"JSON format only"| json["grammar: JSON object<br/>or JSON schema"]
     which -->|neither| free["no constraint"]
     forced & either & trigger & json --> tc["TokenConstraint<br/>(grammar + token trie)"]
     tc --> sampler["sampler picks only<br/>allowed tokens"]
     free --> sampler
-    sampler --> parse["tools.parse_calls:<br/>Hermes &lt;tool_call&gt; JSON → ToolCall"]
+    sampler --> parse["tools.parse_calls:<br/>the model's format → ToolCall"]
 ```
 
 Tools are presented to the model through its chat template when the template supports them (Qwen2.5 does), and
-otherwise as Hermes-style instructions in the system message. The model writes calls as
-`<tool_call>{"name": ..., "arguments": ...}</tool_call>`; the grammar guarantees that such a call names an offered
+otherwise as Hermes-style instructions in the system message. `tools.detect_format` reads the call format from the
+template (`DllmEngine.tool_format`): Hermes `<tool_call>{"name": ..., "arguments": ...}</tool_call>`, Llama 3's bare
+`{"name": ..., "parameters": ...}`, Mistral's `[TOOL_CALLS][...]` or Granite's `<|tool_call|>[...]`; the engine keeps
+that format's special marker token visible in the decoded text. The grammar guarantees that a call names an offered
 tool and that its arguments are valid under the tool's JSON schema. While tools are offered, the stream only
 releases text that is certainly part of the answer, never the beginning of a call.
 

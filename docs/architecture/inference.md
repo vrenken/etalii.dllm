@@ -42,7 +42,7 @@ sequenceDiagram
 
 1. **Validate and constrain.** Unknown tools or unsupported schemas fail before any token is generated. A
    `response_format` or forced `tool_choice` becomes a grammar; with optional tools, the grammar only switches on
-   once the model writes `<tool_call>`.
+   once the model writes its tool call marker (`<tool_call>`, `[TOOL_CALLS]`, `<|tool_call|>`; `tools.detect_format`).
 2. **Render.** The model's own Jinja chat template, rendered the way `transformers.apply_chat_template` does. Tools
    go through the template when it supports them, otherwise into the system message as Hermes instructions. A final
    assistant message is a prefill: the answer continues its text. Models without a template (the placeholder) use

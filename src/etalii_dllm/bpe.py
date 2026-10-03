@@ -18,6 +18,7 @@ Unsupported components fail at load time instead of tokenizing differently from 
 
 from __future__ import annotations
 
+import copy as _copy
 import heapq
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -382,6 +383,8 @@ class BpeTokenizer:
         self._added_by_content = {t.content: t for t in ordered}
         self._added_pattern = regex.compile("|".join(regex.escape(t.content) for t in ordered)) if ordered else None
         self._special_ids = frozenset(t.id for t in self._added if t.special)
+        self._shown: frozenset[int] = frozenset()
+        """Special tokens that decoding keeps (tool call markers, :meth:`showing`)."""
 
         self._id_to_token: dict[int, str] = {}
         for token, index in sorted(self._vocab.items(), key=lambda item: (item[1], item[0])):
@@ -440,6 +443,17 @@ class BpeTokenizer:
     def special_ids(self) -> frozenset[int]:
         """Ids of the special (control) tokens, which :meth:`decode` skips."""
         return self._special_ids
+
+    def showing(self, contents: Iterable[str]) -> BpeTokenizer:
+        """A copy whose decoding keeps the special tokens ``contents`` as text (Mistral's ``[TOOL_CALLS]`` and
+        Granite's ``<|tool_call|>`` mark tool calls, so the engine must see them); other contents are ignored."""
+        wanted = set(contents)
+        shown = frozenset(t.id for t in self._added if t.special and t.content in wanted)
+        if shown == self._shown:
+            return self
+        copy = _copy.copy(self)
+        copy._shown = shown
+        return copy
 
     def token_to_id(self, token: str) -> int | None:
         return self._vocab.get(token)
@@ -525,7 +539,7 @@ class BpeTokenizer:
         out = bytearray()
         sentencepiece = self._sentencepiece
         for token in tokens:
-            if skip_special_tokens and token in self._special_ids:
+            if skip_special_tokens and token in self._special_ids and token not in self._shown:
                 continue
             text = self._id_to_token.get(token)
             if text is None:
@@ -546,7 +560,7 @@ class BpeTokenizer:
         return bytes(out)
 
     def decode(self, tokens: Iterable[int], *, skip_special_tokens: bool = True) -> str:
-        tokens = [t for t in tokens if not (skip_special_tokens and t in self._special_ids)]
+        tokens = [t for t in tokens if not (skip_special_tokens and t in self._special_ids and t not in self._shown)]
         sentencepiece = self._sentencepiece
         if (
             sentencepiece is not None
