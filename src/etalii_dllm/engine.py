@@ -453,16 +453,24 @@ class DllmEngine:
         if file.config.is_encoder:
             from etalii_dllm.encoder import Encoder
 
-            decoding = {"adapter": adapter, "steer": steer, "index": index, "draft_model": draft_model}
+            decoding = {"steer": steer, "index": index, "draft_model": draft_model}
             decoding |= {"contrast_model": contrast_model, "ensemble": ensemble, "speculate": speculate}
             used = [name for name, value in decoding.items() if value]
             if used:
                 raise ValueError(f"{path} is an encoder model, which embeds only; {', '.join(used)} need a decoder")
+            weights: Mapping[str, np.ndarray] = file.tensors
+            fingerprint = file.fingerprint
+            if adapter:
+                from etalii_dllm.lora import apply_adapter
+                from etalii_dllm.modelfile import data_fingerprint
+
+                weights, _ = apply_adapter(file.config, file.tensors, adapter)
+                fingerprint = data_fingerprint(weights)
             encoder = Encoder(
                 file.config,
-                file.tensors,
+                weights,
                 model_id=model_id,
-                weights_fingerprint=file.fingerprint,
+                weights_fingerprint=fingerprint,
                 quantize=quantize,
                 device=device,
                 release=file.release,

@@ -371,15 +371,18 @@ def test_embed_command(encoder_path, engine, capsys, monkeypatch):
     assert "bert" in capsys.readouterr().out
 
 
-def test_fine_tuning_and_adapters_refuse_encoders(encoder_path):
+def test_encoders_train_with_encoder_objectives(encoder_path):
     from etalii_dllm.lora import LoraConfig, target_weights
+    from etalii_dllm.training import RunConfig
     from etalii_dllm.training.trainer import FineTuner
 
     config = ModelFile(encoder_path).config
-    with pytest.raises(ValueError, match="LoRA adapters are for decoders"):
-        target_weights(config, LoraConfig(4, 8.0, ("q", "v")))
-    with pytest.raises(ValueError, match="fine-tuning is for decoders"):
-        FineTuner(config, {}, None, None, base_fingerprint="", metadata={})  # type: ignore[arg-type]
+    assert target_weights(config, LoraConfig(4, 8.0, ("q", "v")))[:2] == [
+        "layers.0.attention.q.weight",
+        "layers.0.attention.v.weight",
+    ]
+    with pytest.raises(ValueError, match="an encoder trains with the embedding or classifier objective"):
+        FineTuner(config, {}, None, RunConfig(1), base_fingerprint="", metadata={})  # type: ignore[arg-type]
 
 
 def test_an_index_built_with_an_encoder(engine):

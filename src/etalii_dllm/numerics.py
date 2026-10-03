@@ -471,6 +471,19 @@ def rms_norm_backward(
     return Tensor(dx), Tensor(dw)
 
 
+def layer_norm_backward(
+    x: npt.ArrayLike | Tensor, weight: npt.ArrayLike | Tensor, dy: npt.ArrayLike | Tensor, eps: float = 1e-12
+) -> tuple[Tensor, Tensor, Tensor]:
+    """``(dx, dweight, dbias)`` of :func:`layer_norm`; the bias does not enter any of them."""
+    dx, dw, db = _kernels.layer_norm_backward(_float32(x), _float32(weight), _float32(dy), float(eps))
+    return Tensor(dx), Tensor(dw), Tensor(db)
+
+
+def gelu_backward(x: npt.ArrayLike | Tensor, dy: npt.ArrayLike | Tensor) -> Tensor:
+    """``dy * gelu'(x)`` for the exact (erf) GELU (``gelu(x)``), elementwise."""
+    return Tensor(_kernels.gelu_backward(_float32(x), _float32(dy)))
+
+
 def silu_backward(x: npt.ArrayLike | Tensor, dy: npt.ArrayLike | Tensor) -> Tensor:
     """``dy * silu'(x)``, elementwise."""
     return Tensor(_kernels.silu_backward(_float32(x), _float32(dy)))

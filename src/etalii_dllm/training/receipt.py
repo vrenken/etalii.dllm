@@ -17,7 +17,7 @@ trains again and reports the first step whose loss differs, or confirms the same
     }
 
 A preference run (``dllm finetune --dpo``) records ``"pairs"`` instead of ``"windows"``; its ``run`` holds the
-objective and ``beta``.
+objective and ``beta``. An encoder run (``--objective embedding|classifier``) records ``"examples"``.
 
 ``data.file`` is the path as given, for convenience; ``data.sha256`` (the file) and ``data.fingerprint`` (the token
 windows, which also depend on the tokenizer and chat template) decide.
@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any
 from etalii_dllm import receipts
 from etalii_dllm.modelfile import ModelFile, data_fingerprint
 from etalii_dllm.training.data import TrainingData, read_documents
+from etalii_dllm.training.encoder_data import ENCODER_OBJECTIVES, EncoderData, read_examples
 from etalii_dllm.training.preference import PreferenceData, read_pairs
 from etalii_dllm.training.trainer import FineTuner, RunConfig, StepResult
 
@@ -46,10 +47,13 @@ FORMAT = "dllm-train/1"
 
 def load_data(
     engine: DllmEngine, base: ModelFile, path: str | Path, sequence_length: int, objective: str = "lm"
-) -> TrainingData | PreferenceData:
+) -> TrainingData | PreferenceData | EncoderData:
     """The training windows of ``path`` as ``dllm finetune`` builds them: chats rendered with the model's own
     template, documents separated by its end-of-sequence token. For ``objective="dpo"``, the preference pairs of
-    ``path`` (chat prompts rendered with the generation prompt, answers ended by the end-of-sequence token)."""
+    ``path`` (chat prompts rendered with the generation prompt, answers ended by the end-of-sequence token); for
+    ``embedding`` and ``classifier``, an encoder's examples (:mod:`etalii_dllm.training.encoder_data`)."""
+    if objective in ENCODER_OBJECTIVES:
+        return EncoderData.from_records(read_examples(path, objective), engine, objective, sequence_length)
     render: Callable[[Any], str] | None = None
     prompt = objective == "dpo"
     if engine.chat_template is not None:
@@ -84,7 +88,7 @@ def make_receipt(tuner: FineTuner, data_file: str | Path) -> dict[str, Any]:
             "file": str(data_file),
             "sha256": _file_sha256(data_file),
             "fingerprint": tuner.data.fingerprint,
-            ("pairs" if isinstance(tuner.data, PreferenceData) else "windows"): len(tuner.data),
+            _unit(tuner.data): len(tuner.data),
         },
         "run": tuner.run.to_dict(),
         "losses": [float(loss).hex() for loss in tuner.losses],
@@ -93,6 +97,12 @@ def make_receipt(tuner: FineTuner, data_file: str | Path) -> dict[str, Any]:
     if tuner.distillation is not None:
         body["distillation"] = tuner.distillation
     return {**body, "id": receipt_id(body)}
+
+
+def _unit(data: object) -> str:
+    if isinstance(data, EncoderData):
+        return "examples"
+    return "pairs" if isinstance(data, PreferenceData) else "windows"
 
 
 @dataclass(frozen=True)

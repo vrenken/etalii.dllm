@@ -14,6 +14,8 @@ export is byte-identical on every platform, and importing it again gives the sam
   Qwen3-MoE with byte-level BPE tokenizers. GGUF stores ``rms_norm_eps`` as
   float32, so a re-imported GGUF can differ from the original in that one value, as any GGUF does, and keeps two
   end-of-sequence ids (``eos`` and ``eot``).
+
+Encoders (BERT, RoBERTa, XLM-RoBERTa embedders and cross-encoders) are written by :mod:`etalii_dllm.encoder_export`.
 """
 
 from __future__ import annotations
@@ -289,6 +291,11 @@ def _hf_tensors(model: ModelFile) -> dict[str, np.ndarray]:
 def export_safetensors(model: ModelFile, directory: str | Path) -> list[Path]:
     """Writes ``model`` as a Hugging Face model directory; returns the files written, in name order."""
     config = model.config
+    if config.is_encoder:
+        from etalii_dllm.encoder_export import export_encoder_safetensors
+
+        Path(directory).mkdir(parents=True, exist_ok=True)
+        return export_encoder_safetensors(model, directory)
     files: dict[str, bytes] = {
         "config.json": _json_bytes(hf_config_json(config)),
         "generation_config.json": _json_bytes(
@@ -478,6 +485,10 @@ def _typed(key: str, value: Any) -> tuple[int, Any]:
 def export_gguf(model: ModelFile, path: str | Path) -> Path:
     """Writes ``model`` as a float32 GGUF v3 file."""
     config = model.config
+    if config.is_encoder:
+        from etalii_dllm.encoder_export import export_encoder_gguf
+
+        return export_encoder_gguf(model, path)
     family = config.family
     if family not in _GGUF_FAMILIES:
         supported = ", ".join(sorted(_GGUF_FAMILIES))
