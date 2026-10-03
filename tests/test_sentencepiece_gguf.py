@@ -15,16 +15,19 @@ from golden_values import SENTENCEPIECE_GGUF_TOKENS
 from model_fixtures import tiny_config, write_hf_checkpoint
 from test_bpe import CORPUS, SAMPLES, llama2_style, mistral_style
 
+import etalii_dllm
 from etalii_dllm.bpe import BpeTokenizer, TokenizerError, from_model_header, sentencepiece_merges, spec_from_gguf
 from etalii_dllm.exporting import ExportError, export_gguf, export_safetensors
 from etalii_dllm.importing import import_model
 from etalii_dllm.modelfile import ModelFile
 
 EXTRA = ["Hello world  x\né🙂", "  two leading", "trailing  ", "aaaaaa bbbb", "ababab abab", "東京", "\t\r\n", "x"]
-DOCS = [
+# A larger corpus that every test environment has (wheel tests run without the docs): the package's own sources.
+SOURCES = [
     line
-    for path in sorted((Path(__file__).parent.parent / "docs").glob("*.md"))
+    for path in sorted(Path(etalii_dllm.__file__).parent.glob("*.py"))
     for line in path.read_text(encoding="utf-8").splitlines()
+    if line.strip()
 ]
 
 
@@ -65,13 +68,13 @@ def trained(lines: list[str], vocabulary: int, prefix: bool) -> tuple[sentencepi
 
 @pytest.mark.parametrize(
     ("lines", "vocabulary", "prefix"),
-    [(CORPUS * 3, 400, True), (DOCS, 3000, True), (DOCS, 1500, False)],
-    ids=["small", "docs", "docs-no-prefix"],
+    [(CORPUS * 3, 400, True), (SOURCES, 3000, True), (SOURCES, 1500, False)],
+    ids=["small", "sources", "sources-no-prefix"],
 )
 def test_tokens_match_the_sentencepiece_library(lines, vocabulary, prefix):
     processor, metadata = trained(lines, vocabulary, prefix)
     tokenizer = BpeTokenizer(spec_from_gguf(metadata))
-    texts = [*SAMPLES, *EXTRA, *DOCS[::7], *(line[::-1] for line in DOCS[::11])]
+    texts = [*SAMPLES, *EXTRA, *SOURCES[::7], *(line[::-1] for line in SOURCES[::11])]
     for text in texts:
         ids = tokenizer.encode(text)
         assert ids == processor.encode(text), text
