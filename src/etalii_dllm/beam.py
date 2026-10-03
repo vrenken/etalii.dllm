@@ -211,7 +211,7 @@ def _check(request: ChatRequest) -> None:
     refused."""
     if request.tools and request.tool_choice.mode != "none":
         raise ValueError("beam search cannot use tools")
-    if request.response_format.grammar() is not None:
+    if request.response_format.type != "text":
         raise ValueError("beam search cannot be combined with structured output or a regex")
     if request.context_overflow != "stop":
         raise ValueError("beam search cannot roll the context")

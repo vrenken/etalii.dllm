@@ -375,3 +375,10 @@ MODERN_SAMPLERS_FINGERPRINT = "7b75175cbaa5b1c62126a5d5a3f10e09e6b6d6e350b5e1da9
 ADAPTIVE_SAMPLERS_FINGERPRINT = "50d7da182f470306a4de39256982b029269102eda52ee6bb9c0d5a5e594205d8"
 """Phase 50: the default model's 48-token answer with Mirostat 2.0 and a dynamic temperature
 (test_adaptive_samplers.py)."""
+
+# Phase 51: complete GBNF grammars from the default engine, prompt "Lazy grammars", temperature 0.9, seed 2, up to
+# 400 tokens: a left-recursive grammar with a token reference, and a lazy grammar triggered by "e".
+COMPLETE_GRAMMAR_FINGERPRINTS = {
+    "left-recursive": "50083b142a412be4b5a900dc116a0091b7933255eda1e62a7611768d6dce1ef3",
+    "lazy": "13654449b14366b79c7bd4300599b11c661c10ebb1c065a99883011dc0e7b25a",
+}

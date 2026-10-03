@@ -141,7 +141,7 @@ AdamW from `grad.hpp`.
 | `grammar.py` | Constrained decoding: byte-level JSON and regex grammars and the token masks they induce over a token trie; string patterns, formats, lengths and integer bounds compile to byte automata; the object and array automata track property counts, tuples, property names, pattern properties, unique choices and `contains` counts; `HealingConstraint` makes a healed answer start with the taken-back token's bytes. |
 | `numeric_automata.py` | Byte automata of decimal number texts under bounds and `multipleOf`, compared in exact decimal arithmetic, for schema constraints. |
 | `schema_algebra.py` | `allOf`, `not` and `if`/`then`/`else` rewritten exactly before compiling: schemas merged keyword by keyword and negated keyword by keyword. |
-| `gbnf.py` | GBNF grammars parsed and compiled to grammar rules of the same pushdown automaton; left recursion refused, alternatives that cannot finish dropped. |
+| `gbnf.py` | GBNF grammars parsed and compiled to grammar rules of the same pushdown automaton; left recursion rewritten exactly (Paull's algorithm), token references resolved against the vocabulary (`TokenTable`), alternatives that cannot finish dropped. |
 | `batch_jobs.py` | `dllm batch`: OpenAI batch files run concurrently with output in input order and content-derived ids, exact resume, digests and `--verify`. |
 | `regexp.py` | Regular expressions compiled to byte-level DFAs (UTF-8 ranges included) for regex-constrained output; trimmed intersections, differences and code point counting for schema constraints. |
 | `infill.py` | Fill-in-the-middle: the model's FIM tokens, the prompt built from them and the tokens that end a middle. |

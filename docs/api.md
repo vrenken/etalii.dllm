@@ -268,14 +268,41 @@ colour ::= "red" | "green" | "blue" | "yellow"
 | `"text"` | A literal, with the escapes `\n \r \t \\ \" \[ \] \-`, `\xHH`, `\uHHHH` and `\UHHHHHHHH`. |
 | `[a-z_]`, `[^"\n]`, `.` | One character of a class (ranges, negation, the same escapes), or any character. Characters are Unicode code points, never surrogates, written as UTF-8. |
 | `x*`, `x+`, `x?`, `x{m}`, `x{m,}`, `x{m,n}` | Repetitions, counts up to 1000. |
-| `name` | A rule reference; rules may refer to each other and to themselves. |
+| `name` | A rule reference; rules may refer to each other and to themselves, on the left too. |
+| `<[42]>`, `<think>`, `!<[42]>` | A token reference (Phase 51): one whole token by id, the token whose text is exactly `<think>`, or any one token except it. |
 
-Refused with a 400 error (a `GrammarError` in Python): left recursion (`expr ::= expr "+" term`, also through rules
-that can match nothing; write `expr ::= term ("+" term)*`), unbounded repetitions of something that can match
-nothing, undefined or doubly defined rules, a missing `root` and token references (`<...>`). Alternatives that can
-never finish (a rule with no way out of its recursion) are dropped, so decoding never runs into an answer it cannot
-end, and a grammar that derives no text at all is refused. A grammar cannot be combined with another structured
-output, a `guided_regex` or beam search.
+**Left recursion** (Phase 51) is rewritten exactly before compiling: `expr ::= expr "+" term | term` derives the same
+strings as `expr ::= term ("+" term)*` and is compiled as such (Paull's algorithm over the rules of each
+left-recursive cycle, in their written order), so grammars written for parser generators work unchanged.
+
+**Token references** (Phase 51, as in llama.cpp) match tokens rather than text: `<[id]>` the token with that id,
+`<name>` the token whose text in the model's vocabulary is exactly `<name>` (such as `<think>` or `<|im_start|>`), and
+`!<[id]>`/`!<name>` any one token except that one. A token reference reads exactly one token, at a token boundary,
+and any token it reads is allowed whatever its bytes (so a negation can produce bytes that are not UTF-8 on their
+own). The model's stop tokens always end the answer, so a grammar cannot ask for one and a negation never includes
+them. A special token that decodes to no text adds none.
+
+```
+root     ::= <think> thinking </think> answer
+thinking ::= !</think>*
+answer   ::= " " [A-Za-z ]+ "."
+```
+
+**Lazy grammars** (Phase 51, llama.cpp's `grammar_lazy` and `grammar_triggers`) leave the answer free until one of
+the trigger words appears; from the start of the earliest one on, the rest of the answer must follow the grammar
+(which must therefore start with the trigger word), and the answer ends when the grammar's match cannot be extended.
+If the token that completes a trigger already runs past it with bytes the grammar refuses, the rest stays free.
+Triggers go in `"grammar_lazy": true, "grammar_triggers": [{"type": "word", "value": "<tool>"}]` (or plain strings)
+on chat completions and completions, or `--grammar-trigger WORD` (repeatable) on `dllm generate` and `dllm chat`.
+Receipts record the trigger words, so `dllm replay` repeats them, and requests without them keep their ids.
+
+Refused with a 400 error (a `GrammarError` in Python): left recursion behind something that can match nothing
+(`a ::= b a "x"` where `b` can match nothing), unbounded repetitions of something that can match nothing, undefined
+or doubly defined rules, a missing `root`, unknown token references or ones naming a stop token, a grammar that grows
+too large when its left recursion is rewritten, and a lazy grammar that cannot start with its trigger word or that is
+combined with tools. Alternatives that can never finish (a rule with no way out of its recursion) are dropped, so
+decoding never runs into an answer it cannot end, and a grammar that derives no text at all is refused. A grammar
+cannot be combined with another structured output, a `guided_regex` or beam search.
 
 ```bash
 dllm chat "Name some colours" --grammar colours.gbnf
@@ -300,6 +327,7 @@ reference implementation repeats bit for bit.
 | Several choices | `n` | | `--n` (`generate`) |
 | Output matching a regex in full | `response_format: {"type": "regex", "regex": ...}` or `guided_regex` | | `--regex` |
 | Output a [GBNF grammar](#grammars) derives | `response_format: {"type": "grammar", "grammar": ...}` or `grammar` | | `--grammar` |
+| A [lazy grammar](#grammars) from a trigger word on | `grammar_lazy`, `grammar_triggers` (extensions, as in llama.cpp; chat completions and completions) | | `--grammar-trigger` |
 | [Guided decoding](#guided-decoding): a negative prompt, or contrast against an amateur model | `guidance: {negative_prompt, scale}`, `contrast: {beta, alpha}` (extensions; also on Anthropic messages and completions) | | `--negative-prompt`, `--guidance-scale`, `--contrast BETA`, `--contrast-alpha` |
 | [Length and stop controls](#length-and-stop-controls): a minimum length, writing past the end-of-sequence token, extra stop token ids, the stop string kept | `min_tokens`, `ignore_eos`, `stop_token_ids`, `include_stop_str_in_output` (extensions, as in vLLM; chat completions, completions and Responses) | | `--min-tokens`, `--ignore-eos`, `--stop-token-id`, `--stop`, `--include-stop` |
 | [Token healing](#token-healing) of a prompt or prefill that ends inside a word | `token_healing: true` (extension; also on Responses, Anthropic messages, completions and Ollama) | | `--token-healing` |
@@ -381,7 +409,7 @@ dllm generate --prompt "Once upon a time" --temperature 0.9 --seed 4 --mirostat 
 endpoint: a completion equals `dllm generate` with the same prompt and options, bit for bit. `prompt` is a string or
 a list of strings (choice `index` is `prompt_index * n + i`); `max_tokens` defaults to 16 as in OpenAI's API and
 `temperature` to 0 as everywhere here. `stop`, `seed`, `n`, the [decoding controls](#decoding-controls),
-`guided_regex`, `grammar`, `watermark`, `stream` (with `stream_options.include_usage`) and `receipt` (a receipt on each choice)
+`guided_regex`, `grammar` (lazy too), `watermark`, `stream` (with `stream_options.include_usage`) and `receipt` (a receipt on each choice)
 work as on chat completions. `suffix` [fills in the middle](#fill-in-the-middle) between the prompt and it (an empty
 `suffix` is no suffix, as in OpenAI's API). A `best_of` other than `n` is refused with a 400 error.
 

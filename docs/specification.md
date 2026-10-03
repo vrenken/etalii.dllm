@@ -274,8 +274,19 @@ refused rather than approximated.
 
 **Grammars.** A GBNF grammar constraint allows exactly the outputs whose UTF-8 bytes are the encoding of a string
 the `root` rule derives, where literals and classes hold code points (never surrogates) and `.` is any code point.
-Before decoding, alternatives that derive no finite string are removed; grammars with left recursion are refused.
-The supported syntax is listed in `etalii_dllm.gbnf`. Tokens and stop tokens are allowed as for regular expressions.
+Before decoding, alternatives that derive no finite string are removed, and left recursion is rewritten into right
+recursion by Paull's algorithm: the rules of each left-recursive cycle (rules that reach each other through the first
+item of an alternative) are taken in the order a depth-first walk from `root` meets them; a rule's alternatives that
+start with an earlier rule of the cycle are replaced, in place and in order, by that rule's alternatives followed by
+the rest, then `a ::= a x1 | ... | y1 | ...` becomes `a ::= y1 t | ...` with a new rule `t ::= x1 t | ... |` (nothing),
+`a ::= a` being dropped. This derives the same strings, so the allowed outputs are those of the written grammar. A
+token reference reads one whole token: it allows the tokens it names (or, negated, every other token), whatever their
+bytes, while the other items read bytes; a token is allowed when either way accepts it, and both ways are followed
+after it. The supported syntax is listed in `etalii_dllm.gbnf`. Tokens and stop tokens are allowed as for regular
+expressions. A lazy grammar leaves the output free until one of its trigger words occurs in the output's bytes (checked
+after each token; the earliest occurrence); the bytes from that occurrence's start are fed to the grammar, and from
+then on tokens are allowed as for a grammar constraint. If those bytes already leave the grammar, no constraint
+applies for the rest of the output.
 
 ## 5. The decoder
 

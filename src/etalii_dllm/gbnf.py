@@ -9,32 +9,54 @@ full. Supported syntax:
 - string literals ``"..."`` and character classes ``[...]``/``[^...]`` with ranges ``a-z``, both with the escapes
   ``\\n \\r \\t \\\\ \\" \\[ \\] \\-``, ``\\xHH``, ``\\uHHHH`` and ``\\UHHHHHHHH``; ``.`` is any character;
 - the repetitions ``*``, ``+``, ``?``, ``{m}``, ``{m,}`` and ``{m,n}`` (counts up to
-  :data:`etalii_dllm.regexp.MAX_REPEAT`).
+  :data:`etalii_dllm.regexp.MAX_REPEAT`);
+- token references (as in llama.cpp): ``<[id]>`` the token with that id, ``<name>`` the token whose text is
+  exactly ``<name>`` (``<think>``, ``<|im_end|>``), and ``!<[id]>``/``!<name>`` any one token except it. A token
+  reference reads exactly one token, at a token boundary, so it needs the model's vocabulary (a
+  :class:`TokenTable`); the model's stop tokens end the answer, so they cannot be asked for and are never part of a
+  negation.
 
 Characters are Unicode code points (never surrogates) and the output is their UTF-8 encoding, so it is always
-well-formed. Rules may refer to each other and to themselves, but not on the left: left recursion (``a ::= a "x"``,
-also through rules that can match nothing) and unbounded repetitions of something that can match nothing would make
-the automaton loop, so they raise :class:`etalii_dllm.grammar.GrammarError`, as do undefined or doubly defined rules,
-a missing ``root`` and token references (``<...>``). Alternatives that can never finish (rules without a way out of
-their recursion) are dropped, so constrained decoding never runs into an answer it cannot end; a grammar that
-derives no text at all is refused.
+well-formed. Rules may refer to each other and to themselves, on the left too: left recursion (``expr ::= expr "+"
+term | term``, also through other rules) is rewritten exactly into right recursion before compiling, by Paull's
+algorithm on the rules of each left-recursive cycle in their written order (``a ::= a x | y`` becomes ``a ::= y a'``
+with ``a' ::= x a' |`` (nothing)), which derives the same strings. Left recursion behind something that can match
+nothing (``a ::= b a "x"`` with ``b`` able to match nothing) and unbounded repetitions of something that can match
+nothing would make the automaton loop, so they raise :class:`etalii_dllm.grammar.GrammarError`, as do undefined or
+doubly defined rules and a missing ``root``. Alternatives that can never finish (rules without a way out of their
+recursion) are dropped, so constrained decoding never runs into an answer it cannot end; a grammar that derives no
+text at all is refused.
 
-Determinism: the automaton is a pure function of the grammar text. Rules and alternatives keep their written order
-and every analysis walks them in that order.
+Determinism: the automaton is a pure function of the grammar text (and the vocabulary, for token references). Rules
+and alternatives keep their written order and every analysis and rewrite walks them in that order.
 """
 
 from __future__ import annotations
 
 import functools
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from etalii_dllm.grammar import _RE, _VALUE, Grammar, GrammarError, _literal, _Rule, _value
+from etalii_dllm.grammar import _RE, _TOK, _VALUE, Grammar, GrammarError, _literal, _Rule, _value
 from etalii_dllm.regexp import _ALL, MAX_REPEAT, Ranges, _complement, _normalise, compile_regex
 
 _NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
 _ESCAPES = {"n": 0x0A, "r": 0x0D, "t": 0x09, "\\": 0x5C, '"': 0x22, "[": 0x5B, "]": 0x5D, "-": 0x2D}
 _HEX_DIGITS = {"x": 2, "u": 4, "U": 8}
+MAX_REWRITE_STEPS = 100_000
+"""Most substitutions rewriting a grammar's left recursion may take (it can grow a grammar exponentially)."""
+
+
+class TokenTable:
+    """The vocabulary token references resolve against: ``size`` token ids, ``lookup(text)`` the id of the token
+    whose text is ``text`` (or ``None``), and the ``stops`` tokens that end an answer. One per tokenizer; compared
+    by identity, so compiled grammars are cached per vocabulary."""
+
+    def __init__(self, size: int, lookup: Callable[[str], int | None], stops: frozenset[int]) -> None:
+        self.size = size
+        self.lookup = lookup
+        self.stops = stops
 
 
 # -- syntax tree ---------------------------------------------------------------------------------------------------
@@ -53,6 +75,15 @@ class _Class:
 @dataclass(frozen=True)
 class _Reference:
     name: str
+
+
+@dataclass(frozen=True)
+class _Token:
+    """A token reference: by ``id`` or by its ``text`` (``<...>`` included); ``negated``: any one token but it."""
+
+    text: str | None
+    id: int | None
+    negated: bool
 
 
 @dataclass(frozen=True)
@@ -174,11 +205,30 @@ class _Parser:
                 raise self.error("missing ')'")
             self.position += 1
             return _Group(alternatives)
-        if char == "<":
-            raise self.error("token references (<...>) are not supported")
+        if char == "<" or char == "!":
+            return self._token()
         if char in _NAME_CHARS:
             return _Reference(self._name())
         raise self.error(f"unexpected {char!r}")
+
+    def _token(self) -> _Token:
+        negated = self._peek() == "!"
+        if negated:
+            self.position += 1
+            if self._peek() != "<":
+                raise self.error("'!' must be followed by a token reference <...>")
+        end = self.text.find(">", self.position + 1)
+        text = self.text[self.position : end + 1] if end >= 0 else ""
+        if not text or any(c in text for c in " \t\r\n") or len(text) < 3:
+            raise self.error("expected a token reference such as <[42]> or <think>")
+        self.position = end + 1
+        inner = text[1:-1]
+        if inner.startswith("[") and inner.endswith("]"):
+            digits = inner[1:-1]
+            if not digits or not digits.isascii() or not digits.isdigit():
+                raise self.error(f"bad token id in {text}")
+            return _Token(None, int(digits), negated)
+        return _Token(text, None, negated)
 
     def _char(self) -> int:
         """One code point of a literal or class, escapes resolved."""
@@ -284,8 +334,9 @@ def _class_item(ranges: Ranges) -> tuple[Any, ...]:
 
 
 class _Compiler:
-    def __init__(self, syntax: dict[str, tuple[tuple[Any, ...], ...]]) -> None:
+    def __init__(self, syntax: dict[str, tuple[tuple[Any, ...], ...]], tokens: TokenTable | None) -> None:
         self.syntax = syntax
+        self.tokens = tokens
         self.rules = {name: _Rule(name) for name in syntax}
         self.created: list[_Rule] = list(self.rules.values())
         self.repetitions: set[int] = set()
@@ -311,6 +362,17 @@ class _Compiler:
     def _sequence(self, sequence: tuple[Any, ...]) -> tuple[tuple[Any, ...], ...]:
         return tuple(item for element in sequence for item in self._items(element))
 
+    def _token(self, element: _Token) -> tuple[Any, ...]:
+        written = element.text if element.text is not None else f"<[{element.id}]>"
+        if self.tokens is None:
+            raise GrammarError(f"rule {self._owner!r}: the token reference {written} needs the model's vocabulary")
+        token = element.id if element.text is None else self.tokens.lookup(element.text)
+        if token is None or not 0 <= token < self.tokens.size:
+            raise GrammarError(f"rule {self._owner!r}: the vocabulary has no token {written}")
+        if token in self.tokens.stops and not element.negated:
+            raise GrammarError(f"rule {self._owner!r}: {written} is a stop token, which ends the answer")
+        return (_TOK, frozenset({token}), element.negated)
+
     def _items(self, element: Any) -> list[tuple[Any, ...]]:
         if isinstance(element, _Literal):
             return [_literal(element.text.encode("utf-8"))] if element.text else []
@@ -321,6 +383,8 @@ class _Compiler:
             if rule is None:
                 raise GrammarError(f"rule {self._owner!r} refers to the undefined rule {element.name!r}")
             return [_value(rule)]
+        if isinstance(element, _Token):
+            return [self._token(element)]
         if isinstance(element, _Group):
             alternatives = self._alternatives(element.alternatives)
             if len(alternatives) == 1:
@@ -391,6 +455,84 @@ def _nullable(item: tuple[Any, ...], found: set[int]) -> bool:
     return item[0] == _VALUE and id(item[1]) in found
 
 
+def _first_rule(alternative: tuple[tuple[Any, ...], ...]) -> _Rule | None:
+    """The rule an alternative starts with, if it starts with one."""
+    return alternative[0][1] if alternative and alternative[0][0] == _VALUE else None
+
+
+def _left_cycles(rules: list[_Rule]) -> list[list[_Rule]]:
+    """The groups of rules that reach each other through the first items of their alternatives (left-recursive
+    cycles), each in the order of ``rules``; groups ordered by their first rule (Tarjan's algorithm)."""
+    position = {id(rule): index for index, rule in enumerate(rules)}
+    edges = {
+        id(rule): [first for alt in rule.alternatives if (first := _first_rule(alt)) is not None] for rule in rules
+    }
+    order: dict[int, int] = {}
+    low: dict[int, int] = {}
+    stack: list[_Rule] = []
+    on_stack: set[int] = set()
+    groups: list[list[_Rule]] = []
+
+    def visit(rule: _Rule) -> None:
+        order[id(rule)] = low[id(rule)] = len(order)
+        stack.append(rule)
+        on_stack.add(id(rule))
+        for target in edges[id(rule)]:
+            if id(target) not in order:
+                visit(target)
+                low[id(rule)] = min(low[id(rule)], low[id(target)])
+            elif id(target) in on_stack:
+                low[id(rule)] = min(low[id(rule)], order[id(target)])
+        if low[id(rule)] == order[id(rule)]:
+            group: list[_Rule] = []
+            while True:
+                member = stack.pop()
+                on_stack.discard(id(member))
+                group.append(member)
+                if member is rule:
+                    break
+            if len(group) > 1 or any(target is rule for target in edges[id(rule)]):
+                groups.append(sorted(group, key=lambda r: position[id(r)]))
+
+    for rule in rules:
+        if id(rule) not in order:
+            visit(rule)
+    return sorted(groups, key=lambda group: position[id(group[0])])
+
+
+def _rewrite_left_recursion(rules: list[_Rule], repetitions: set[int]) -> None:
+    """Rewrites every left-recursive cycle into right recursion, deriving the same strings (Paull's algorithm): in
+    the cycle's order, a rule's alternatives that start with an earlier rule of the cycle are replaced by that rule's
+    alternatives followed by the rest, then ``a ::= a x | y`` becomes ``a ::= y t`` with the new rule
+    ``t ::= x t |`` (nothing). ``a ::= a`` adds no string and is dropped."""
+    steps = 0
+    for group in _left_cycles(rules):
+        index = {id(rule): i for i, rule in enumerate(group)}
+        for i, rule in enumerate(group):
+            result: list[tuple[tuple[Any, ...], ...]] = []
+            work = list(reversed(rule.alternatives))
+            while work:
+                alternative = work.pop()
+                first = _first_rule(alternative)
+                j = index.get(id(first)) if first is not None else None
+                if j is None or j >= i:
+                    result.append(alternative)
+                    continue
+                steps += 1
+                if steps > MAX_REWRITE_STEPS:
+                    raise GrammarError("the grammar grows too large when its left recursion is rewritten")
+                work.extend(reversed([(*sub, *alternative[1:]) for sub in group[j].alternatives]))
+            recursive = [alt[1:] for alt in result if _first_rule(alt) is rule and len(alt) > 1]
+            others = [alt for alt in result if _first_rule(alt) is not rule]
+            if not recursive:
+                rule.alternatives = tuple(dict.fromkeys(others))
+                continue
+            tail = _Rule(f"the repeated tail of {rule.name!r}")
+            repetitions.add(id(tail))
+            tail.alternatives = tuple(dict.fromkeys([*((*alt, _value(tail)) for alt in recursive), ()]))
+            rule.alternatives = tuple(dict.fromkeys((*alt, _value(tail)) for alt in others))
+
+
 def _check_left_recursion(rules: list[_Rule], repetitions: set[int]) -> None:
     nullable = _fixpoint(rules, _nullable)
     edges: dict[int, list[_Rule]] = {}
@@ -417,7 +559,7 @@ def _check_left_recursion(rules: list[_Rule], repetitions: set[int]) -> None:
                 if loops:
                     raise GrammarError(f"{loops[0].name}: it repeats something that can match nothing")
                 names = " -> ".join(r.name for r in [*cycle, target])
-                raise GrammarError(f"left recursion is not supported: {names}")
+                raise GrammarError(f"left recursion behind something that can match nothing is not supported: {names}")
             if id(target) not in state:
                 visit(target)
         path.pop()
@@ -429,10 +571,15 @@ def _check_left_recursion(rules: list[_Rule], repetitions: set[int]) -> None:
 
 
 @functools.lru_cache(maxsize=64)
-def compile_gbnf(text: str) -> Grammar:
-    """The grammar of the GBNF ``text`` (see the module docstring); raises :class:`GrammarError` when it is not
-    supported."""
-    compiler = _Compiler(_Parser(text).parse())
+def _parse(text: str) -> dict[str, tuple[tuple[Any, ...], ...]]:
+    return _Parser(text).parse()
+
+
+@functools.lru_cache(maxsize=64)
+def compile_gbnf(text: str, tokens: TokenTable | None = None) -> Grammar:
+    """The grammar of the GBNF ``text`` (see the module docstring), token references resolved against ``tokens``;
+    raises :class:`GrammarError` when it is not supported."""
+    compiler = _Compiler(_parse(text), tokens)
     root = compiler.compile()
     rules = _reachable(root)
     productive = _fixpoint(rules, _productive)
@@ -440,9 +587,22 @@ def compile_gbnf(text: str) -> Grammar:
         raise GrammarError("the grammar derives no text: every way through 'root' recurses forever")
     for rule in rules:
         rule.alternatives = tuple(a for a in rule.alternatives if all(_productive(i, productive) for i in a))
-    rules = _reachable(root)
-    _check_left_recursion(rules, compiler.repetitions)
+    _rewrite_left_recursion(_reachable(root), compiler.repetitions)
+    _check_left_recursion(_reachable(root), compiler.repetitions)
     return Grammar([_value(root)])
 
 
-__all__ = ["compile_gbnf"]
+def uses_tokens(text: str) -> bool:
+    """Whether the GBNF ``text`` has token references (and so needs the model's vocabulary)."""
+
+    def has(element: Any) -> bool:
+        if isinstance(element, _Token):
+            return True
+        if isinstance(element, _Group):
+            return any(has(e) for alt in element.alternatives for e in alt)
+        return isinstance(element, _Repeat) and has(element.element)
+
+    return any(has(e) for alts in _parse(text).values() for alt in alts for e in alt)
+
+
+__all__ = ["MAX_REWRITE_STEPS", "TokenTable", "compile_gbnf", "uses_tokens"]

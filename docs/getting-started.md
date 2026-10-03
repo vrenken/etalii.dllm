@@ -891,6 +891,20 @@ Mirostat keeps the text's surprise near a target you choose (`--mirostat-tau`, i
 runs cooler where the model is sure and warmer where it is not. Both use llama.cpp's and Ollama's names in every API
 and give the same bits on every run and machine. Details: [adaptive samplers](api.md#adaptive-samplers).
 
+## 47. Complete grammars
+
+```bash
+dllm generate --prompt "Sum: " --grammar 'root ::= expr "."
+expr ::= expr "+" num | num
+num ::= [0-9]{1,2}'
+dllm chat "Answer, then call the tool" --grammar 'root ::= "<tool>" [a-z]+ "</tool>"' --grammar-trigger "<tool>"
+```
+
+GBNF grammars may now be left-recursive, as grammars for parser generators often are, and may refer to tokens by id
+(`<[42]>`) or text (`<think>`), or to any token but one (`!<[42]>`). A lazy grammar lets the model write freely until a
+trigger word appears and then holds it to the grammar. Everything stays bit-exact on every run and machine. Details:
+[grammars](api.md#grammars).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
@@ -918,8 +932,8 @@ and give the same bits on every run and machine. Details: [adaptive samplers](ap
   bounds, `multipleOf`, property counts, tuples, property names, unique choices, `allOf`, `not`, `if`/`then`/`else`,
   `patternProperties` and `contains`; `uniqueItems` and `maxContains` over open-ended items, conditions that cannot
   be negated (such as `not` of an array schema) and keywords like `dependentSchemas` are refused with an error
-  (see [HTTP API](api.md#structured-output)). GBNF grammars may not be left-recursive and cannot use llama.cpp's
-  token references (`<...>`) ([grammars](api.md#grammars)). No images or audio.
+  (see [HTTP API](api.md#structured-output)). GBNF grammars cannot have left recursion hidden behind something
+  that can match nothing ([grammars](api.md#grammars)). No images or audio.
 - MCP servers' URL-mode elicitations (open a web page) are declined and nobody is asked interactively (the model
   answers forms), and image, audio or binary MCP content is refused.
 - Models with Unigram or WordPiece tokenizers, dynamic NTK RoPE scaling or other architectures (including DeepSeek's mixtures

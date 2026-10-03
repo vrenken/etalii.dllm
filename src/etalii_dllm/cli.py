@@ -377,6 +377,13 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument(
             "--grammar", help="only produce text this GBNF grammar derives (a file, or the grammar itself)"
         )
+        command.add_argument(
+            "--grammar-trigger",
+            action="append",
+            default=[],
+            metavar="WORD",
+            help="make --grammar lazy: free text until this word, the grammar from it on (repeatable)",
+        )
         command.add_argument("--watermark-key", help="watermark the output with this key (dllm watermark detect)")
         command.add_argument("--watermark-gamma", type=float, default=0.25, help="share of green tokens")
         command.add_argument("--watermark-delta", type=float, default=2.0, help="logit boost of green tokens")
@@ -734,6 +741,7 @@ def main(argv: list[str] | None = None) -> int:
                 options.for_choice(index),
                 regex=args.regex,
                 grammar=grammar,
+                grammar_triggers=args.grammar_trigger,
                 overflow=args.context_overflow,
                 token_healing=args.token_healing,
                 suffix=args.suffix,
@@ -1385,7 +1393,10 @@ def _chat(engine: DllmEngine, args: argparse.Namespace, options: SamplingOptions
         if args.json or args.json_schema or args.regex is not None:
             print("dllm chat: --grammar cannot be combined with --json, --json-schema or --regex", file=sys.stderr)
             return 1
-        response_format = ResponseFormat("grammar", pattern=grammar)
+        response_format = ResponseFormat("grammar", pattern=grammar, triggers=tuple(args.grammar_trigger))
+    elif args.grammar_trigger:
+        print("dllm chat: --grammar-trigger needs --grammar", file=sys.stderr)
+        return 1
     messages = [ChatMessage("system", args.system)] if args.system else []
     prefill = [ChatMessage("assistant", args.prefill)] if args.prefill else []
     request = ChatRequest(
