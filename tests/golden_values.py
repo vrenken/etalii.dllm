@@ -433,3 +433,10 @@ ENCODER_FINETUNE_FINGERPRINT = {
     "embedding": "68279dcbedcea26d622225cfc5ebe20516607d4a0c0e8c721e0c4131f8472631",
     "classifier": "d06f16ca5521e1fe3230c898ba0b02349e10bb64db1972619fc240ce6fa0c8f2",
 }
+
+# Phase 59: three steps of dllm finetune on the tiny ModernBERT embedder (contrastive) and mean-pooling
+# cross-encoder (classifier) of tests/test_modernbert.py.
+MODERNBERT_FINETUNE_FINGERPRINT = {
+    "embedding": "6c951505ffed77444dcb1a0a06c08d8d3af8dc47f4d68cca424fca3a27dab92b",
+    "classifier": "214e122e6af9ad95ac2993f3c97e904fd91024c5357475fccba51f2c434800a2",
+}

@@ -105,6 +105,11 @@ dllm export ms-marco-tuned.dllm --format gguf -o ms-marco-tuned.gguf          # 
   tokenizer is the WordPiece vocabulary with BERT's lower-casing normaliser, as llama.cpp tokenizes. RoBERTa and
   XLM-RoBERTa cannot be written to GGUF exactly (llama.cpp's layout cuts the position rows before the padding
   token), nor can BERT models with the tanh GELU; export those to safetensors.
+- **ModernBERT** (Phase 59) exports to safetensors only: `ModernBertModel` or `ModernBertForSequenceClassification`
+  with the fused `attn.Wqkv` and `mlp.Wi` weights put back together, the global/local layer pattern as
+  `global_attn_every_n_layers` (or `layer_types` when no period fits) and the classifier pooling, plus the
+  sentence-transformers modules of an embedder. Before writing, the config is read back through the importer and
+  must give the same model. llama.cpp's GGUF layout has no ModernBERT, so `--format gguf` refuses it.
 
 ### SentencePiece models through GGUF
 

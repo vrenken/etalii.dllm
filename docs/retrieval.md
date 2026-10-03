@@ -57,6 +57,26 @@ dllm import hf:sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2 -o mu
 dllm --model multilingual.dllm embed "Wie viele Menschen leben in Berlin?" --json
 ```
 
+#### ModernBERT encoders
+
+ModernBERT encoders (`model_type` `modernbert`, Phase 59) import too, for example
+[gte-modernbert-base](https://huggingface.co/Alibaba-NLP/gte-modernbert-base) and
+[modernbert-embed-base](https://huggingface.co/nomic-ai/modernbert-embed-base) (both Apache 2.0). ModernBERT is a
+newer encoder: pre-norm layers with LayerNorms that have no bias, fused query/key/value projections, rotary positions
+with one base for global layers and another for local ones, local layers that only see keys within half of
+`local_attention` on either side (every `global_attn_every_n_layers`-th layer sees all), a gated GELU MLP and a final
+norm. Its tokenizer is a byte-level BPE, reproduced as for the decoders:
+
+```bash
+dllm import hf:Alibaba-NLP/gte-modernbert-base -o gte-modernbert.dllm
+dllm --model gte-modernbert.dllm embed "What is the capital of France?" --json
+```
+
+The forward pass is in the [specification](specification.md#6-the-encoder) and `dllm verify --reference` checks it.
+Checkpoints with biases, RoPE scaling or a head activation different from the MLP's are refused at import. ModernBERT
+is checked against `transformers` on tiny synthetic models with sequences longer than the local window
+(`tests/test_modernbert.py`), not yet on the real checkpoints in CI.
+
 all-MiniLM-L6-v2, bge-small-en-v1.5, all-distilroberta-v1, paraphrase-multilingual-MiniLM-L12-v2 and
 [Qwen3-Embedding-0.6B](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B) (Apache 2.0) are checked against
 `transformers` in CI (`tests/test_reference_models.py`):
@@ -185,6 +205,17 @@ type 0, and their classification head is the same computation as BERT's:
 ```bash
 dllm import hf:cross-encoder/mmarco-mMiniLMv2-L12-H384-v1 -o mmarco.dllm
 dllm --model mmarco.dllm rerank "Wie viele Menschen leben in Berlin?" "Berlin hat 3,5 Millionen Einwohner." "Berlin hat Museen."
+```
+
+ModernBERT cross-encoders such as
+[gte-reranker-modernbert-base](https://huggingface.co/Alibaba-NLP/gte-reranker-modernbert-base) (149M parameters,
+Apache 2.0) import as rerankers too. Their pair is `[CLS] query [SEP] passage [SEP]` without token types, and their
+head pools the `[CLS]` state or the mean over the tokens (`classifier_pooling`), then applies a dense layer, the
+GELU, a LayerNorm and the classifier:
+
+```bash
+dllm import hf:Alibaba-NLP/gte-reranker-modernbert-base -o gte-reranker.dllm
+dllm --model gte-reranker.dllm rerank "How many people live in Berlin?" "Berlin has 3.5 million people." "Berlin has museums."
 ```
 
 `POST /v1/rerank` (also `/rerank`) takes the request shape of Cohere and Jina: `query`, `documents` (strings or

@@ -150,7 +150,8 @@ extern "C" __global__ void rope(const float* x, const long long* positions, cons
 // Attention: one block per (query, head) row, rows [row0, row0 + gridDim.x). Scores are one thread per key (each its
 // own dot product over head_dim ascending); the maximum and the softmax total are taken by thread 0 over the keys
 // ascending; the output is one thread per value dimension, summing over the keys ascending. scratch holds
-// kv_len doubles per block. A non-zero window keeps only the last `window` visible keys (sliding-window attention); a
+// kv_len doubles per block. A non-zero window keeps only the last `window` visible keys (sliding-window attention), or
+// without causal masking the keys closer than `window` on either side (bidirectional local attention); a
 // positive softcap maps each scaled score s to softcap * tanh(s / softcap), as the CPU kernel.
 extern "C" __global__ void attention(const float* q, const float* k, const float* v, float* out, double* scratch,
                                      u64 row0, u64 kv_len, u64 q_heads, u64 kv_heads, u64 head_dim, u64 value_dim,
@@ -162,12 +163,17 @@ extern "C" __global__ void attention(const float* q, const float* k, const float
     const u64 h = row % q_heads;
     const u64 kvh = h / (q_heads / kv_heads);
     float* oh = out + row * value_dim;
+    const u64 position = q_offset + t;
+    u64 first = 0;
     u64 end = kv_len;
     if (causal) {
-        const u64 last = q_offset + t + 1;
-        end = last < kv_len ? last : kv_len;
+        end = position + 1 < kv_len ? position + 1 : kv_len;
+        first = window != 0 && end > window ? end - window : 0;
+    } else if (window != 0) {
+        first = position + 1 > window ? position + 1 - window : 0;
+        end = position + window < kv_len ? position + window : kv_len;
+        end = end > first ? end : first;
     }
-    const u64 first = window != 0 && end > window ? end - window : 0;
     const u64 visible = end - first;
     k += first * kv_heads * head_dim;
     v += first * kv_heads * value_dim;

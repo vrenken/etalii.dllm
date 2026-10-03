@@ -18,6 +18,14 @@ MLP (``q k v o up down``; there is no ``gate``) under transformers' names, e.g.
 ``base_model.model.bert.encoder.layer.0.output.dense.lora_B.weight`` (a cross-encoder's
 ``BertForSequenceClassification``; ``roberta.`` for RoBERTa and XLM-RoBERTa). The pooler and classifier stay
 frozen.
+
+ModernBERT fuses q, k and v into one module (``attn.Wqkv``) and gate and up into another (``mlp.Wi``), and a PEFT
+adapter on a fused module has one ``A`` for all of its parts and one ``B`` with their rows stacked. So here the parts
+of a fused module share one ``A``, stored with the first part (``layers.N.attention.q.weight.lora_a`` serves k and v,
+``layers.N.mlp.gate.weight.lora_a`` serves up), each part has its own rows of ``B``, the shared ``A``'s gradient is
+the sum of its parts' in tensor order (k, q, v; gate, up), and the parts are adapted all together or not at all:
+``base_model.model.layers.0.attn.Wqkv.lora_A.weight`` (an embedder's ``ModernBertModel``) or
+``base_model.model.model.layers.0.mlp.Wi.lora_B.weight`` (a ``ModernBertForSequenceClassification``).
 """
 
 from __future__ import annotations
@@ -76,6 +84,12 @@ ENCODER_MODULES = {
     "down": "output.dense",
 }
 _BY_ENCODER_MODULE = {module: target for target, module in ENCODER_MODULES.items()}
+# ModernBERT: its modules and the parts of the fused ones, in row order (the first part keeps the shared A).
+MODERNBERT_MODULES = {"attn.Wqkv": ("q", "k", "v"), "attn.Wo": ("o",), "mlp.Wi": ("gate", "up"), "mlp.Wo": ("down",)}
+_MODERNBERT_MODULE_OF = {part: module for module, parts in MODERNBERT_MODULES.items() for part in parts}
+_MODERNBERT_PEFT_KEY = re.compile(
+    r"^(?:base_model\.model\.)?(model\.)?layers\.(\d+)\.(attn\.Wqkv|attn\.Wo|mlp\.Wi|mlp\.Wo)\.lora_([AB])\.weight$"
+)
 _ENCODER_PEFT_KEY = re.compile(
     r"^(?:base_model\.model\.)?((?:bert|roberta)\.)?encoder\.layer\.(\d+)\.(\w+\.\w+(?:\.\w+)?)\.lora_([AB])\.weight$"
 )
@@ -121,10 +135,34 @@ class LoraConfig:
         return cls(int(values["rank"]), float(values["alpha"]), tuple(values["targets"]), bool(values.get("rslora")))
 
 
+def _modernbert_targets(lora: LoraConfig) -> list[str]:
+    targets = list(lora.targets)
+    for parts in MODERNBERT_MODULES.values():
+        chosen = [t for t in parts if t in targets]
+        if chosen and len(chosen) != len(parts):
+            fused = "q, k and v" if parts[0] == "q" else "gate and up"
+            raise AdapterError(f"ModernBERT fuses {fused} into one module; adapt all of them or none")
+    return targets
+
+
+def shared_a(config: TransformerConfig, name: str) -> str:
+    """The ``A`` adapter that the adapted weight ``name`` uses: its own ``<name>.lora_a``, or for the k, v and up
+    parts of ModernBERT's fused modules the first part's (q's, gate's)."""
+    if config.family == "modernbert":
+        layer, weight = name.split(".", 2)[1:]
+        target = next(t for t, w in _WEIGHT_NAMES.items() if w == weight)
+        first = MODERNBERT_MODULES[_MODERNBERT_MODULE_OF[target]][0]
+        return f"layers.{layer}.{_WEIGHT_NAMES[first]}.lora_a"
+    return name + ".lora_a"
+
+
 def target_weights(config: TransformerConfig, lora: LoraConfig) -> list[str]:
     """The adapted weight names, in tensor order. In a mixture-of-experts layer ``gate``, ``up`` and ``down`` adapt
     every expert's projection (``layers.N.mlp.experts.E.gate.weight``) and the shared expert's
     (``layers.N.mlp.shared.gate.weight``); the router and the shared expert's gate are never adapted."""
+    if config.family == "modernbert":
+        targets = _modernbert_targets(lora)
+        return tensor_order([f"layers.{i}.{_WEIGHT_NAMES[t]}" for i in range(config.layers) for t in targets])
     if config.is_encoder:
         targets = [t for t in lora.targets if t in ENCODER_MODULES]
         if not targets:
@@ -143,12 +181,14 @@ def target_weights(config: TransformerConfig, lora: LoraConfig) -> list[str]:
 
 
 def adapter_shapes(config: TransformerConfig, lora: LoraConfig) -> dict[str, tuple[int, int]]:
-    """``<weight>.lora_a`` (``[rank, in]``) and ``<weight>.lora_b`` (``[out, rank]``) for every adapted weight."""
+    """``<weight>.lora_a`` (``[rank, in]``) and ``<weight>.lora_b`` (``[out, rank]``) for every adapted weight (one
+    ``A`` per fused ModernBERT module, :func:`shared_a`)."""
     shapes = config.tensor_shapes()
     result = {}
     for name in target_weights(config, lora):
         out_features, in_features = shapes[name]
-        result[name + ".lora_a"] = (lora.rank, in_features)
+        if shared_a(config, name) == name + ".lora_a":
+            result[name + ".lora_a"] = (lora.rank, in_features)
         result[name + ".lora_b"] = (out_features, lora.rank)
     return result
 
@@ -179,7 +219,7 @@ def merged_weights(
     """``weights`` with every adapted weight replaced by its merge; the other tensors are passed through."""
     merged = dict(weights)
     for name in target_weights(config, lora):
-        merged[name] = merge(weights[name], adapters[name + ".lora_a"], adapters[name + ".lora_b"], lora.scale)
+        merged[name] = merge(weights[name], adapters[shared_a(config, name)], adapters[name + ".lora_b"], lora.scale)
     return merged
 
 
@@ -194,14 +234,15 @@ class LazyMergedWeights(Mapping[str, np.ndarray]):
         adapters: Mapping[str, np.ndarray],
         lora: LoraConfig,
     ) -> None:
-        self._weights, self._adapters, self._lora = weights, adapters, lora
+        self._weights, self._adapters, self._lora, self._config = weights, adapters, lora, config
         self._targets = set(target_weights(config, lora))
 
     def __getitem__(self, name: str) -> np.ndarray:
         weight = self._weights[name]
         if name not in self._targets:
             return weight
-        return merge(weight, self._adapters[name + ".lora_a"], self._adapters[name + ".lora_b"], self._lora.scale)
+        a = self._adapters[shared_a(self._config, name)]
+        return merge(weight, a, self._adapters[name + ".lora_b"], self._lora.scale)
 
     def __iter__(self):  # type: ignore[no-untyped-def]
         return iter(self._weights)
@@ -297,6 +338,10 @@ def peft_key(name: str, config: TransformerConfig | None = None) -> str:
     layer, rest = name.split(".", 2)[1:]
     weight, kind = rest.rsplit(".", 1)
     suffix = f"lora_{kind[-1].upper()}.weight"
+    if config is not None and config.family == "modernbert":
+        target = next(t for t, w in _WEIGHT_NAMES.items() if w == weight)
+        prefix = "model." if config.classifier_labels else ""
+        return f"base_model.model.{prefix}layers.{layer}.{_MODERNBERT_MODULE_OF[target]}.{suffix}"
     if config is not None and config.is_encoder:
         target = next(t for t, w in _WEIGHT_NAMES.items() if w == weight)
         return f"base_model.model.{_encoder_prefix(config)}encoder.layer.{layer}.{ENCODER_MODULES[target]}.{suffix}"
@@ -327,6 +372,9 @@ def _encoder_prefix(config: TransformerConfig) -> str:
 def target_modules(config: TransformerConfig | None, lora: LoraConfig) -> list[str] | str:
     """PEFT's ``target_modules``: the module names of the adapted layers. For an encoder, a regular expression over
     the full module names (``dense`` alone would also adapt the pooler and the classifier)."""
+    if config is not None and config.family == "modernbert":
+        modules = [m for m, parts in MODERNBERT_MODULES.items() if parts[0] in _modernbert_targets(lora)]
+        return rf".*layers\.\d+\.(?:{'|'.join(m.replace('.', chr(92) + '.') for m in modules)})"
     if config is not None and config.is_encoder:
         names = "|".join(ENCODER_MODULES[t].replace(".", r"\.") for t in lora.targets if t in ENCODER_MODULES)
         return rf".*encoder\.layer\.\d+\.(?:{names})"
@@ -370,9 +418,20 @@ def write_peft(
     }
     text = json.dumps(settings, indent=2, sort_keys=True) + "\n"
     (directory / ADAPTER_CONFIG).write_text(text, encoding="utf-8", newline="\n")
-    write_safetensors(
-        directory / ADAPTER_WEIGHTS, {peft_key(name, config): adapters[name] for name in adapters}, {"format": "pt"}
-    )
+    tensors: dict[str, np.ndarray] = {}
+    for name in adapters:
+        key = peft_key(name, config)
+        if config is not None and config.family == "modernbert" and name.endswith(".lora_b"):
+            # a fused module's B: its parts' rows stacked in order
+            layer, weight = name.split(".", 2)[1], name.split(".", 2)[2].removesuffix(".lora_b")
+            target = next(t for t, w in _WEIGHT_NAMES.items() if w == weight)
+            parts = MODERNBERT_MODULES[_MODERNBERT_MODULE_OF[target]]
+            if target != parts[0]:
+                continue
+            tensors[key] = np.concatenate([adapters[f"layers.{layer}.{_WEIGHT_NAMES[p]}.lora_b"] for p in parts])
+        else:
+            tensors[key] = adapters[name]
+    write_safetensors(directory / ADAPTER_WEIGHTS, tensors, {"format": "pt"})
 
 
 def _task_type(config: TransformerConfig | None) -> str:
@@ -402,6 +461,14 @@ def _unsupported(config: Mapping[str, Any]) -> str | None:
 def _adapter_name(key: str, config: TransformerConfig, directory: Path) -> tuple[str, str]:
     """(our adapter name, its target) for the PEFT tensor ``key``; refuses modules this engine does not adapt and
     ones that do not fit ``config``."""
+    if config.family == "modernbert":
+        modern = _MODERNBERT_PEFT_KEY.match(key)
+        if modern is None or bool(modern.group(1)) != bool(config.classifier_labels):
+            raise AdapterError(f"{directory}: unsupported adapter tensor {key!r}")
+        if not 0 <= int(modern.group(2)) < config.layers:
+            raise AdapterError(f"{directory}: tensor {key!r} does not fit the model")
+        first = MODERNBERT_MODULES[modern.group(3)][0]
+        return f"layers.{int(modern.group(2))}.{_WEIGHT_NAMES[first]}.lora_{modern.group(4).lower()}", first
     if config.is_encoder:
         found = _ENCODER_PEFT_KEY.match(key)
         target = _BY_ENCODER_MODULE.get(found.group(3)) if found else None
@@ -470,8 +537,20 @@ def read_peft(directory: str | Path, config: TransformerConfig) -> tuple[LoraCon
         name, target = _adapter_name(tensor.name, config, directory)
         if tensor.dtype not in ("F32", "F16", "BF16"):
             raise AdapterError(f"{directory}: tensor {tensor.name!r} has dtype {tensor.dtype}")
+        values = tensor.to_float32()
+        if config.family == "modernbert":
+            parts = MODERNBERT_MODULES[_MODERNBERT_MODULE_OF[target]]
+            targets.update(parts)
+            if name.endswith(".lora_b"):  # a fused module's B splits into its parts' rows
+                if values.shape[0] % len(parts):
+                    raise AdapterError(f"{directory}: {tensor.name} has shape {tuple(values.shape)}")
+                rows = values.shape[0] // len(parts)
+                layer = name.split(".")[1]
+                for index, part in enumerate(parts):
+                    adapters[f"layers.{layer}.{_WEIGHT_NAMES[part]}.lora_b"] = values[index * rows : (index + 1) * rows]
+                continue
         targets.add(target)
-        adapters[name] = tensor.to_float32()
+        adapters[name] = values
     if not adapters:
         raise AdapterError(f"{directory}: the adapter has no LoRA tensors")
     lora = LoraConfig(rank, float(settings.get("lora_alpha", 8)), tuple(targets), bool(settings.get("use_rslora")))

@@ -536,8 +536,13 @@ def attention(
     offset = kv_len - q_len if q_offset is None else q_offset
     out = np.zeros((q_len, q_heads, vv.shape[2]), dtype=F32)
     for t in range(q_len):
-        end = min(offset + t + 1, kv_len) if causal else kv_len
-        first = end - window if window and end > window else 0
+        if causal:
+            end = min(offset + t + 1, kv_len)
+            first = end - window if window and end > window else 0
+        elif window:  # bidirectional local attention: keys closer than the window on either side
+            first, end = max(offset + t + 1 - window, 0), min(offset + t + window, kv_len)
+        else:
+            first, end = 0, kv_len
         count = end - first
         if count <= 0:
             continue
@@ -1367,8 +1372,8 @@ class ReferenceTransformer:
 
 
 class ReferenceEncoder:
-    """The BERT encoder of :class:`etalii_dllm.encoder.Encoder` and the embedding the engine pools from it, step
-    for step, on this module's kernels."""
+    """The BERT and ModernBERT encoders of :class:`etalii_dllm.encoder.Encoder` and the embedding the engine pools
+    from them, step for step, on this module's kernels."""
 
     def __init__(
         self,
@@ -1394,8 +1399,10 @@ class ReferenceEncoder:
     def hidden_states(self, tokens: Sequence[int], types: Sequence[int] | None = None) -> np.ndarray:
         """``LayerNorm((word + type) + position)`` (positions past the padding id for RoBERTa), then per layer
         ``h = LayerNorm(h + o(attention))`` (every key visible) and ``h = LayerNorm(h + down(gelu(up(h))))``;
-        additions in float32. ``types`` default to 0."""
+        additions in float32. ``types`` default to 0. ModernBERT: :meth:`_modernbert_states`."""
         config, w = self.config, self.w
+        if config.family == "modernbert":
+            return self._modernbert_states(tokens)
         count = len(tokens)
         kinds = np.zeros(count, dtype=np.int64) if types is None else np.asarray(types, dtype=np.int64)
         words = w["token_embedding.weight"][np.asarray(tokens, dtype=np.int64)]
@@ -1425,9 +1432,56 @@ class ReferenceEncoder:
             x = norm(x + project(activated, p + "mlp.down"), p + "mlp_norm")
         return x
 
+    def _modernbert_states(self, tokens: Sequence[int]) -> np.ndarray:
+        """``h = LayerNorm(word)``, then per layer ``h = h + o(attention(rope(q(x)), rope(k(x)), v(x)))`` with
+        ``x = LayerNorm(h)`` (the first layer: ``x = h``), attention over every key on a global layer and the keys
+        closer than the window on a local one, rotated with the layer's base, and ``h = h + down(gelu(gate(x)) *
+        up(x))`` with ``x = LayerNorm(h)``; bias-free norms add no bias; the final norm last."""
+        config, w = self.config, self.w
+        count = len(tokens)
+        zeros = np.zeros(config.hidden_size, dtype=F32)
+
+        def norm(values: np.ndarray, name: str) -> np.ndarray:
+            return layer_norm(values, w[name + ".weight"], zeros, config.rms_norm_eps)
+
+        positions = np.arange(count, dtype=np.int64)
+        global_freq = rope_inv_freq(config.head_dim, config.rope_theta)
+        local_theta = config.rope_theta if config.local_rope_theta is None else config.local_rope_theta
+        local_freq = rope_inv_freq(config.head_dim, local_theta)
+        h = norm(w["token_embedding.weight"][np.asarray(tokens, dtype=np.int64)], "embedding_norm")
+        shape = (count, config.heads, config.head_dim)
+        for layer in range(config.layers):
+            p = f"layers.{layer}."
+            x = norm(h, p + "attention_norm") if layer else h
+            window = config.window(layer)
+            freq = global_freq if window is None else local_freq
+            q = rope(linear(x, w[p + "attention.q.weight"]).reshape(shape), positions, freq)
+            k = rope(linear(x, w[p + "attention.k.weight"]).reshape(shape), positions, freq)
+            v = linear(x, w[p + "attention.v.weight"]).reshape(shape)
+            attended = attention(q, k, v, scale=config.attention_scale, causal=False, window=window)
+            h = h + linear(attended.reshape(count, -1), w[p + "attention.o.weight"])
+            x = norm(h, p + "mlp_norm")
+            gated = gelu(linear(x, w[p + "mlp.gate.weight"])) * linear(x, w[p + "mlp.up.weight"])
+            h = h + linear(gated, w[p + "mlp.down.weight"])
+        return norm(h, "final_norm")
+
     def classify(self, tokens: Sequence[int], types: Sequence[int] | None = None) -> np.ndarray:
-        """A cross-encoder's logits: ``classifier(tanh(pooler(h[0])))``, tanh in double rounded to float32."""
+        """A cross-encoder's logits: BERT's ``classifier(tanh(pooler(h[0])))``, tanh in double rounded to float32;
+        ModernBERT's ``classifier(LayerNorm(gelu(pooler(pooled))))`` on the first state or the mean of every state
+        (summed ascending in double, rounded, divided in float32)."""
         w = self.w
+        if self.config.family == "modernbert":
+            states = self.hidden_states(tokens)
+            pooled = states[:1]
+            if self.config.classifier_pooling == "mean":
+                total = np.zeros(states.shape[1], dtype=F64)
+                for row in states:
+                    total += row
+                pooled = (_round(total) / F32(len(states)))[None]
+            head = gelu(linear(pooled, w["pooler.weight"]))
+            zeros = np.zeros(self.config.hidden_size, dtype=F32)
+            normed = layer_norm(head, w["pooler_norm.weight"], zeros, self.config.rms_norm_eps)
+            return linear(normed, w["classifier.weight"], w["classifier.bias"]).reshape(-1)
         first = self.hidden_states(tokens, types)[:1]
         pooled = _round(tanh(linear(first, w["pooler.weight"], w["pooler.bias"])))
         return linear(pooled, w["classifier.weight"], w["classifier.bias"]).reshape(-1)

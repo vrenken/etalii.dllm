@@ -271,7 +271,7 @@ def test_header_without_architecture_is_refused(model_path):
         ({"heads": 3, "kv_heads": 2}, "heads must be a multiple of kv_heads"),
         ({"head_dim": 3}, "head_dim must be even"),
         ({"activation": "relu"}, "unsupported activation 'relu'"),
-        ({"activation": "gelu"}, "are for bert only"),
+        ({"activation": "gelu"}, r"are for bert \(and modernbert\) encoders only"),
     ],
 )
 def test_invalid_architectures_are_refused(change, message):

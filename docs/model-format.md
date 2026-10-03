@@ -30,7 +30,7 @@ same source twice gives byte-identical files (`tests/test_import.py`).
 | Key | Content |
 | --- | --- |
 | `format`, `format_version` | `"dllm"`, `1` |
-| `architecture` | `TransformerConfig` (`src/etalii_dllm/architecture.py`): family (`bert`, `gemma2`, `gemma3`, `granite`, `llama`, `mistral`, `olmo2`, `phi3`, `qwen2`, `qwen3` and the mixtures of experts), sizes, heads and KV heads, head dim, context length, RMSNorm epsilon, RoPE theta and scaling, attention bias, `qk_norm` (written only when true), `qk_norm_scope` (`head` or `all`), `norm_placement` (`pre`, `post` or `sandwich`) and `norm_unit_offset` (RMSNorms scale by `1 + weight`, Gemma), each written only when not the default, `activation` (`silu` or `gelu_tanh`; `gelu` for BERT), `type_vocabulary_size`, `classifier_labels` and `padding_index` (BERT only; `classifier_labels` for cross-encoders and `padding_index` for RoBERTa/XLM-RoBERTa positions, each written only when set), `local_rope_theta` (the RoPE base of the sliding-window layers, Gemma 3; written only when set), the Granite multipliers `embedding_multiplier`, `attention_multiplier` (the attention score scale), `residual_multiplier` and `logits_scaling` (each written only when not the plain value), tied embeddings, BOS/EOS token ids, `sliding_window` and `sliding_window_layers` (written only when set; no layer list means every layer), `rotary_dim` (partial rotary, written only when set), `attention_softcap` and `logits_softcap` (Gemma 2 soft-capping, written only when set) |
+| `architecture` | `TransformerConfig` (`src/etalii_dllm/architecture.py`): family (`bert`, `modernbert`, `gemma2`, `gemma3`, `granite`, `llama`, `mistral`, `olmo2`, `phi3`, `qwen2`, `qwen3` and the mixtures of experts), sizes, heads and KV heads, head dim, context length, RMSNorm epsilon, RoPE theta and scaling, attention bias, `qk_norm` (written only when true), `qk_norm_scope` (`head` or `all`), `norm_placement` (`pre`, `post` or `sandwich`) and `norm_unit_offset` (RMSNorms scale by `1 + weight`, Gemma), each written only when not the default, `activation` (`silu` or `gelu_tanh`; `gelu` for the encoders), `type_vocabulary_size`, `classifier_labels` and `padding_index` (BERT only; `classifier_labels` for cross-encoders and `padding_index` for RoBERTa/XLM-RoBERTa positions, each written only when set), `classifier_pooling` (`cls` or `mean`, a ModernBERT cross-encoder's pooling; written only when set), `local_rope_theta` (the RoPE base of the sliding-window layers, Gemma 3; written only when set), the Granite multipliers `embedding_multiplier`, `attention_multiplier` (the attention score scale), `residual_multiplier` and `logits_scaling` (each written only when not the plain value), tied embeddings, BOS/EOS token ids, `sliding_window` and `sliding_window_layers` (written only when set; no layer list means every layer), `rotary_dim` (partial rotary, written only when set), `attention_softcap` and `logits_softcap` (Gemma 2 soft-capping, written only when set) |
 | `tensors` | List of `{name, shape, dtype: "F32", offset, nbytes, source_dtype}`; `source_dtype` is what the source stored (`BF16`, `F16`, `Q8_0`, ...) |
 | `fingerprint` | SHA-256 of the data section (hex) |
 | `source` | `format` (`safetensors`/`gguf`), `repository` and `revision` (the commit hash for `hf:` imports), `url` when known, and `files`: path, SHA-256 and size of every source file read |
@@ -76,6 +76,13 @@ cross-encoder (`classifier_labels` set) adds `pooler.{weight,bias}` `[hidden, hi
 RoBERTa and XLM-RoBERTa encoders set `padding_index` (their padding token's id, written only when set): position
 ids count from past it, and `position_embedding.weight` has `context_length + padding_index + 1` rows.
 
+A ModernBERT encoder (family `modernbert`) has `token_embedding.weight`, `embedding_norm.weight`, per layer
+`layers.N.attention_norm.weight` (not on layer 0), `layers.N.attention.{q,k,v,o}.weight`, `layers.N.mlp_norm.weight`,
+`layers.N.mlp.{gate,up}.weight` `[intermediate, hidden]` and `layers.N.mlp.down.weight`, and `final_norm.weight`: no
+biases, no position or type tables. Its local layers are `sliding_window_layers` with `sliding_window` (the keys
+closer than it on either side) and `local_rope_theta`. A cross-encoder adds `pooler.weight` `[hidden, hidden]`,
+`pooler_norm.weight` and `classifier.{weight,bias}`.
+
 Rotary embeddings pair dimensions `(i, i + head_dim/2)` as in Hugging Face checkpoints. llama.cpp permutes the Q and
 K rows of Llama models to pair `(2i, 2i+1)`; the importer undoes that reindexing, so an F32/F16/BF16 GGUF and the
 original checkpoint import to the same bytes and the same fingerprint.
@@ -94,7 +101,15 @@ original checkpoint import to the same bytes and the same fingerprint.
   and the pre-training heads are dropped, old `gamma`/`beta` LayerNorm names are read as `weight`/`bias`,
   `layer_norm_eps` becomes the norm epsilon and `max_position_embeddings` the context length. `hidden_act` `gelu`
   (or `gelu_new`/`gelu_pytorch_tanh`, the tanh form) is supported; relative position embeddings are refused.
-- **Fail loudly.** Unknown tensors, unsupported families (anything but BERT, Gemma 2, Gemma 3 text, Granite, Granite MoE, Llama, Mistral, Mixtral, OLMo 2, OLMoE, Phi-3, Qwen2, Qwen2-MoE, Qwen3 and Qwen3-MoE),
+- **ModernBERT.** `model_type` `modernbert` (`ModernBertModel`, a masked-LM checkpoint or
+  `ModernBertForSequenceClassification`, with or without the `model.` prefix; gte-modernbert-base,
+  modernbert-embed-base, gte-reranker-modernbert-base) maps to family `modernbert`. `attn.Wqkv` splits into the q, k
+  and v rows and `mlp.Wi` into the gate (the activated first half) and up rows; the masked-LM head is dropped. The
+  global and local layers come from `global_attn_every_n_layers` (or transformers v5's `layer_types`), their RoPE
+  bases from `global_rope_theta` and `local_rope_theta` (or `rope_parameters`), the window from `local_attention`
+  (`sliding_window = local_attention // 2 + 1`). Biases (`norm_bias`, `attention_bias`, `mlp_bias`,
+  `classifier_bias`), RoPE scaling and a classifier activation that differs from the MLP's are refused.
+- **Fail loudly.** Unknown tensors, unsupported families (anything but BERT, ModernBERT, Gemma 2, Gemma 3 text, Granite, Granite MoE, Llama, Mistral, Mixtral, OLMo 2, OLMoE, Phi-3, Qwen2, Qwen2-MoE, Qwen3 and Qwen3-MoE),
   activations other than SiLU and GELU (tanh), MLP biases and RoPE scaling other than `linear`/`llama3`/`longrope`/`yarn` stop the import. Sliding-window
   attention comes from `sliding_window` (Mistral: every layer; Qwen2/Qwen3 with `use_sliding_window`: the layers from
   `max_window_layers` on; a `layer_types` list names them explicitly); a window at least as long as the context is

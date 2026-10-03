@@ -1,4 +1,5 @@
-"""Reverse-mode gradients of BERT-style encoders (``etalii_dllm.encoder``): embedders and cross-encoders (#352).
+"""Reverse-mode gradients of BERT and ModernBERT encoders (``etalii_dllm.encoder``): embedders and cross-encoders
+(#352, #360).
 
 The forward pass is the encoder's own, kernel for kernel (``Encoder.hidden_states`` and ``Encoder.classify``), so
 its states and logits equal the served model's bit for bit. The backward pass runs the gradient kernels of
@@ -13,6 +14,13 @@ projections reading one state) their float32 contributions are added elementwise
 Sentence vectors for training embedders are pooled as the model is (:func:`pool`: ``mean``, ``cls`` or
 ``last_token``) and L2-normalised, so the dot product of two of them is their cosine similarity. Nothing depends on
 threads, batch composition or dictionary order: the gradients of an input are the same bits on every run.
+
+ModernBERT's backward pass runs the same kernels through its own forward pass: the rotary embedding's gradient is
+the inverse rotation (``rope(..., inverse=True)``, its exact transpose), local layers' ``attention_backward`` sees the
+window the forward pass saw, the gated MLP's gradient is ``gelu_backward(gate, dy * up)`` and ``dy * gelu(gate)``,
+and bias-free LayerNorms keep only their weight gradients. Every row of its word embedding trains: inputs are
+never padded, so transformers' ``padding_idx`` (which freezes the padding token's row) only differs for a text that
+spells out the padding token itself.
 """
 
 from __future__ import annotations
@@ -37,6 +45,8 @@ from etalii_dllm.numerics import (
     layer_norm_backward,
     linear,
     linear_backward,
+    rope,
+    rope_inv_freq,
     softcap,
     softcap_backward,
     sum_squares,
@@ -74,6 +84,11 @@ class EncoderGradients:
         if not config.is_encoder:
             raise ValueError(f"{config.family} is a decoder; its gradients are DecoderGradients")
         self.config = config
+        self.modern = config.family == "modernbert"
+        if self.modern:
+            local = config.rope_theta if config.local_rope_theta is None else config.local_rope_theta
+            self.inv_freq = rope_inv_freq(config.head_dim, config.rope_theta)
+            self.local_inv_freq = rope_inv_freq(config.head_dim, local)
 
     # Forward
 
@@ -89,6 +104,8 @@ class EncoderGradients:
         if min(tokens) < 0 or max(tokens) >= config.vocabulary_size:
             raise ValueError("token id out of range")
         ids = np.asarray(tokens, dtype=np.int64)
+        if self.modern:
+            return self._modern_encode(weights, ids)
         kinds = np.zeros(len(ids), dtype=np.int64) if types is None else np.asarray(types, dtype=np.int64)
         if kinds.shape != ids.shape or kinds.min() < 0 or kinds.max() >= config.type_vocabulary_size:
             raise ValueError(f"token types must be one per token, below {config.type_vocabulary_size}")
@@ -126,10 +143,23 @@ class EncoderGradients:
     def classify(
         self, weights: Mapping[str, npt.ArrayLike], tokens: Sequence[int], types: Sequence[int] | None = None
     ) -> EncoderPass:
-        """:meth:`encode` with ``Encoder.classify``'s head: ``classifier(tanh(pooler(h[0])))``."""
+        """:meth:`encode` with ``Encoder.classify``'s head: ``classifier(tanh(pooler(h[0])))``, or ModernBERT's
+        ``classifier(LayerNorm(gelu(pooler(pooled))))``."""
         if not self.config.classifier_labels:
             raise ValueError("the model has no classification head")
         result = self.encode(weights, tokens, types)
+        if self.modern:
+            states = result.states
+            first = np.ascontiguousarray(states[:1])
+            if self.config.classifier_pooling == "mean":
+                ones = np.ones((1, len(states)), dtype=np.float32)
+                first = linear(ones, np.ascontiguousarray(states.T)).numpy() / np.float32(len(states))
+            before = self._linear(weights, first, "pooler")
+            activated = gelu(before).numpy()
+            pooled = self._norm(weights, activated, "pooler_norm")
+            logits = self._linear(weights, pooled, "classifier").reshape(-1)
+            result.head = {"first": first, "before": before, "act": activated, "pooled": pooled, "logits": logits}
+            return result
         first = np.ascontiguousarray(result.states[:1])
         before = self._linear(weights, first, "pooler")
         pooled = softcap(before, 1.0).numpy()
@@ -155,7 +185,20 @@ class EncoderGradients:
         dh = np.zeros_like(result.states) if dstates is None else np.array(dstates, dtype=np.float32)
         if dh.shape != result.states.shape:
             raise ValueError(f"dstates must have the states' shape {result.states.shape}")
-        if dlogits is not None:
+        if dlogits is not None and self.modern:
+            head = result.head
+            if head is None:
+                raise ValueError("dlogits needs a pass that ran the classification head (classify)")
+            dlog = np.asarray(dlogits, dtype=np.float32).reshape(1, -1)
+            dpooled = self._linear_backward(weights, head["pooled"], dlog, grads, "classifier")
+            dact = self._norm_backward(weights, head["act"], dpooled, grads, "pooler_norm")
+            dbefore = gelu_backward(head["before"], dact).numpy()
+            dfirst = self._linear_backward(weights, head["first"], dbefore, grads, "pooler")[0]
+            if self.config.classifier_pooling == "mean":
+                dh = dh + dfirst / np.float32(n)
+            else:
+                dh[0] = dh[0] + dfirst
+        elif dlogits is not None:
             head = result.head
             if head is None:
                 raise ValueError("dlogits needs a pass that ran the classification head (classify)")
@@ -170,6 +213,8 @@ class EncoderGradients:
             )
             grads["pooler.bias"] = _value(db)
             dh[0] = dh[0] + dfirst.numpy()[0]
+        if self.modern:
+            return self._modern_gradients(weights, result, dh, grads)
         heads, head_dim = config.heads, config.head_dim
         for i in reversed(range(config.layers)):
             p = f"layers.{i}."
@@ -214,10 +259,105 @@ class EncoderGradients:
                 result_grads[name][config.padding_index] = 0.0
         return result_grads
 
+    # ModernBERT
+
+    def _modern_encode(self, weights: Mapping[str, npt.ArrayLike], ids: npt.NDArray[np.int64]) -> EncoderPass:
+        """``Encoder._modernbert_states``, keeping the activations."""
+        config = self.config
+        n, heads, head_dim = len(ids), config.heads, config.head_dim
+        positions = np.arange(n, dtype=np.int64)
+        embedded = np.ascontiguousarray(_array(weights["token_embedding.weight"])[ids])
+        h = self._norm(weights, embedded, "embedding_norm")
+        result = EncoderPass(ids, np.zeros(n, dtype=np.int64), positions, h, embedded)
+        for i in range(config.layers):
+            p = f"layers.{i}."
+            x = self._norm(weights, h, p + "attention_norm") if i else h
+            inv_freq = self.inv_freq if config.window(i) is None else self.local_inv_freq
+            q = rope(self._linear(weights, x, p + "attention.q").reshape(n, heads, head_dim), positions, inv_freq)
+            k = rope(self._linear(weights, x, p + "attention.k").reshape(n, heads, head_dim), positions, inv_freq)
+            q, k = q.numpy(), k.numpy()
+            v = self._linear(weights, x, p + "attention.v").reshape(n, heads, head_dim)
+            window = config.window(i)
+            mixed = attention(q, k, v, scale=config.attention_scale, causal=False, window=window).numpy().reshape(n, -1)
+            a = h + self._linear(weights, mixed, p + "attention.o")
+            x2 = self._norm(weights, a, p + "mlp_norm")
+            gate = self._linear(weights, x2, p + "mlp.gate")
+            up = self._linear(weights, x2, p + "mlp.up")
+            activated = gelu(gate).numpy()
+            gated = activated * up
+            result.layers.append(
+                {
+                    "h": h,
+                    "x": x,
+                    "q": q,
+                    "k": k,
+                    "v": v,
+                    "mixed": mixed,
+                    "a": a,
+                    "x2": x2,
+                    "gate": gate,
+                    "up": up,
+                    "act": activated,
+                    "gated": gated,
+                }
+            )
+            h = a + self._linear(weights, gated, p + "mlp.down")
+        result.layers.append({"h": h})
+        result.states = self._norm(weights, h, "final_norm")
+        return result
+
+    def _modern_gradients(
+        self,
+        weights: Mapping[str, npt.ArrayLike],
+        result: EncoderPass,
+        dstates: FloatArray,
+        grads: dict[str, FloatArray],
+    ) -> dict[str, FloatArray]:
+        config = self.config
+        n, heads, head_dim = len(result.tokens), config.heads, config.head_dim
+        dh = self._norm_backward(weights, result.layers[-1]["h"], dstates, grads, "final_norm")
+        for i in reversed(range(config.layers)):
+            p = f"layers.{i}."
+            saved = result.layers[i]
+            # h_out = a + down(gelu(gate(x2)) * up(x2)), x2 = LN(a)
+            dgated = self._linear_backward(weights, saved["gated"], dh, grads, p + "mlp.down")
+            dgate = gelu_backward(saved["gate"], dgated * saved["up"]).numpy()
+            dup = dgated * saved["act"]
+            dx2 = self._linear_backward(weights, saved["x2"], dgate, grads, p + "mlp.gate")
+            dx2 = dx2 + self._linear_backward(weights, saved["x2"], dup, grads, p + "mlp.up")
+            da = dh + self._norm_backward(weights, saved["a"], dx2, grads, p + "mlp_norm")
+            # a = h + o(attention(rope(q(x)), rope(k(x)), v(x))), x = LN(h) (h itself on the first layer)
+            dmixed = self._linear_backward(weights, saved["mixed"], da, grads, p + "attention.o")
+            window = config.window(i)
+            dq, dk, dv = attention_backward(
+                saved["q"],
+                saved["k"],
+                saved["v"],
+                dmixed.reshape(n, heads, head_dim),
+                scale=config.attention_scale,
+                causal=False,
+                q_offset=0,
+                window=window,
+            )
+            inv_freq = self.inv_freq if window is None else self.local_inv_freq
+            dq = rope(dq, result.positions, inv_freq, inverse=True)
+            dk = rope(dk, result.positions, inv_freq, inverse=True)
+            dx = None
+            for name, d in (("q", dq), ("k", dk), ("v", dv)):
+                part = self._linear_backward(
+                    weights, saved["x"], d.numpy().reshape(n, -1), grads, p + "attention." + name
+                )
+                dx = part if dx is None else dx + part
+            assert dx is not None
+            dh = da + (self._norm_backward(weights, saved["h"], dx, grads, p + "attention_norm") if i else dx)
+        dembedded = self._norm_backward(weights, result.embedded, dh, grads, "embedding_norm")
+        grads["token_embedding.weight"] = embedding_backward(dembedded, result.tokens, config.vocabulary_size).numpy()
+        return {name: np.array(values, dtype=np.float32) for name, values in grads.items()}
+
     # Pieces
 
     def _linear(self, weights: Mapping[str, npt.ArrayLike], x: np.ndarray, name: str) -> FloatArray:
-        return linear(x, weights[name + ".weight"], weights[name + ".bias"]).numpy()
+        return linear(x, weights[name + ".weight"], weights.get(name + ".bias")).numpy()
 
     def _linear_backward(
         self,
@@ -227,13 +367,18 @@ class EncoderGradients:
         grads: dict[str, FloatArray],
         name: str,
     ) -> FloatArray:
-        dx, grads[name + ".weight"], db = linear_backward(x, weights[name + ".weight"], dy, with_bias=True)
-        grads[name + ".bias"] = _value(db)
+        biased = name + ".bias" in weights
+        dx, grads[name + ".weight"], db = linear_backward(x, weights[name + ".weight"], dy, with_bias=biased)
+        if biased:
+            grads[name + ".bias"] = _value(db)
         return dx.numpy()
 
     def _norm(self, weights: Mapping[str, npt.ArrayLike], x: np.ndarray, name: str) -> FloatArray:
-        eps = self.config.rms_norm_eps
-        return layer_norm(x, weights[name + ".weight"], weights[name + ".bias"], eps).numpy()
+        eps, weight = self.config.rms_norm_eps, weights[name + ".weight"]
+        bias = weights.get(name + ".bias")
+        return layer_norm(
+            x, weight, np.zeros(len(_array(weight)), dtype=np.float32) if bias is None else bias, eps
+        ).numpy()
 
     def _norm_backward(
         self,
@@ -244,7 +389,9 @@ class EncoderGradients:
         name: str,
     ) -> FloatArray:
         dx, dw, db = layer_norm_backward(x, weights[name + ".weight"], dy, self.config.rms_norm_eps)
-        grads[name + ".weight"], grads[name + ".bias"] = dw.numpy(), db.numpy()
+        grads[name + ".weight"] = dw.numpy()
+        if name + ".bias" in weights:
+            grads[name + ".bias"] = db.numpy()
         return dx.numpy()
 
 

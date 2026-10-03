@@ -205,8 +205,8 @@ dllm finetune olmoe.dllm --data my-data.jsonl --lora-rank 8 -o olmoe-lora.dllm -
 
 ## Encoders
 
-Embedders (all-MiniLM, bge, all-distilroberta, multilingual MiniLM) and cross-encoders (ms-marco-MiniLM, mmarco)
-fine-tune with the same command, the same options, checkpoints, receipts and LoRA. The objective follows the model:
+Embedders (all-MiniLM, bge, all-distilroberta, multilingual MiniLM, ModernBERT) and cross-encoders (ms-marco-MiniLM,
+mmarco, gte-reranker-modernbert) fine-tune with the same command, the same options, checkpoints, receipts and LoRA. The objective follows the model:
 
 ```bash
 # an embedder: anchors and the texts that belong with them (and optionally a hard negative)
@@ -241,11 +241,18 @@ dllm finetune ms-marco.dllm --data labels.jsonl -o ms-marco-tuned.dllm --steps 1
   `linear_backward` with biases and `embedding_backward` for the word, token-type and position tables. As in
   `transformers`, whose embeddings have a `padding_idx`, RoBERTa's padding row gets no gradient. Each text's
   gradients are computed on their own and summed elementwise in batch order (anchor, positive, negative).
+  ModernBERT's backward pass adds the rotary backward (`rope` with the inverse rotation, global or local base),
+  `attention_backward` with the bidirectional local window and the gated MLP; its norms have no bias. Its padding
+  row is not frozen (inputs are never padded, so it only moves through weight decay).
 - **LoRA** adapts the attention projections and the MLP (`q k v o up down`; `gate` is skipped) under
   `transformers`' names, `encoder.layer.N.attention.self.query` and so on, with `bert.` or `roberta.` in front for a
   cross-encoder. PEFT's `target_modules` is a regular expression over those names, so the pooler and the classifier
   (both `dense` layers too) stay frozen, as in a LoRA run here. `--adapter` and `dllm import ADAPTER --base` apply an
-  encoder adapter like a decoder one.
+  encoder adapter like a decoder one. ModernBERT's modules are fused, so its adapters are too: `attn.Wqkv`,
+  `attn.Wo`, `mlp.Wi` and `mlp.Wo` (`layers.N.attn.Wqkv`, with `model.` in front for a cross-encoder). Inside, q, k
+  and v share one `lora_A` (stored with q) and each has its own rows of `lora_B`, as do the MLP's gate and up halves,
+  so the merged delta is exactly PEFT's `B @ A` on the fused weight; the shared `A`'s gradient sums its parts' in
+  tensor order. q, k and v (and gate and up) are adapted together or not at all.
 - **Outputs** keep the model's pooling or classifier settings, so the tuned model serves embeddings, reranking and
   `dllm embed` as before; the receipt counts `"examples"`. [`dllm export`](model-building.md#encoders) writes it back
   to Hugging Face and sentence-transformers, or to GGUF.
@@ -253,7 +260,8 @@ dllm finetune ms-marco.dllm --data labels.jsonl -o ms-marco-tuned.dllm --steps 1
 `tests/test_encoder_training.py` checks the new kernels and the encoder's gradients against `transformers`' autograd
 and finite differences (BERT and XLM-RoBERTa with padding inside the sequence), both losses and their gradients
 against the `torch` formulas sentence-transformers uses, bit-exact resumption, receipts, golden hashes of a short run
-of each objective, and LoRA adapters whose names are `transformers`' own modules.
+of each objective, and LoRA adapters whose names are `transformers`' own modules. `tests/test_modernbert.py` does the
+same for ModernBERT, its fused adapters included.
 
 ## What makes it reproducible
 

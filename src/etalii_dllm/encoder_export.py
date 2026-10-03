@@ -1,11 +1,14 @@
-"""Encoders back to the ecosystem (issue #355): ``dllm export`` of BERT, RoBERTa and XLM-RoBERTa models.
+"""Encoders back to the ecosystem (issues #355, #360): ``dllm export`` of BERT, RoBERTa, XLM-RoBERTa and ModernBERT
+models.
 
 - ``safetensors``: a Hugging Face model directory that transformers and sentence-transformers load: ``config.json``
   (``BertModel``, ``RobertaModel`` or ``XLMRobertaModel``, or their ``...ForSequenceClassification`` with the
   labels), the tokenizer files, one float32 ``model.safetensors`` under transformers' names, and for an embedder the
   sentence-transformers modules (``modules.json``, the pooling module, ``Normalize`` when the model normalises, the
   prompts and ``max_seq_length``). The ``config.json`` is checked by importing it again, so a model that would not
-  come back identical is refused.
+  come back identical is refused. ModernBERT is written as ``ModernBertModel`` or
+  ``ModernBertForSequenceClassification``: q, k and v stacked back into ``attn.Wqkv``, gate and up into ``mlp.Wi``,
+  the head as ``head.dense`` and ``head.norm``, and the special token ids read from the tokenizer.
 - ``gguf``: one float32 GGUF v3 file in llama.cpp's ``bert`` layout (``token_embd``, ``token_types``,
   ``position_embd``, ``token_embd_norm``, ``blk.N.attn_q`` ... ``layer_output_norm``; a cross-encoder's pooler and
   classifier as ``cls`` and ``cls.output``, so the head computes ``cls.output(tanh(cls(h[0])))``), the pooling type,
@@ -13,7 +16,7 @@
   ``▁``). ``tokenizer.huggingface.json`` keeps the exact tokenizer, and ``dllm.*`` keys the exact LayerNorm epsilon
   and the pooling or classifier settings, so importing the file gives back the same model; llama.cpp ignores them.
   BERT models with WordPiece vocabularies and the exact GELU only: RoBERTa's positions start past the padding token,
-  which llama.cpp's layout cuts from the position table.
+  which llama.cpp's layout cuts from the position table. ModernBERT is not written to GGUF.
 
 Both writers are deterministic (canonical JSON, a fixed tensor order, no clock values).
 """
@@ -83,6 +86,8 @@ def _tokenizer_model(model: ModelFile) -> str:
 
 
 def _model_type(model: ModelFile) -> str:
+    if model.config.family == "modernbert":
+        return "modernbert"
     if model.config.padding_index is None:
         return "bert"
     return "xlm-roberta" if _tokenizer_model(model) == "Unigram" else "roberta"
@@ -97,6 +102,8 @@ def hf_encoder_config(model: ModelFile) -> dict[str, Any]:
 
     config = model.config
     model_type = _model_type(model)
+    if model_type == "modernbert":
+        return _modernbert_config(model)
     stem = {"bert": "Bert", "roberta": "Roberta", "xlm-roberta": "XLMRoberta"}[model_type]
     positions = config.context_length + (0 if config.padding_index is None else config.padding_index + 1)
     document: dict[str, Any] = {
@@ -133,6 +140,128 @@ def hf_encoder_config(model: ModelFile) -> dict[str, Any]:
     if again != config:
         raise _export_error("the model cannot be described exactly as a Hugging Face config.json")
     return document
+
+
+def _special_id(model: ModelFile, role: str, default: int) -> int:
+    """The id of the tokenizer's ``role`` token (``pad``, ``cls``, ``sep``), from its ``tokenizer_config.json``."""
+    tokenizer = model.tokenizer or {}
+    text = (tokenizer.get("tokenizer_config") or {}).get(f"{role}_token")
+    if isinstance(text, dict):
+        text = text.get("content")
+    for added in (tokenizer.get("tokenizer_json") or {}).get("added_tokens") or []:
+        if added.get("content") == text:
+            return int(added["id"])
+    return default
+
+
+def _modernbert_config(model: ModelFile) -> dict[str, Any]:
+    from etalii_dllm.importing.importer import ModelImportError, modernbert_config
+
+    config = model.config
+    local = set(range(config.layers)) if config.sliding_window_layers is None else set(config.sliding_window_layers)
+    if config.sliding_window is None:
+        local = set()
+    types = ["sliding_attention" if i in local else "full_attention" for i in range(config.layers)]
+    every = next(
+        (n for n in range(1, config.layers + 1) if all((i % n == 0) == (i not in local) for i in range(config.layers))),
+        None,
+    )
+    activation = _ACTIVATIONS[config.activation].replace("gelu_new", "gelu_pytorch_tanh")
+    document: dict[str, Any] = {
+        "architectures": [f"ModernBert{'ForSequenceClassification' if config.classifier_labels else 'Model'}"],
+        "model_type": "modernbert",
+        "vocab_size": config.vocabulary_size,
+        "hidden_size": config.hidden_size,
+        "num_hidden_layers": config.layers,
+        "num_attention_heads": config.heads,
+        "intermediate_size": config.intermediate_size,
+        "max_position_embeddings": config.context_length,
+        "norm_eps": config.rms_norm_eps,
+        "norm_bias": False,
+        "attention_bias": False,
+        "mlp_bias": False,
+        "classifier_bias": False,
+        "hidden_activation": activation,
+        "classifier_activation": activation,
+        "classifier_pooling": config.classifier_pooling or "cls",
+        "global_rope_theta": config.rope_theta,
+        "local_rope_theta": config.local_rope_theta if config.local_rope_theta is not None else config.rope_theta,
+        "local_attention": 2 * (config.sliding_window - 1) if config.sliding_window else 128,
+        "pad_token_id": _special_id(model, "pad", 0),
+        "cls_token_id": _special_id(model, "cls", 0),
+        "sep_token_id": _special_id(model, "sep", 0),
+        "bos_token_id": _special_id(model, "cls", 0),
+        "eos_token_id": _special_id(model, "sep", 0),
+        "torch_dtype": "float32",
+    }
+    if every is not None:
+        document["global_attn_every_n_layers"] = every
+    else:
+        document["layer_types"] = types
+    if config.classifier_labels:
+        labels = list((model.classifier or {}).get("labels") or [f"LABEL_{i}" for i in range(config.classifier_labels)])
+        document["id2label"] = {str(i): label for i, label in enumerate(labels)}
+        document["label2id"] = {label: i for i, label in enumerate(labels)}
+        activation_fn = str((model.classifier or {}).get("activation", "none"))
+        document["sentence_transformers"] = {"activation_fn": _CROSS_ENCODER_ACTIVATIONS[activation_fn]}
+    try:
+        again = modernbert_config(document)
+    except ModelImportError as error:
+        raise _export_error(f"the model cannot be described as a Hugging Face config.json: {error}") from None
+    import dataclasses
+
+    again = dataclasses.replace(
+        again,
+        classifier_labels=config.classifier_labels,
+        classifier_pooling=again.classifier_pooling if config.classifier_labels else None,
+    )
+    if again != config:
+        raise _export_error("the model cannot be described exactly as a Hugging Face config.json")
+    return document
+
+
+_MODERNBERT_EXPORT_NAMES = {
+    "attention_norm": "attn_norm",
+    "attention.o": "attn.Wo",
+    "mlp_norm": "mlp_norm",
+    "mlp.down": "mlp.Wo",
+}
+
+
+def modernbert_tensors(model: ModelFile) -> dict[str, np.ndarray]:
+    """transformers' ModernBERT tensors: the fused ``Wqkv`` and ``Wi`` stacked from their parts, under ``model.``
+    with the head and classifier for a sequence-classification model."""
+    config = model.config
+    prefix = "model." if config.classifier_labels else ""
+    names = {
+        "token_embedding.weight": "embeddings.tok_embeddings.weight",
+        "embedding_norm.weight": "embeddings.norm.weight",
+        "final_norm.weight": "final_norm.weight",
+    }
+    tensors: dict[str, np.ndarray] = {}
+    for name in model.tensors:
+        if name in ("pooler.weight", "pooler_norm.weight", "classifier.weight", "classifier.bias"):
+            head = {"pooler.weight": "head.dense.weight", "pooler_norm.weight": "head.norm.weight"}
+            tensors[head.get(name, name)] = _rows(model, name)
+            continue
+        if name in names:
+            tensors[prefix + names[name]] = _rows(model, name)
+            continue
+        match = _LAYER.match(name)
+        if match is None:
+            raise _export_error(f"unexpected encoder tensor {name!r}")
+        layer, stem = match.group(1), match.group(2)
+        if stem in _MODERNBERT_EXPORT_NAMES:
+            tensors[f"{prefix}layers.{layer}.{_MODERNBERT_EXPORT_NAMES[stem]}.weight"] = _rows(model, name)
+        elif stem == "attention.q":
+            parts = [_rows(model, f"layers.{layer}.attention.{p}.weight") for p in ("q", "k", "v")]
+            tensors[f"{prefix}layers.{layer}.attn.Wqkv.weight"] = np.concatenate(parts)
+        elif stem == "mlp.gate":
+            parts = [_rows(model, f"layers.{layer}.mlp.{p}.weight") for p in ("gate", "up")]
+            tensors[f"{prefix}layers.{layer}.mlp.Wi.weight"] = np.concatenate(parts)
+        elif stem not in ("attention.k", "attention.v", "mlp.up"):
+            raise _export_error(f"unexpected encoder tensor {name!r}")
+    return tensors
 
 
 def hf_encoder_tensor_name(name: str, config: TransformerConfig, model_type: str) -> str:
@@ -213,7 +342,10 @@ def export_encoder_safetensors(model: ModelFile, directory: str | Path) -> list[
         (directory / name).write_bytes(data)
     if "modules.json" in files and any(m["path"] == "2_Normalize" for m in json.loads(files["modules.json"])):
         (directory / "2_Normalize").mkdir(exist_ok=True)
-    tensors = {hf_encoder_tensor_name(name, config, model_type): model.tensors[name] for name in model.tensors}
+    if model_type == "modernbert":
+        tensors = modernbert_tensors(model)
+    else:
+        tensors = {hf_encoder_tensor_name(name, config, model_type): model.tensors[name] for name in model.tensors}
     write_safetensors(directory / "model.safetensors", tensors)
     return [directory / name for name in sorted([*files, "model.safetensors"])]
 
@@ -307,6 +439,8 @@ def _value(kind: int, value: Any) -> bytes:
 def export_encoder_gguf(model: ModelFile, path: str | Path) -> Path:
     """Writes the BERT encoder ``model`` as a float32 GGUF v3 file in llama.cpp's ``bert`` layout."""
     config = model.config
+    if config.family == "modernbert":
+        raise _export_error("ModernBERT encoders cannot be written to GGUF here; export them to safetensors")
     if config.padding_index is not None:
         raise _export_error(
             "RoBERTa and XLM-RoBERTa encoders cannot be written to GGUF exactly (llama.cpp cuts the position rows "

@@ -618,9 +618,9 @@ def _embedding_settings(directory: Path) -> dict[str, Any] | None:
 _BERT_ACTIVATIONS = {"gelu": "gelu", "gelu_new": "gelu_tanh", "gelu_pytorch_tanh": "gelu_tanh"}
 
 
-_ENCODER_MODEL_TYPES = ("bert", "roberta", "xlm-roberta")
+_ENCODER_MODEL_TYPES = ("bert", "modernbert", "roberta", "xlm-roberta")
 """The ``model_type`` values imported as encoders: RoBERTa and XLM-RoBERTa are BERT with positions counted from
-past the padding token."""
+past the padding token; ModernBERT is an encoder family of its own."""
 
 
 def bert_config(config: dict[str, Any], context_length: int | None = None) -> TransformerConfig:
@@ -664,6 +664,134 @@ def bert_config(config: dict[str, Any], context_length: int | None = None) -> Tr
         )
     except ValueError as error:
         raise ModelImportError(str(error)) from error
+
+
+def modernbert_config(config: dict[str, Any], context_length: int | None = None) -> TransformerConfig:
+    """Maps a Hugging Face ModernBERT ``config.json`` to our description (family ``modernbert``). Both the original
+    keys (``global_rope_theta``, ``local_rope_theta``, ``global_attn_every_n_layers``) and transformers v5's
+    (``layer_types``, ``rope_parameters``) are read. ``local_attention`` is the width of the local layers' window:
+    a position sees the keys at most ``local_attention // 2`` away, so ``sliding_window`` (the keys closer than it)
+    is ``local_attention // 2 + 1``."""
+    for key in ("norm_bias", "attention_bias", "mlp_bias", "classifier_bias"):
+        if config.get(key):
+            raise ModelImportError(f"ModernBERT with {key} is not supported")
+    hf_activation = str(config.get("hidden_activation", "gelu"))
+    if hf_activation not in _BERT_ACTIVATIONS:
+        raise ModelImportError(f"activation {hf_activation!r} is not supported")
+    head_activation = str(config.get("classifier_activation", hf_activation))
+    if _BERT_ACTIVATIONS.get(head_activation) != _BERT_ACTIVATIONS[hf_activation]:
+        raise ModelImportError("a classifier activation that differs from the MLP's is not supported")
+    if context_length is not None:
+        raise ModelImportError("--context-length is for decoders")
+    heads, hidden, layers = (
+        int(config["num_attention_heads"]),
+        int(config["hidden_size"]),
+        int(config["num_hidden_layers"]),
+    )
+    if hidden % heads or (hidden // heads) % 2:
+        raise ModelImportError("hidden_size must be a multiple of num_attention_heads with an even head_dim")
+    types = config.get("layer_types")
+    if types is None:
+        every = int(config.get("global_attn_every_n_layers", 1))
+        types = ["full_attention" if i % every == 0 else "sliding_attention" for i in range(layers)]
+    if len(types) != layers or set(types) - {"full_attention", "sliding_attention"}:
+        raise ModelImportError(f"unsupported layer_types {types}")
+    rope = config.get("rope_parameters") or {}
+    thetas: dict[str, float] = {}
+    for kind, key, default in (
+        ("full_attention", "global_rope_theta", 160000.0),
+        ("sliding_attention", "local_rope_theta", 10000.0),
+    ):
+        parameters = rope.get(kind) or {}
+        if parameters.get("rope_type", "default") != "default" or config.get("rope_scaling"):
+            raise ModelImportError("ModernBERT with RoPE scaling is not supported")
+        thetas[kind] = float(parameters.get("rope_theta", config.get(key, default)))
+    local = [i for i, kind in enumerate(types) if kind == "sliding_attention"]
+    pooling = str(config.get("classifier_pooling", "cls"))
+    if pooling not in ("cls", "mean"):
+        raise ModelImportError(f"classifier pooling {pooling!r} is not supported (cls or mean)")
+    try:
+        return TransformerConfig(
+            family="modernbert",
+            vocabulary_size=int(config["vocab_size"]),
+            hidden_size=hidden,
+            intermediate_size=int(config["intermediate_size"]),
+            layers=layers,
+            heads=heads,
+            kv_heads=heads,
+            head_dim=hidden // heads,
+            context_length=int(config.get("max_position_embeddings", 8192)),
+            rms_norm_eps=float(config.get("norm_eps", 1e-5)),
+            rope_theta=thetas["full_attention"],
+            activation=_BERT_ACTIVATIONS[hf_activation],
+            tie_word_embeddings=True,
+            sliding_window=int(config.get("local_attention", 128)) // 2 + 1 if local else None,
+            sliding_window_layers=tuple(local) if local and len(local) < layers else None,
+            local_rope_theta=thetas["sliding_attention"] if local else None,
+            classifier_pooling=pooling,
+        )
+    except ValueError as error:
+        raise ModelImportError(str(error)) from error
+
+
+_MODERNBERT_LAYER = re.compile(r"^layers\.(\d+)\.(.+)\.weight$")
+_MODERNBERT_LAYER_NAMES = {
+    "attn_norm": "attention_norm",
+    "attn.Wo": "attention.o",
+    "mlp_norm": "mlp_norm",
+    "mlp.Wo": "mlp.down",
+}
+_MODERNBERT_GLOBAL_NAMES = {
+    "embeddings.tok_embeddings.weight": "token_embedding.weight",
+    "embeddings.norm.weight": "embedding_norm.weight",
+    "final_norm.weight": "final_norm.weight",
+}
+_MODERNBERT_HEAD_NAMES = {
+    "head.dense.weight": "pooler.weight",
+    "head.norm.weight": "pooler_norm.weight",
+    "classifier.weight": "classifier.weight",
+    "classifier.bias": "classifier.bias",
+}
+
+
+def _modernbert_tensors(tensor: Any, config: TransformerConfig, classifier: bool) -> dict[str, TensorSource]:
+    """Our tensors for one ModernBERT checkpoint tensor (with or without the ``model.`` prefix): ``Wqkv`` splits
+    into the q, k and v rows, ``Wi`` into the activated (gate) half and the multiplied (up) half; the head and the
+    classifier only for a ``classifier``, and nothing for the masked-language-model head."""
+    name = tensor.name.removeprefix("model.")
+    if tensor.dtype not in ("F32", "F16", "BF16"):
+        raise ModelImportError(f"tensor {tensor.name!r} has dtype {tensor.dtype}; only F32, F16 and BF16 import")
+    source = TensorSource(tensor.shape, tensor.to_float32, tensor.dtype)
+    if name in _MODERNBERT_HEAD_NAMES:
+        return {_MODERNBERT_HEAD_NAMES[name]: source} if classifier else {}
+    if name.startswith(("head.", "decoder.")):
+        return {}
+    if name in _MODERNBERT_GLOBAL_NAMES:
+        return {_MODERNBERT_GLOBAL_NAMES[name]: source}
+    match = _MODERNBERT_LAYER.match(name)
+    if match is None:
+        raise ModelImportError(f"unexpected tensor {tensor.name!r}")
+    p, kind = f"layers.{int(match.group(1))}.", match.group(2)
+    if kind in _MODERNBERT_LAYER_NAMES:
+        return {f"{p}{_MODERNBERT_LAYER_NAMES[kind]}.weight": source}
+    if kind == "attn.Wqkv":
+        rows = config.heads * config.head_dim
+        parts = ["attention.q.weight", "attention.k.weight", "attention.v.weight"]
+    elif kind == "mlp.Wi":
+        rows = config.intermediate_size
+        parts = ["mlp.gate.weight", "mlp.up.weight"]
+    else:
+        raise ModelImportError(f"unexpected tensor {tensor.name!r}")
+    if len(tensor.shape) != 2 or tensor.shape[0] != rows * len(parts):
+        raise ModelImportError(f"tensor {tensor.name!r} has shape {tensor.shape}, which does not split as expected")
+    split: dict[str, TensorSource] = {}
+    for index, part in enumerate(parts):
+
+        def load(start: int = index * rows) -> np.ndarray:
+            return np.ascontiguousarray(tensor.to_float32()[start : start + rows])
+
+        split[p + part] = TensorSource((rows, tensor.shape[1]), load, tensor.dtype)
+    return split
 
 
 _BERT_LAYER = re.compile(r"^encoder\.layer\.(\d+)\.(.+)\.(weight|bias|gamma|beta)$")
@@ -748,9 +876,10 @@ def _classifier_settings(directory: Path, raw_config: dict[str, Any], positions:
 def _convert_bert(directory: Path, raw_config: dict[str, Any], context_length: int | None) -> _Converted:
     """A BERT, RoBERTa or XLM-RoBERTa checkpoint (the bare model or a pre-training model; sentence-transformers
     encoders such as all-MiniLM-L6-v2, bge-small-en-v1.5, all-distilroberta-v1 and
-    paraphrase-multilingual-MiniLM-L12-v2), or a sequence-classification cross-encoder such as
-    ms-marco-MiniLM-L6-v2."""
-    config = bert_config(raw_config, context_length)
+    paraphrase-multilingual-MiniLM-L12-v2), a ModernBERT one (gte-modernbert-base, modernbert-embed-base), or a
+    sequence-classification cross-encoder such as ms-marco-MiniLM-L6-v2 or gte-reranker-modernbert-base."""
+    modern = raw_config.get("model_type") == "modernbert"
+    config = (modernbert_config if modern else bert_config)(raw_config, context_length)
     checkpoint = open_checkpoint(directory)
     classifier: dict[str, Any] | None = None
     pooling: dict[str, Any] | None = None
@@ -770,8 +899,13 @@ def _convert_bert(directory: Path, raw_config: dict[str, Any], context_length: i
         }
         limit = _read_json(directory / "sentence_bert_config.json").get("max_seq_length")
         pooling["max_tokens"] = min(int(limit), config.context_length) if limit else config.context_length
+    if modern and classifier is None:
+        config = dataclasses.replace(config, classifier_pooling=None)
     tensors: dict[str, TensorSource] = {}
     for tensor in checkpoint.values():
+        if modern:
+            tensors.update(_modernbert_tensors(tensor, config, classifier is not None))
+            continue
         name = _bert_name(tensor.name, classifier is not None)
         if name is None:
             continue
