@@ -151,8 +151,9 @@ flowchart TB
 Tools are presented to the model through its chat template when the template supports them (Qwen2.5 does), and
 otherwise as Hermes-style instructions in the system message. `tools.detect_format` reads the call format from the
 template (`DllmEngine.tool_format`): Hermes `<tool_call>{"name": ..., "arguments": ...}</tool_call>`, Llama 3's bare
-`{"name": ..., "parameters": ...}`, Mistral's `[TOOL_CALLS][...]` or Granite's `<|tool_call|>[...]`; the engine keeps
-that format's special marker token visible in the decoded text. The grammar guarantees that a call names an offered
+`{"name": ..., "parameters": ...}`, Mistral's `[TOOL_CALLS][...]`, Granite's `<|tool_call|>[...]`, Qwen3-Coder's
+XML parameters, DeepSeek's marker-delimited calls or a Python call list; the engine keeps that format's special
+marker tokens visible in the decoded text. The grammar guarantees that a call names an offered
 tool and that its arguments are valid under the tool's JSON schema. While tools are offered, the stream only
 releases text that is certainly part of the answer, never the beginning of a call.
 

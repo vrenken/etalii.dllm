@@ -1244,6 +1244,28 @@ class Grammar:
         return cls((), alternatives=flat)
 
     @classmethod
+    def one_of(cls, grammars: Sequence[Grammar]) -> Grammar:
+        """Any one of ``grammars``, as one part that can go in a :meth:`sequence` (unlike :meth:`either`)."""
+        rule = _Rule("one of several parts")
+        rule.alternatives = tuple(alt._items for g in grammars for alt in (g._alternatives or (g,)))
+        return cls([_value(rule)])
+
+    @classmethod
+    def optional(cls, grammar: Grammar) -> Grammar:
+        """``grammar`` or nothing."""
+        return cls.one_of([grammar, cls([])])
+
+    @classmethod
+    def repeat(cls, grammar: Grammar, separator: Grammar | None = None) -> Grammar:
+        """One or more of ``grammar``, ``separator`` between them."""
+        if grammar._alternatives:
+            grammar = cls.one_of([grammar])
+        loop = _Rule("a repetition")
+        lead = separator._items if separator is not None else ()
+        loop.alternatives = ((*lead, *grammar._items, _value(loop)), ())
+        return cls([*grammar._items, _value(loop)])
+
+    @classmethod
     def choice(cls, grammars: Sequence[Grammar]) -> Grammar:
         """One of several JSON-schema grammars (each a single JSON value)."""
         nodes = []

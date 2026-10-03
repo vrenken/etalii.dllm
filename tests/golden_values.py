@@ -382,3 +382,7 @@ COMPLETE_GRAMMAR_FINGERPRINTS = {
     "left-recursive": "50083b142a412be4b5a900dc116a0091b7933255eda1e62a7611768d6dce1ef3",
     "lazy": "13654449b14366b79c7bd4300599b11c661c10ebb1c065a99883011dc0e7b25a",
 }
+
+# Phase 52: the SHA-256 of the calls a random bigram model makes in the xml, deepseek and pythonic formats
+# (test_more_tool_formats.py).
+MORE_TOOL_FORMAT_CALLS = "4d90f8d241a325da69aff67e9f35022319f4562477b706ecbd3d3097044f8d6d"
