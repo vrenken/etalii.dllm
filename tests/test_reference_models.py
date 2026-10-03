@@ -35,6 +35,7 @@ from etalii_dllm.importing import import_model
 from etalii_dllm.modelfile import file_sha256
 from etalii_dllm.numerics import fingerprint
 from etalii_dllm.sampling import GREEDY, SamplingOptions
+from etalii_dllm.tools import detect_format
 from etalii_dllm.transformer import Transformer
 
 ENVIRONMENT_VARIABLE = "DLLM_REFERENCE_MODELS"
@@ -98,6 +99,7 @@ EMBEDDING_MODELS = {
     ),
 }
 _ALL_MODELS = {**REFERENCE_MODELS, **EMBEDDING_MODELS}
+TOOL_FORMATS = {"qwen2.5": "hermes", "qwen2.5-1.5b": "hermes", "qwen3": "hermes", "llama3.2": "llama3"}
 
 EMBEDDING_TEXTS = [
     ("query", "What is the capital of France?"),
@@ -343,6 +345,8 @@ def test_chat_template_matches_reference(model_key):
             CHAT, tools=[WEATHER_TOOL], tokenize=False, add_generation_prompt=True, **variables
         )
         assert ours.render(CHAT, tools=[WEATHER_TOOL], **variables) == expected
+    if model_key in TOOL_FORMATS:  # the tool call format detected from the real template
+        assert detect_format(source).name == TOOL_FORMATS[model_key]
 
 
 # ---------------------------------------------------------------------------------------------------------------

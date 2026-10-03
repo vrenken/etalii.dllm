@@ -855,6 +855,19 @@ follows SentencePiece's own merge order, checked token for token against the `se
 SentencePiece-style tokenizer also export back to GGUF. Details:
 [model building](model-building.md#sentencepiece-models-through-gguf).
 
+## 44. Tool calls in the model's own format
+
+```bash
+dllm import Llama-3.2-1B-Instruct -o llama.dllm
+dllm --model llama.dllm chat "What is 12 * 34?" --tool calculator
+```
+
+Models now call tools in the format they were trained on, read from their own chat template: Hermes
+`<tool_call>` blocks (Qwen), Llama 3's bare JSON calls, Mistral's `[TOOL_CALLS]` lists and Granite's
+`<|tool_call|>` lists. The constraint and the parser follow the same format, so a Llama, Mistral or Granite model
+writes the calls it knows instead of imitating Hermes, and every API returns the same tool calls as before. Details:
+[tools](api.md#tools).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
@@ -874,8 +887,9 @@ SentencePiece-style tokenizer also export back to GGUF. Details:
   six models side by side with transformers and llama.cpp: generation is faster than transformers and somewhat
   slower than llama.cpp, prompt reading is about 0.8× transformers and 0.6× llama.cpp, and only EtAlii.Dllm gives the same
   bits whatever the batch, thread count or concurrent load. `python benchmarks/benchmark.py` reproduces it.
-- Tool calling works best with models trained for it (Qwen2.5-Instruct uses the same `<tool_call>` format the
-  engine asks for). SmolLM2-135M does not know tools, so expect clumsy calls from it; constrained decoding still
+- Tool calling works best with models trained for it; the engine uses each model's own format (Hermes, Llama 3,
+  Mistral or Granite, section 44). Other formats (Phi-4-mini, DeepSeek, Command R) fall back to the Hermes
+  format. SmolLM2-135M does not know tools, so expect clumsy calls from it; constrained decoding still
   guarantees that every call names a real tool with arguments that fit its schema.
 - Structured output supports the common JSON-schema keywords, including `pattern`, `format`, string lengths, number
   bounds, `multipleOf`, property counts, tuples, property names, unique choices, `allOf`, `not`, `if`/`then`/`else`,

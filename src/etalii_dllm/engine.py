@@ -40,7 +40,7 @@ from etalii_dllm.serving import Auditor, Inflight, ResponseCache, SharedGenerati
 from etalii_dllm.signing import Signer
 from etalii_dllm.speculative import DEFAULT_DRAFT_TOKENS
 from etalii_dllm.tokenization import ByteTokenizer, Tokenizer
-from etalii_dllm.tools import AUTO, Tool, ToolChoice
+from etalii_dllm.tools import AUTO, Tool, ToolChoice, ToolFormat
 
 DEFAULT_MODEL_SEED = 42
 MAX_CHOICES = 16
@@ -334,15 +334,48 @@ class DllmEngine:
         if retriever is not None:
             joined = hashlib.sha256(f"{system_fingerprint}|{retriever.fingerprint}".encode()).hexdigest()
             system_fingerprint = "fp_" + joined[:12]
+        self._base_tokenizer = tokenizer
         self.tokenizer = tokenizer
         self.system_fingerprint = system_fingerprint
         """Identifies the exact weights and engine; equal fingerprints plus equal requests give equal output."""
+        self._trie: TokenTrie | None = None
+        self._tool_format = tooling.HERMES
         self.chat_template = chat_template
         cache_dir = str(prompt_cache_dir) if prompt_cache_dir else None
-        self._generator = Generator(model, tokenizer, stop_tokens, prompt_cache, speculate, draft_model, cache_dir)
-        self._trie: TokenTrie | None = None
+        self._generator = Generator(model, self.tokenizer, stop_tokens, prompt_cache, speculate, draft_model, cache_dir)
         self.inflight = Inflight()
         """Generations still being read: identical requests share one (:mod:`etalii_dllm.serving`)."""
+
+    @property
+    def chat_template(self) -> ChatTemplate | None:
+        """The model's own chat template; setting it also sets :attr:`tool_format` to the template's format."""
+        return self._chat_template
+
+    @chat_template.setter
+    def chat_template(self, template: ChatTemplate | None) -> None:
+        self._chat_template = template
+        self.tool_format = tooling.detect_format(template.source if template is not None else None)
+
+    @property
+    def tool_format(self) -> ToolFormat:
+        """How the model writes tool calls (:mod:`etalii_dllm.tools`), detected from its chat template."""
+        return self._tool_format
+
+    @tool_format.setter
+    def tool_format(self, fmt: ToolFormat | str) -> None:
+        fmt = tooling.tool_format(fmt) if isinstance(fmt, str) else fmt
+        self._tool_format = fmt
+        # Special marker tokens ([TOOL_CALLS], <|tool_call|>) must appear in the generated text, where the
+        # constraint and the parser look for them.
+        tokenizer = self._base_tokenizer
+        showing = getattr(tokenizer, "showing", None)
+        if showing is not None and fmt.open:
+            tokenizer = showing([fmt.open])
+        self.tokenizer = tokenizer
+        self._trie = None
+        generator = getattr(self, "_generator", None)
+        if generator is not None:
+            generator.tokenizer = tokenizer
 
     @staticmethod
     def from_model_file(
@@ -608,8 +641,9 @@ class DllmEngine:
         self, messages: Iterable[ChatMessage], tools: Sequence[Tool] = (), *, thinking: bool | None = None
     ) -> str:
         """The prompt for a conversation: the model's own chat template when it has one. Tools are presented by
-        the template when it supports them, else by Hermes instructions in the system message. A final assistant
-        message without tool calls is a prefill: the answer continues its text. ``thinking`` switches a thinking
+        the template when it supports them (calls in its own format, :attr:`tool_format`), else by Hermes
+        instructions in the system message. A final assistant message without tool calls is a prefill: the answer
+        continues its text. ``thinking`` switches a thinking
         model's ``<think>`` block on or off (the template's ``enable_thinking``; a template that ignores it gets an
         empty, closed block when thinking is off)."""
         messages = list(messages)
@@ -633,7 +667,9 @@ class DllmEngine:
         if self.chat_template is None:
             return render(messages)
         return self.chat_template.render(
-            tooling.template_messages(messages), tools=[t.to_openai() for t in tools] or None, **variables
+            tooling.template_messages(messages, self.tool_format),
+            tools=[t.to_openai() for t in tools] or None,
+            **variables,
         )
 
     def chat(self, messages: Iterable[ChatMessage], max_tokens: int, options: SamplingOptions) -> GenerationResult:
@@ -648,13 +684,15 @@ class DllmEngine:
     def _constraint(self, request: ChatRequest, tools: Sequence[Tool]) -> TokenConstraint | None:
         answer = request.response_format.grammar()
         choice = request.tool_choice
+        fmt = self.tool_format
         if tools and choice.mode in ("required", "named"):
-            return TokenConstraint(tooling.forced_grammar(tools, choice), self._token_trie())
+            return TokenConstraint(tooling.forced_grammar(tools, choice, fmt), self._token_trie())
         if tools and answer is not None:
-            either = Grammar.either([tooling.forced_grammar(tools, AUTO), answer])
+            either = Grammar.either([tooling.forced_grammar(tools, AUTO, fmt), answer])
             return TokenConstraint(either, self._token_trie())
         if tools:
-            return TokenConstraint(tooling.call_grammar(tools), self._token_trie(), trigger=TOOL_CALL_OPEN)
+            grammar, trigger = tooling.auto_grammar(tools, fmt)
+            return TokenConstraint(grammar, self._token_trie(), trigger=trigger)
         if answer is not None:
             return TokenConstraint(answer, self._token_trie())
         return None
@@ -825,7 +863,7 @@ class DllmEngine:
                 continue
             # With tools, only text that is certainly answer text is streamed: not leading or trailing whitespace,
             # nothing from a <tool_call> on, and nothing at all when the reply starts like a bare JSON call.
-            safe = _answer_prefix(text)
+            safe = _answer_prefix(text, self.tool_format.open)
             delta = safe[len(streamed) :]
             streamed = safe
             if delta or logprobs:
@@ -843,7 +881,7 @@ class DllmEngine:
             text = parts.answer
         finish_reason, calls, content = result.finish_reason, [], text
         if tools:
-            content, parsed = tooling.parse_calls(text, tools)
+            content, parsed = tooling.parse_calls(text, tools, self.tool_format)
             if not content.startswith(streamed):  # pragma: no cover - _answer_prefix guarantees this
                 raise AssertionError("streamed text is not a prefix of the answer")
             if content[len(streamed) :]:
@@ -972,17 +1010,19 @@ class DllmEngine:
         return Embedding(vector, len(tokens))
 
 
-def _answer_prefix(text: str) -> str:
-    """The part of generated text that is certainly answer text when tools are available (see ``_events``)."""
+def _answer_prefix(text: str, marker: str = TOOL_CALL_OPEN) -> str:
+    """The part of generated text that is certainly answer text when tools are available (see ``_events``):
+    nothing from the tool call ``marker`` on (none for bare-JSON formats), and nothing when the reply starts like a
+    JSON call."""
     stripped = text.lstrip()
     if stripped.startswith("{"):
         return ""
-    cut = stripped.find(TOOL_CALL_OPEN)
+    cut = stripped.find(marker) if marker else -1
     if cut >= 0:
         stripped = stripped[:cut]
     else:
-        for length in range(min(len(TOOL_CALL_OPEN) - 1, len(stripped)), 0, -1):
-            if stripped.endswith(TOOL_CALL_OPEN[:length]):
+        for length in range(min(len(marker) - 1, len(stripped)), 0, -1):
+            if stripped.endswith(marker[:length]):
                 stripped = stripped[:-length]
                 break
     return stripped.rstrip()

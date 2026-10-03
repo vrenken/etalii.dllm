@@ -365,3 +365,7 @@ QLORA_FINETUNE_FINGERPRINT = {
 SENTENCEPIECE_GGUF_TOKENS = "ae5ae2d61ca9f2412dd492f23a87cd1d368e1cffb66ea76dcc5cbb336282bc06"
 """Phase 47: SHA-256 of the token ids test_bpe.SAMPLES encode to with a SentencePiece tokenizer read from GGUF
 (test_sentencepiece_gguf.py)."""
+
+TOOL_FORMAT_CALLS = "3832e1250a9c25d6b82fe977f428e6581430a72d297f20e19a626fafd55a84d8"
+"""Phase 48: SHA-256 of the tool calls a placeholder model makes in the Granite, Hermes, Llama 3 and Mistral formats
+(test_tool_formats.py)."""

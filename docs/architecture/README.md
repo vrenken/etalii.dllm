@@ -137,7 +137,7 @@ AdamW from `grad.hpp`.
 | `engine.py` | `DllmEngine`, the facade every front end uses. `chat_stream` renders the prompt, sets up constrained decoding, runs the generator and turns its steps into events (`TextDelta`, `ToolCallEvent`, `Finished`); `chat_completion` collects the same events, so streamed and non-streamed answers are identical. Also embeddings and content-derived ids. |
 | `chat.py` | Chat messages and the fixed prompt format for models without a chat template. |
 | `chat_template.py` | Renders a model's own Jinja chat template the way `transformers` does. |
-| `tools.py` | Tool calling in the Hermes `<tool_call>` format: presenting tools, constraining and parsing calls. |
+| `tools.py` | Tool calling in each model's own format (Hermes `<tool_call>`, Llama 3 bare JSON, Mistral `[TOOL_CALLS]`, Granite `<\|tool_call\|>`), detected from the chat template: presenting tools, constraining and parsing calls, template-shaped call ids. |
 | `grammar.py` | Constrained decoding: byte-level JSON and regex grammars and the token masks they induce over a token trie; string patterns, formats, lengths and integer bounds compile to byte automata; the object and array automata track property counts, tuples, property names, pattern properties, unique choices and `contains` counts; `HealingConstraint` makes a healed answer start with the taken-back token's bytes. |
 | `numeric_automata.py` | Byte automata of decimal number texts under bounds and `multipleOf`, compared in exact decimal arithmetic, for schema constraints. |
 | `schema_algebra.py` | `allOf`, `not` and `if`/`then`/`else` rewritten exactly before compiling: schemas merged keyword by keyword and negated keyword by keyword. |
