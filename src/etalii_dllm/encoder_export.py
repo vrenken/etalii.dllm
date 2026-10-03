@@ -298,6 +298,9 @@ def export_encoder_safetensors(model: ModelFile, directory: str | Path) -> list[
     returns the files written, in name order."""
     from etalii_dllm.exporting import _tokenizer_files, write_safetensors
 
+    if model.config.family == "deberta":
+        raise _export_error("DeBERTa encoders cannot be exported yet")
+
     config = model.config
     model_type = _model_type(model)
     files: dict[str, bytes] = {"config.json": _json_bytes(hf_encoder_config(model))}
@@ -439,6 +442,8 @@ def _value(kind: int, value: Any) -> bytes:
 def export_encoder_gguf(model: ModelFile, path: str | Path) -> Path:
     """Writes the BERT encoder ``model`` as a float32 GGUF v3 file in llama.cpp's ``bert`` layout."""
     config = model.config
+    if config.family == "deberta":
+        raise _export_error("DeBERTa encoders cannot be exported yet")
     if config.family == "modernbert":
         raise _export_error("ModernBERT encoders cannot be written to GGUF here; export them to safetensors")
     if config.padding_index is not None:

@@ -257,6 +257,9 @@ dllm finetune ms-marco.dllm --data labels.jsonl -o ms-marco-tuned.dllm --steps 1
   `dllm embed` as before; the receipt counts `"examples"`. [`dllm export`](model-building.md#encoders) writes it back
   to Hugging Face and sentence-transformers, or to GGUF.
 
+DeBERTa encoders (Phase 60) are not fine-tuned yet: their disentangled attention has no backward pass here, so
+`dllm finetune` and LoRA refuse them with an error.
+
 `tests/test_encoder_training.py` checks the new kernels and the encoder's gradients against `transformers`' autograd
 and finite differences (BERT and XLM-RoBERTa with padding inside the sequence), both losses and their gradients
 against the `torch` formulas sentence-transformers uses, bit-exact resumption, receipts, golden hashes of a short run

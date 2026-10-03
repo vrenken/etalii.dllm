@@ -77,6 +77,23 @@ Checkpoints with biases, RoPE scaling or a head activation different from the ML
 is checked against `transformers` on tiny synthetic models with sequences longer than the local window
 (`tests/test_modernbert.py`), not yet on the real checkpoints in CI.
 
+#### DeBERTa encoders
+
+DeBERTa-v3 encoders (`model_type` `deberta-v2`, Phase 60) import too, as embedders or, more often, as
+cross-encoders (below). DeBERTa has no absolute positions: its attention adds two terms to every score, the query
+against the embedding of the key's relative distance and the key against the query's, over a shared table of
+relative distances that grow logarithmically beyond `position_buckets / 2`. The buckets are computed exactly as
+transformers computes them (in float32, with the portable logarithm), and the scores go through the
+`biased_attention` kernel, so the result has the same bits on every machine. Its Unigram tokenizer is read from
+`tokenizer.json`; a checkpoint that only has `spm.model` is refused at import with the one-line fix (save it again
+with `AutoTokenizer.from_pretrained(dir).save_pretrained(dir)`).
+
+Only DeBERTa-v3's layout imports (relative attention with shared position projections, both position terms, the
+relative LayerNorm, no absolute positions); the convolution layer of some large v2 checkpoints is refused. DeBERTa is
+checked against `transformers` on tiny synthetic models with sequences longer than the buckets' exact range
+(`tests/test_deberta.py`), not yet on the real checkpoints in CI. It does not fine-tune, take LoRA adapters or export
+yet.
+
 all-MiniLM-L6-v2, bge-small-en-v1.5, all-distilroberta-v1, paraphrase-multilingual-MiniLM-L12-v2 and
 [Qwen3-Embedding-0.6B](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B) (Apache 2.0) are checked against
 `transformers` in CI (`tests/test_reference_models.py`):
@@ -216,6 +233,18 @@ GELU, a LayerNorm and the classifier:
 ```bash
 dllm import hf:Alibaba-NLP/gte-reranker-modernbert-base -o gte-reranker.dllm
 dllm --model gte-reranker.dllm rerank "How many people live in Berlin?" "Berlin has 3.5 million people." "Berlin has museums."
+```
+
+DeBERTa-v3 cross-encoders such as
+[mxbai-rerank-xsmall-v1](https://huggingface.co/mixedbread-ai/mxbai-rerank-xsmall-v1) (71M parameters, Apache 2.0)
+rerank as well, and natural language inference models such as
+[nli-deberta-v3-small](https://huggingface.co/cross-encoder/nli-deberta-v3-small) (Apache 2.0) classify a pair into
+their three labels with `engine.classify`. Their head is the context pooler, `classifier(gelu(pooler(h[0])))`, and
+their pair is `[CLS] query [SEP] passage [SEP]`:
+
+```bash
+dllm import hf:mixedbread-ai/mxbai-rerank-xsmall-v1 -o mxbai-rerank.dllm
+dllm --model mxbai-rerank.dllm rerank "How many people live in Berlin?" "Berlin has 3.5 million people." "Berlin has museums."
 ```
 
 `POST /v1/rerank` (also `/rerank`) takes the request shape of Cohere and Jina: `query`, `documents` (strings or

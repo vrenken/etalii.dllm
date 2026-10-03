@@ -131,6 +131,12 @@ Keys beyond the causal horizon (or before the window) are never read, so the res
 KV cache is, and a
 prefill of `n` tokens gives exactly the same bits as decoding them one at a time (`tests/test_kernels.py`).
 
+DeBERTa's disentangled attention adds position terms to the scores: `biased_attention(q, k, v, bias, scale)` takes
+them as a float32 `bias[heads, q_len, kv_len]` and scores `s_j = (sum_i q_i k_ji + bias_j) * scale`, the dot over
+`i` ascending in double and the bias added in double before scaling, then steps 2 and 3 above. Every key is
+visible. Threads split the (query, head) rows; there is no SIMD tile, so every machine runs the same scalar loop.
+The bias itself comes from `linear` and an elementwise gather (`docs/specification.md#6-the-encoder`).
+
 ## Threads and SIMD
 
 Phase 6 made the kernels fast without touching the order above. Two facts make that possible:

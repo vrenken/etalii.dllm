@@ -440,3 +440,8 @@ MODERNBERT_FINETUNE_FINGERPRINT = {
     "embedding": "6c951505ffed77444dcb1a0a06c08d8d3af8dc47f4d68cca424fca3a27dab92b",
     "classifier": "214e122e6af9ad95ac2993f3c97e904fd91024c5357475fccba51f2c434800a2",
 }
+
+# The tiny DeBERTa-v3 fixture of tests/test_deberta.py (#362-#365): the last layer's states of a fixed token
+# sequence longer than the relative buckets' exact range, and a three-label cross-encoder's logits of a fixed pair.
+DEBERTA_EMBEDDING_FINGERPRINT = "72feef12614746d41acda64555dcb51d070f163fa57522e760bd39727afb9919"
+DEBERTA_CLASSIFIER_FINGERPRINT = "7796b7673ed9af352de0cb306195c1b45a918393568b3f0a4edab2ef51cc7ee2"

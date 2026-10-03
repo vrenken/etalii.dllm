@@ -705,6 +705,29 @@ NB_MODULE(_kernels, module) {
         "row on one thread (attention_reference), with the same bits.");
 
     m.def(
+        "biased_attention",
+        [](FloatTensor q, FloatTensor k, FloatTensor v, FloatTensor bias, double scale) {
+            require(q.ndim() == 3 && k.ndim() == 3 && v.ndim() == 3, "q, k and v must be [length, heads, dim]");
+            const std::size_t q_len = q.shape(0);
+            const std::size_t kv_len = k.shape(0);
+            const std::size_t heads = q.shape(1);
+            require(k.shape(1) == heads && v.shape(1) == heads, "q, k and v must have the same heads");
+            require(v.shape(0) == kv_len, "k and v must have the same length");
+            require(q.shape(2) == k.shape(2), "q and k must have the same head_dim");
+            require(bias.ndim() == 3 && bias.shape(0) == heads && bias.shape(1) == q_len && bias.shape(2) == kv_len,
+                    "bias must be [heads, q_len, kv_len]");
+            float* out;
+            auto result = make_array({q_len, heads, v.shape(2)}, &out);
+            nb::gil_scoped_release release;
+            dllm::biased_attention(q.data(), k.data(), v.data(), bias.data(), out, q_len, kv_len, heads, q.shape(2),
+                                   v.shape(2), scale);
+            return result;
+        },
+        nb::arg("q"), nb::arg("k"), nb::arg("v"), nb::arg("bias"), nb::arg("scale"),
+        "Attention over every key with an additive score bias[heads, q_len, kv_len] (DeBERTa): scores "
+        "(q.k + bias) * scale in double, then the softmax and value sums of attention().");
+
+    m.def(
         "attention_weights",
         [](FloatTensor q, FloatTensor k, double scale, bool causal, std::int64_t q_offset, std::size_t window,
            double softcap) {
