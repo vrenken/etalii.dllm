@@ -98,8 +98,10 @@ EMBEDDING_MODELS = {
         "Qwen/Qwen3-Embedding-0.6B", "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3", "Apache-2.0"
     ),
     # BERT encoders (Phase 55): mean pooling (all-MiniLM-L6-v2) and CLS pooling (bge-small-en-v1.5).
-    "minilm": ReferenceModel("sentence-transformers/all-MiniLM-L6-v2", "main", "Apache-2.0"),
-    "bge-small": ReferenceModel("BAAI/bge-small-en-v1.5", "main", "MIT"),
+    "minilm": ReferenceModel(
+        "sentence-transformers/all-MiniLM-L6-v2", "1110a243fdf4706b3f48f1d95db1a4f5529b4d41", "Apache-2.0"
+    ),
+    "bge-small": ReferenceModel("BAAI/bge-small-en-v1.5", "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a", "MIT"),
 }
 _ALL_MODELS = {**REFERENCE_MODELS, **EMBEDDING_MODELS}
 TOOL_FORMATS = {"qwen2.5": "hermes", "qwen2.5-1.5b": "hermes", "qwen3": "hermes", "llama3.2": "llama3"}

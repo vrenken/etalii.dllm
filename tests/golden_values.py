@@ -212,6 +212,13 @@ REFERENCE_MODEL_FINGERPRINTS = {
         "import": "3187399f4e35c2a2f236a8f2ab4435e1fd5f6d9cb40b73ae69c6507fb936066a",
         "embedding": "a2db5e8e1ba53077b201e08ab1616d1dc6681c2c1e283aae5fea5a896f2e6b37",
     },
+    # BERT encoders: mean pooling (all-MiniLM-L6-v2) and CLS pooling (bge-small-en-v1.5), truncated to max_tokens.
+    "minilm": {
+        "embedding": "0c76461e13fc920ba32cab5543c752f6cb296cdee5d1e3e5cb266f27711df9cd",
+    },
+    "bge-small": {
+        "embedding": "a3bbe46df62036ce3971d37fd7eebfe87b5ea17e8d4a48975911200770c456d5",
+    },
 }
 
 # Trace.fingerprint() of the tiny models over tests/test_interpret.py's PROMPT (every activation, attention included).
