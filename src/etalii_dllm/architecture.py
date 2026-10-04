@@ -29,7 +29,10 @@ from typing import Any
 # LayerNorms, no biases, bidirectional attention that alternates between global and local (windowed) layers and a
 # gated GELU MLP, then a final norm. "deberta" (DeBERTa-v2 and v3) is BERT's post-norm layout without absolute
 # positions: its attention adds content-to-position and position-to-content scores over a shared table of
-# log-bucketed relative position embeddings (disentangled attention).
+# log-bucketed relative position embeddings (disentangled attention). "t5" is the encoder of T5 (sentence-t5,
+# GTR-T5): no positions in the embeddings, pre-norm layers with RMS norms that have neither a mean nor a bias, no
+# biases and no score scaling, a per-head bias over log-bucketed relative positions (the first layer's, shared by
+# every layer), a ReLU MLP (T5 v1.0) or a gated one (v1.1), then a final norm.
 FAMILIES = (
     "bert",
     "deberta",
@@ -48,11 +51,12 @@ FAMILIES = (
     "qwen2_moe",
     "qwen3",
     "qwen3_moe",
+    "t5",
 )
 NORM_PLACEMENTS = ("pre", "post", "sandwich")
-ACTIVATIONS = ("silu", "gelu_tanh", "gelu")
+ACTIVATIONS = ("silu", "gelu_tanh", "gelu", "relu")
 QK_NORM_SCOPES = ("head", "all")
-ENCODER_FAMILIES = ("bert", "deberta", "modernbert")
+ENCODER_FAMILIES = ("bert", "deberta", "modernbert", "t5")
 CLASSIFIER_POOLINGS = ("cls", "mean")
 ENCODER_ONLY = "an encoder model embeds text and cannot generate; use it with dllm embed, /v1/embeddings or dllm index"
 
@@ -144,7 +148,17 @@ class TransformerConfig:
     it share buckets that grow logarithmically up to ``max_relative_positions``); 0 means no bucketing."""
     max_relative_positions: int = 0
     """DeBERTa: the largest relative distance the buckets reach; the relative position table has
-    ``2 * relative_span`` rows (:attr:`relative_span`). 0 for every other family."""
+    ``2 * relative_span`` rows (:attr:`relative_span`). T5: ``relative_attention_max_distance``, the distance from
+    which every position shares the last bucket (``position_buckets`` is then ``relative_attention_num_buckets``,
+    half of them for each direction). 0 for every other family."""
+    gated_mlp: bool = False
+    """T5 v1.1: the MLP is ``down(act(gate(x)) * up(x))`` rather than ``down(act(up(x)))``."""
+    projection_size: int = 0
+    """Embedders whose sentence-transformers pipeline has a ``Dense`` module after the pooling (sentence-t5,
+    GTR-T5, LaBSE): the size of the projected sentence vector (``projection.weight`` is ``[projection_size,
+    hidden]``); 0 for none."""
+    projection_bias: bool = False
+    """Whether that projection has a bias (``projection.bias``)."""
 
     def __post_init__(self) -> None:
         if self.family not in FAMILIES:
@@ -159,11 +173,19 @@ class TransformerConfig:
         if self.activation not in ACTIVATIONS:
             raise ValueError(f"unsupported activation {self.activation!r}")
         if self.is_encoder:
-            if self.activation not in ("gelu", "gelu_tanh"):
+            if self.family == "t5":
+                if self.position_buckets < 2 or self.max_relative_positions < 1:
+                    raise ValueError("t5 needs position_buckets (at least 2) and max_relative_positions")
+                if self.type_vocabulary_size or self.padding_index is not None or self.classifier_labels:
+                    raise ValueError("t5 has neither token types, padding positions nor a classification head")
+            elif self.activation not in ("gelu", "gelu_tanh"):
                 raise ValueError(f"{self.family} needs a gelu or gelu_tanh MLP")
+            elif self.gated_mlp:
+                raise ValueError("gated_mlp is for t5 (modernbert's MLP is always gated)")
             if self.family == "bert" and self.type_vocabulary_size < 1:
                 raise ValueError("bert needs token types")
-            if (self.family == "deberta") != (self.max_relative_positions > 0) or self.position_buckets < 0:
+            relative = self.family in ("deberta", "t5")
+            if relative != (self.max_relative_positions > 0) or self.position_buckets < 0:
                 raise ValueError("deberta, and only deberta, needs max_relative_positions (and position_buckets >= 0)")
             if self.family == "deberta" and self.padding_index is not None:
                 raise ValueError("deberta has no padding positions")
@@ -177,6 +199,10 @@ class TransformerConfig:
                 raise ValueError("classifier_pooling is cls or mean, for modernbert only")
             if self.classifier_labels < 0:
                 raise ValueError("classifier_labels must not be negative")
+            if self.projection_size < 0 or (self.projection_bias and not self.projection_size):
+                raise ValueError("projection_size must not be negative, and a projection bias needs a projection")
+            if self.projection_size and self.classifier_labels:
+                raise ValueError("a projection is for embedders, not cross-encoders")
             if self.padding_index is not None and self.padding_index < 0:
                 raise ValueError("padding_index must not be negative")
         elif (
@@ -187,10 +213,13 @@ class TransformerConfig:
             or self.classifier_pooling is not None
             or self.max_relative_positions
             or self.position_buckets
+            or self.activation == "relu"
+            or self.gated_mlp
+            or self.projection_size
         ):
             raise ValueError(
-                "the plain gelu MLP, token types, classifiers and padding positions are for bert (and modernbert) "
-                "encoders only"
+                "the plain gelu or relu MLP, token types, classifiers, padding positions, relative positions and "
+                "projections are for encoders only"
             )
         if self.qk_norm_scope not in QK_NORM_SCOPES:
             raise ValueError(f"unsupported qk_norm_scope {self.qk_norm_scope!r}")
@@ -241,7 +270,7 @@ class TransformerConfig:
 
     @property
     def is_encoder(self) -> bool:
-        """Whether the model is an encoder, BERT, DeBERTa or ModernBERT (it embeds text and does not generate)."""
+        """Whether the model is an encoder, BERT, DeBERTa, ModernBERT or T5 (it embeds text and does not generate)."""
         return self.family in ENCODER_FAMILIES
 
     @property
@@ -352,6 +381,9 @@ class TransformerConfig:
             ("classifier_labels", 0),
             ("position_buckets", 0),
             ("max_relative_positions", 0),
+            ("gated_mlp", False),
+            ("projection_size", 0),
+            ("projection_bias", False),
         )
         for name, default in defaults:
             if values[name] == default:
@@ -421,8 +453,18 @@ class TransformerConfig:
         return shapes
 
     def _encoder_shapes(self) -> dict[str, tuple[int, ...]]:
+        shapes = self._encoder_body_shapes()
+        if self.projection_size:
+            shapes["projection.weight"] = (self.projection_size, self.hidden_size)
+            if self.projection_bias:
+                shapes["projection.bias"] = (self.projection_size,)
+        return shapes
+
+    def _encoder_body_shapes(self) -> dict[str, tuple[int, ...]]:
         if self.family == "modernbert":
             return self._modernbert_shapes()
+        if self.family == "t5":
+            return self._t5_shapes()
         hidden = self.hidden_size
         shapes: dict[str, tuple[int, ...]] = {"token_embedding.weight": (self.vocabulary_size, hidden)}
         if self.family == "bert":
@@ -457,6 +499,26 @@ class TransformerConfig:
             shapes["pooler.bias"] = (hidden,)
             shapes["classifier.weight"] = (self.classifier_labels, hidden)
             shapes["classifier.bias"] = (self.classifier_labels,)
+        return shapes
+
+    def _t5_shapes(self) -> dict[str, tuple[int, ...]]:
+        hidden, q, size = self.hidden_size, self.heads * self.head_dim, self.intermediate_size
+        shapes: dict[str, tuple[int, ...]] = {
+            "token_embedding.weight": (self.vocabulary_size, hidden),
+            "relative_bias.weight": (self.position_buckets, self.heads),
+        }
+        for i in range(self.layers):
+            p = f"layers.{i}."
+            shapes[p + "attention_norm.weight"] = (hidden,)
+            for name in ("q", "k", "v"):
+                shapes[p + f"attention.{name}.weight"] = (q, hidden)
+            shapes[p + "attention.o.weight"] = (hidden, q)
+            shapes[p + "mlp_norm.weight"] = (hidden,)
+            if self.gated_mlp:
+                shapes[p + "mlp.gate.weight"] = (size, hidden)
+            shapes[p + "mlp.up.weight"] = (size, hidden)
+            shapes[p + "mlp.down.weight"] = (hidden, size)
+        shapes["final_norm.weight"] = (hidden,)
         return shapes
 
     def _modernbert_shapes(self) -> dict[str, tuple[int, ...]]:

@@ -162,7 +162,7 @@ def test_position_ids_skip_padding():
     assert TransformerConfig.from_dict(config.to_dict()) == config
     with pytest.raises(ValueError, match="padding_index must not be negative"):
         TransformerConfig.from_dict({**config.to_dict(), "padding_index": -1})
-    with pytest.raises(ValueError, match="padding positions are for bert"):
+    with pytest.raises(ValueError, match="padding positions, relative positions and projections are for encoders only"):
         TransformerConfig.from_dict({**config.to_dict(), "family": "llama", "type_vocabulary_size": 0})
     with pytest.raises(ModelImportError, match="no positions past the padding"):
         bert_config({**ROBERTA_CONFIG, "model_type": "roberta", "vocab_size": 50, "max_position_embeddings": 2})

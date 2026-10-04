@@ -116,6 +116,7 @@ dllm export ms-marco-tuned.dllm --format gguf -o ms-marco-tuned.gguf          # 
   context pooler as `pooler.dense`, the special token ids from the tokenizer, plus the sentence-transformers modules of
   an embedder. As for the other encoders, the config is read back through the importer first and must give the same
   model. llama.cpp's GGUF layout has no DeBERTa, so `--format gguf` refuses it.
+- **T5** encoders (Phase 62) and embedders with a `Dense` projection do not export yet.
 
 ### SentencePiece models through GGUF
 

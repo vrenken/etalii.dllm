@@ -615,6 +615,22 @@ def relative_bucket(distance: int, buckets: int, max_position: int) -> int:
     return (1 if distance > 0 else -1) * (math.ceil(float(scaled)) + mid)
 
 
+def t5_relative_bucket(distance: int, buckets: int, max_distance: int) -> int:
+    """T5's bidirectional bucket of the relative distance ``distance`` (key minus query): ``n = buckets // 2`` buckets
+    per direction (keys after the query from ``n`` on), ``r = |distance|`` itself below ``exact = n // 2``, else
+    ``min(exact + trunc(f32(f32(log(f32(r) / exact)) / f32(log(max_distance / exact))) * (n - exact)), n - 1)``
+    with every step rounded to float32."""
+    half = buckets // 2
+    exact = half // 2
+    offset = half if distance > 0 else 0
+    r = abs(distance)
+    if r < exact:
+        return offset + r
+    numerator = F32(float(log(float(F32(F32(r) / F32(exact))))))
+    scaled = F32(numerator / F32(float(log(max_distance / exact)))) * F32(half - exact)
+    return offset + min(exact + math.trunc(float(scaled)), half - 1)
+
+
 # -- random numbers and sampling ----------------------------------------------------------------------------------
 
 _MASK = (1 << 64) - 1
@@ -1418,8 +1434,8 @@ class ReferenceTransformer:
 
 
 class ReferenceEncoder:
-    """The BERT and ModernBERT encoders of :class:`etalii_dllm.encoder.Encoder` and the embedding the engine pools
-    from them, step for step, on this module's kernels."""
+    """The BERT, DeBERTa, ModernBERT and T5 encoders of :class:`etalii_dllm.encoder.Encoder` and the embedding the
+    engine pools (and projects) from them, step for step, on this module's kernels."""
 
     def __init__(
         self,
@@ -1451,6 +1467,8 @@ class ReferenceEncoder:
             return self._modernbert_states(tokens)
         if config.family == "deberta":
             return self._deberta_states(tokens, types)
+        if config.family == "t5":
+            return self._t5_states(tokens)
         count = len(tokens)
         kinds = np.zeros(count, dtype=np.int64) if types is None else np.asarray(types, dtype=np.int64)
         words = w["token_embedding.weight"][np.asarray(tokens, dtype=np.int64)]
@@ -1526,6 +1544,40 @@ class ReferenceEncoder:
             h = norm(h + project(activated, p + "mlp.down"), p + "mlp_norm")
         return h
 
+    def _t5_states(self, tokens: Sequence[int]) -> np.ndarray:
+        """``h = word``; per layer ``h = h + o(attention(RMSNorm(h)))`` with scores ``q_i . k_j + table[bucket(j -
+        i), head]`` (the dot in double, the bias added in double, no scale) and ``h = h + down(mlp(RMSNorm(h)))``,
+        ``mlp`` ``act(up)`` or ``act(gate) * up`` (ReLU: ``x`` where positive, else +0); then the final RMSNorm."""
+        config, w = self.config, self.w
+        count, heads, head_dim = len(tokens), config.heads, config.head_dim
+        x = w["token_embedding.weight"][np.asarray(tokens, dtype=np.int64)]
+        table = w["relative_bias.weight"]
+        bias = np.empty((heads, count, count), dtype=F32)
+        for i in range(count):
+            for j in range(count):
+                bias[:, i, j] = table[t5_relative_bucket(j - i, config.position_buckets, config.max_relative_positions)]
+        eps = config.rms_norm_eps
+
+        def activate(values: np.ndarray) -> np.ndarray:
+            if config.activation == "relu":
+                return np.where(values > 0, values, F32(0)).astype(F32)
+            if config.activation == "silu":
+                return silu(values)
+            return gelu(values, "tanh" if config.activation == "gelu_tanh" else "none")
+
+        shape = (count, heads, head_dim)
+        for layer in range(config.layers):
+            p = f"layers.{layer}."
+            normed = rms_norm(x, w[p + "attention_norm.weight"], eps)
+            q, k, v = (linear(normed, w[p + f"attention.{n}.weight"]).reshape(shape) for n in ("q", "k", "v"))
+            attended = biased_attention(q, k, v, bias, 1.0)
+            x = x + linear(attended.reshape(count, -1), w[p + "attention.o.weight"])
+            normed = rms_norm(x, w[p + "mlp_norm.weight"], eps)
+            up = linear(normed, w[p + "mlp.up.weight"])
+            hidden = activate(linear(normed, w[p + "mlp.gate.weight"])) * up if config.gated_mlp else activate(up)
+            x = x + linear(hidden, w[p + "mlp.down.weight"])
+        return rms_norm(x, w["final_norm.weight"], eps)
+
     def _modernbert_states(self, tokens: Sequence[int]) -> np.ndarray:
         """``h = LayerNorm(word)``, then per layer ``h = h + o(attention(rope(q(x)), rope(k(x)), v(x)))`` with
         ``x = LayerNorm(h)`` (the first layer: ``x = h``), attention over every key on a global layer and the keys
@@ -1598,6 +1650,10 @@ class ReferenceEncoder:
             for row in states:
                 total += row.astype(F64)
             vector = _round(total) / F32(states.shape[0])
+        if self.settings.get("projection"):  # a Dense module: linear, then identity or tanh
+            vector = linear(vector.reshape(1, -1), self.w["projection.weight"], self.w.get("projection.bias"))[0]
+            if self.settings["projection"] == "tanh":
+                vector = _round(tanh(vector.astype(F64)))
         if self.settings.get("normalize", True):
             squares = sequential_sum(vector.astype(F64) * vector.astype(F64))
             norm = F32(math.sqrt(squares))

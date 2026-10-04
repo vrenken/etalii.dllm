@@ -270,8 +270,8 @@ def test_header_without_architecture_is_refused(model_path):
         ({"kv_heads": 0}, "kv_heads must be positive"),
         ({"heads": 3, "kv_heads": 2}, "heads must be a multiple of kv_heads"),
         ({"head_dim": 3}, "head_dim must be even"),
-        ({"activation": "relu"}, "unsupported activation 'relu'"),
-        ({"activation": "gelu"}, r"are for bert \(and modernbert\) encoders only"),
+        ({"activation": "swish"}, "unsupported activation 'swish'"),
+        ({"activation": "gelu"}, "are for encoders only"),
     ],
 )
 def test_invalid_architectures_are_refused(change, message):

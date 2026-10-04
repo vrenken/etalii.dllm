@@ -475,7 +475,7 @@ Not covered here, but just as fixed:
 
 ## 6. The encoder
 
-A model of family `bert`, `deberta` or `modernbert` is an encoder: it turns all its tokens into hidden states at once, for
+A model of family `bert`, `deberta`, `modernbert` or `t5` is an encoder: it turns all its tokens into hidden states at once, for
 embeddings, and does not generate. A `bert` encoder, all in float32 unless stated:
 
 1. `x = (word[t] + type[s]) + position[p]` for the token `t` of type `s` with position id `p` (two float32 additions
@@ -528,12 +528,33 @@ embeddings when `type_vocabulary_size` is 0) and with disentangled attention:
    3. `a = biased_attention(q, k, v, bias, 1 / sqrt(3 * head_dim))`, the scale a double.
    4. `x = layer_norm(x + linear(a, Wo, bo), attention_norm)`, then the MLP as in `bert`.
 
+A `t5` encoder (the encoder of T5 v1.0 and v1.1: sentence-t5, GTR-T5) has no biases, no position or type embeddings,
+and RMS norms (`rms_norm`: no mean, no bias):
+
+1. `h = word[t]`. The score bias of query `i` and key `j` is `bias[h, i, j] = table[b(j - i), h]` with `table` the
+   `relative_bias` (`[position_buckets, heads]`, the first layer's, shared by every layer). With
+   `n = position_buckets // 2`, `e = n // 2` and `M = max_relative_positions`, the bucket of `r = j - i` is
+   `(n if r > 0 else 0) + c` where `c = |r|` when `|r| < e`, else
+   `min(e + trunc(f32(f32(a / f) * f32(n - e))), n - 1)` with `a = f32(log(f32(f32(|r|) / f32(e))))` and
+   `f = f32(log(M / e))`, `M / e` a double division and `log` the portable logarithm in double.
+2. For each layer:
+   1. `x = rms_norm(h, attention_norm)`; `q, k, v = linear(x, W)`.
+   2. `a = biased_attention(q, k, v, bias, 1)`: T5 does not scale its scores.
+   3. `h = h + linear(a, Wo)`.
+   4. `x = rms_norm(h, mlp_norm)`, then `h = h + linear(m, Wdown)` with `m = act(linear(x, Wup))` (T5 v1.0, `act`
+      ReLU: `x` where `x > 0`, else +0), or with `gated_mlp` `m = f32(act(linear(x, Wgate)) * linear(x, Wup))` (v1.1,
+      `act` the tanh GELU; `gelu`, `silu` and ReLU are also allowed).
+3. The output is `rms_norm(h, final_norm)`. Every `rms_norm` uses `rms_norm_eps` (T5's `layer_norm_epsilon`).
+
 **Embedding.** The text gets the model's prompt for the request's `input_type` (if any) and is encoded with the
 tokenizer; for an encoder its tokens are cut to `max_tokens - s`, where `s` is the number of special tokens the
 tokenizer adds, and the special tokens (`[CLS] … [SEP]`) are then added. The vector is the first state (`cls`
 pooling), the last state (`last_token`), or the mean: per component the sum over positions ascending in double,
-rounded to float32, then a float32 division by the number of positions. With normalisation it is divided (float32)
-by `f32(sqrt(ss))`, where `ss` is the sum of its squares in double, ascending.
+rounded to float32, then a float32 division by the number of positions. A model with a `projection` (a
+sentence-transformers `Dense` module after the pooling, `projection_size` outputs) then computes
+`linear(vector, Wproj, bproj)`, followed by `f32(tanh(.))` (the portable kernel in double) when the module's activation
+is `tanh`. With normalisation the vector is divided (float32) by `f32(sqrt(ss))`, where `ss` is the sum of its
+squares in double, ascending.
 
 **Classification (cross-encoders).** A model with `classifier_labels` has a head on the first state `x[0]` (the
 `[CLS]` token): `p = f32(tanh(linear(x[0], Wpool, bpool)))` with `tanh` the portable kernel in double, then

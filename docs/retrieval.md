@@ -95,6 +95,31 @@ checked against `transformers` on tiny synthetic models with sequences longer th
 [fine-tuning encoders](training.md#encoders)) and exports to safetensors
 ([exporting encoders](model-building.md#encoders)).
 
+#### T5 encoders
+
+The encoders of T5 (`model_type` `t5`, Phase 62) import as embedders, as
+[sentence-t5-base](https://huggingface.co/sentence-transformers/sentence-t5-base) and
+[gtr-t5-base](https://huggingface.co/sentence-transformers/gtr-t5-base) (Apache 2.0) store them:
+
+```bash
+dllm import hf:sentence-transformers/gtr-t5-base -o gtr.dllm
+dllm --model gtr.dllm embed "How many people live in Berlin?"
+```
+
+A full T5 checkpoint (`T5ForConditionalGeneration`) imports too, with its decoder dropped. T5 has no position
+embeddings: every layer adds a per-head bias to its attention scores that depends only on the distance from the query
+to the key, read from 32 buckets (exact up to 8 tokens, then logarithmic up to 128, the same for anything farther).
+The buckets are computed exactly as transformers computes them (in float32, with the portable logarithm), and the
+scores go through the `biased_attention` kernel without scaling, as T5 has none; the RMS norms are the `rms_norm`
+kernel, the MLP is T5 v1.0's ReLU or v1.1's gated tanh GELU. sentence-t5 and GTR-T5 project the mean-pooled vector
+with a `Dense` module (768 to 768, no bias, no activation) before normalising it: the importer reads `2_Dense` and
+the engine applies it with the `linear` kernel, for any encoder family (LaBSE's `Dense` has a bias and `tanh`, which
+works the same way).
+
+T5 is checked against `transformers`' `T5EncoderModel` on tiny synthetic models with sequences far longer than the
+buckets' maximum distance (`tests/test_t5.py`), not yet on the real checkpoints in CI. It does not fine-tune, take
+LoRA adapters or export yet, nor do embedders with a `Dense` projection.
+
 all-MiniLM-L6-v2, bge-small-en-v1.5, all-distilroberta-v1, paraphrase-multilingual-MiniLM-L12-v2 and
 [Qwen3-Embedding-0.6B](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B) (Apache 2.0) are checked against
 `transformers` in CI (`tests/test_reference_models.py`):

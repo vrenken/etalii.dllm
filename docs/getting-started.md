@@ -1048,6 +1048,19 @@ as a Hugging Face model that `transformers` and sentence-transformers load. The 
 distance-aware attention are computed exactly, so the same data gives the same tuned model on every machine.
 Details: [fine-tuning encoders](training.md#encoders) and [exporting encoders](model-building.md#encoders).
 
+## 58. T5 encoder embedders
+
+```bash
+dllm import hf:sentence-transformers/gtr-t5-base -o gtr.dllm
+dllm --model gtr.dllm embed "How many people live in Berlin?"
+dllm --model gtr.dllm index build notes/ -o notes.index
+```
+
+The sentence-t5 and GTR-T5 embedding models are built on Google's T5. They now import and embed text like the other
+encoders, including the extra projection layer these models apply to the sentence vector. T5 tells words apart by
+how far apart they are, using a small table of distances; the engine reads that table exactly as T5 itself does, so
+the vectors are the same on every machine. Details: [T5 encoders](retrieval.md#t5-encoders).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
@@ -1084,12 +1097,14 @@ Details: [fine-tuning encoders](training.md#encoders) and [exporting encoders](m
 - MCP servers' URL-mode elicitations (open a web page) are declined and nobody is asked interactively (the model
   answers forms), and image, audio or binary MCP content is refused.
 - Models with dynamic NTK RoPE scaling or other architectures (including DeepSeek's mixtures of experts with several
-  shared experts and multi-head latent attention, and encoders other than BERT, RoBERTa, XLM-RoBERTa and ModernBERT,
-  such as the original DeBERTa) are refused at import. Encoders (sections 51 to 57) run on the CPU. ModernBERT (section 55) is
+  shared experts and multi-head latent attention, and encoders other than BERT, RoBERTa, XLM-RoBERTa, ModernBERT, DeBERTa-v3 and T5,
+  such as the original DeBERTa) are refused at import. Encoders (sections 51 to 58) run on the CPU. ModernBERT (section 55) is
   checked against `transformers` only on tiny synthetic models, exports to safetensors but not to GGUF (llama.cpp
   has no ModernBERT layout), and its fine-tuning does not freeze the padding row. DeBERTa (section 56) is checked
   only on tiny synthetic models too, imports only DeBERTa-v3's layout from a `tokenizer.json`, and exports to
-  safetensors but not to GGUF (llama.cpp has no DeBERTa layout). RoBERTa and XLM-RoBERTa
+  safetensors but not to GGUF (llama.cpp has no DeBERTa layout). T5 encoders (section 58) are checked only on tiny
+  synthetic models, import only as embedders (no T5 text generation) and do not fine-tune, take LoRA adapters or
+  export yet; neither do embedders with a `Dense` projection. RoBERTa and XLM-RoBERTa
   encoders and BERT models with the tanh GELU export to safetensors but not to GGUF (llama.cpp's layout cuts their
   position rows), and GGUF files of RoBERTa or XLM-RoBERTa written by llama.cpp do not import. Unigram tokenizers
   come from `tokenizer.json`; GGUF files with a Unigram vocabulary (T5) are refused.

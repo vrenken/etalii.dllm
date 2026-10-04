@@ -235,7 +235,7 @@ def test_classifier_refusals(cross, tmp_path):
         cross.embed("hello")
     with pytest.raises(ValueError, match="token types"):
         cross.model.hidden_states([2, 5, 3], [0, 2, 0])  # type: ignore[attr-defined]
-    with pytest.raises(ValueError, match="for bert"):
+    with pytest.raises(ValueError, match="for encoders only"):
         TransformerConfig.from_dict({**cross.model.config.to_dict(), "family": "llama", "type_vocabulary_size": 0})
     with pytest.raises(ValueError, match="must not be negative"):
         TransformerConfig.from_dict({**cross.model.config.to_dict(), "classifier_labels": -1})

@@ -41,7 +41,7 @@ WANTED = (
     "sentence_bert_config.json",
 )
 # Files in subdirectories an import reads (exact paths).
-WANTED_NESTED = ("1_Pooling/config.json",)
+WANTED_NESTED = ("1_Pooling/config.json", "2_Dense/config.json", "2_Dense/model.safetensors")
 
 _REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
 

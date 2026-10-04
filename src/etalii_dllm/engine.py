@@ -1071,7 +1071,8 @@ class DllmEngine:
 
         Models imported from sentence-transformers use their own recipe (:meth:`embedding_tokens`: the prompt named
         ``input_type``, the tokenizer's special tokens, truncation for encoders) and are pooled as the model says
-        (``last_token``: the last position's final hidden state; ``cls``: the first; ``mean``). Other models take the
+        (``last_token``: the last position's final hidden state; ``cls``: the first; ``mean``), then projected by
+        their ``Dense`` module if they have one (sentence-t5, GTR-T5, LaBSE). Other models take the
         mean of the final hidden states over all positions. The mean sums each column over positions ascending in
         double, through the ``linear`` kernel."""
         if self.classifier is not None:
@@ -1092,6 +1093,8 @@ class DllmEngine:
             ones = np.ones((1, states.shape[0]), dtype=np.float32)
             total = linear(ones, np.ascontiguousarray(states.T)).numpy().reshape(-1)
             vector = (total / np.float32(states.shape[0])).astype(np.float32)
+        if settings.get("projection"):  # a sentence-transformers Dense module after the pooling
+            vector = self.model.project(vector, settings["projection"])  # type: ignore[attr-defined]
         if dimensions is not None:
             if not 1 <= dimensions <= vector.shape[0]:
                 raise ValueError(f"dimensions must be between 1 and {vector.shape[0]}")

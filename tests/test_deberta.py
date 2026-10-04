@@ -347,7 +347,7 @@ def test_config_validation():
         TransformerConfig.from_dict({**base, "family": "bert", "type_vocabulary_size": 2})
     with pytest.raises(ValueError, match="padding positions"):
         TransformerConfig.from_dict({**base, "padding_index": 0})
-    with pytest.raises(ValueError, match="for bert"):
+    with pytest.raises(ValueError, match="for encoders only"):
         TransformerConfig.from_dict({**base, "family": "llama", "activation": "silu"})
 
 
