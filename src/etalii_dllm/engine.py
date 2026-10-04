@@ -601,18 +601,24 @@ class DllmEngine:
         from etalii_dllm.seq2seq import TextToText
 
         refused = [name for name, value in used.items() if value]
-        if adapter:
-            refused.append("adapter")
         if refused:
             raise ValueError(f"{file.path} is a text-to-text model; {', '.join(refused)} need a decoder-only model")
+        tensors: Mapping[str, np.ndarray] = file.tensors
+        weights_fingerprint = file.fingerprint
+        if adapter:
+            from etalii_dllm.lora import apply_adapter
+            from etalii_dllm.modelfile import data_fingerprint
+
+            tensors, _ = apply_adapter(file.config, file.tensors, adapter)
+            weights_fingerprint = data_fingerprint(tensors)
         model = TextToText(
             file.config,
-            file.tensors,
+            tensors,
             model_id=model_id,
-            weights_fingerprint=file.fingerprint,
+            weights_fingerprint=weights_fingerprint,
             quantize=quantize,
             device=device,
-            release=file.release,
+            release=None if adapter else file.release,
         )
         tokenizer = from_model_header(file.tokenizer)
         return DllmEngine(

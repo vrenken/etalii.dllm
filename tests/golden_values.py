@@ -474,3 +474,10 @@ T5_GENERATION_FINGERPRINT = (
     "fa54d544fa221276d859fdd28d882dce46df57ed16df21116eaa366ce3e105cd",
     "5a10429daa65dfa2f6623d959f945e663b863ff79135a9683af88052eaab6e41",
 )
+
+# Fine-tuned tiny T5 v1.0 and Flan-T5 style text-to-text models (Phase 65, 3 steps of AdamW on source and target
+# pairs), as exported model.dllm fingerprints (tests/test_t5_text_finetuning.py).
+T5_TEXT_FINETUNE_FINGERPRINT = {
+    "t5": "a2a0ac4ccd7b627e3d3ef60fe11dcd30a4db10a267bbe3a8e25ef303cfa53a8f",
+    "flan": "b2261003860b0ce3dd08f9aa00f74460c352dc331a381bc698e0fbc38dddd0c5",
+}

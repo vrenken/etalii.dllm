@@ -114,6 +114,28 @@ def t5_modules(config: TransformerConfig) -> dict[str, str]:
 _T5_PEFT_KEY = re.compile(
     r"^(?:base_model\.model\.)?encoder\.block\.(\d+)\.(layer\.[01]\.\w+\.\w+)\.lora_([AB])\.weight$"
 )
+_TEXT_TO_TEXT_PEFT_KEY = re.compile(
+    r"^(?:base_model\.model\.)?(encoder|decoder)\.block\.(\d+)\.(layer\.[012]\.\w+\.\w+)\.lora_([AB])\.weight$"
+)
+
+
+def text_to_text_modules(config: TransformerConfig) -> dict[str, str]:
+    """A T5 text-to-text model's adapted weights per module name after ``decoder.block.N.``: the self-attention
+    (``layer.0.SelfAttention``), the cross-attention (``layer.1.EncDecAttention``, our ``cross``) and the MLP
+    (``layer.2.DenseReluDense``). The encoder's are :func:`t5_modules`'."""
+    modules = {f"layer.0.SelfAttention.{t}": _WEIGHT_NAMES[t] for t in ("q", "k", "v", "o")}
+    modules |= {f"layer.1.EncDecAttention.{t}": f"cross.{t}.weight" for t in ("q", "k", "v", "o")}
+    for target, module in t5_modules(config).items():
+        if target not in ("q", "k", "v", "o"):
+            modules[module.replace("layer.1.", "layer.2.")] = _WEIGHT_NAMES[target]
+    return modules
+
+
+def _text_to_text_target(weight: str) -> str:
+    """The target (``q k v o gate up down``) of a text-to-text weight such as ``cross.k.weight``."""
+    return weight.split(".")[1]
+
+
 # ModernBERT: its modules and the parts of the fused ones, in row order (the first part keeps the shared A).
 MODERNBERT_MODULES = {"attn.Wqkv": ("q", "k", "v"), "attn.Wo": ("o",), "mlp.Wi": ("gate", "up"), "mlp.Wo": ("down",)}
 _MODERNBERT_MODULE_OF = {part: module for module, parts in MODERNBERT_MODULES.items() for part in parts}
@@ -190,8 +212,15 @@ def target_weights(config: TransformerConfig, lora: LoraConfig) -> list[str]:
     """The adapted weight names, in tensor order. In a mixture-of-experts layer ``gate``, ``up`` and ``down`` adapt
     every expert's projection (``layers.N.mlp.experts.E.gate.weight``) and the shared expert's
     (``layers.N.mlp.shared.gate.weight``); the router and the shared expert's gate are never adapted."""
-    if config.is_text_to_text:
-        raise AdapterError("text-to-text models cannot take LoRA adapters yet")
+    if config.is_text_to_text:  # q, k, v and o adapt the self-attention and the decoder's cross-attention
+        modules = t5_modules(config)
+        targets = [t for t in lora.targets if t in modules]
+        if not targets:
+            raise AdapterError("T5 has no gate projection without a gated MLP; adapt q, k, v, o, up or down")
+        names = [f"layers.{i}.{_WEIGHT_NAMES[t]}" for i in range(config.layers) for t in targets]
+        decoder = [w for w in text_to_text_modules(config).values() if _text_to_text_target(w) in targets]
+        names += [f"decoder.layers.{i}.{w}" for i in range(config.decoder_layers) for w in decoder]
+        return tensor_order(names)
     if config.family == "modernbert":
         targets = _modernbert_targets(lora)
         return tensor_order([f"layers.{i}.{_WEIGHT_NAMES[t]}" for i in range(config.layers) for t in targets])
@@ -368,6 +397,11 @@ def peft_key(name: str, config: TransformerConfig | None = None) -> str:
     ``layers.3.mlp.shared.up.weight.lora_b`` -> ``...layers.3.mlp.shared_expert.up_proj.lora_B.weight``. Granite MoE
     stores its experts fused (one parameter for all of them, gate and up rows stacked), so PEFT has no module for
     one of them: its expert adapters are refused."""
+    if config is not None and config.is_text_to_text and name.startswith("decoder."):
+        layer, rest = name.split(".", 3)[2:]
+        weight, kind = rest.rsplit(".", 1)
+        module = {w: m for m, w in text_to_text_modules(config).items()}[weight]
+        return f"base_model.model.decoder.block.{layer}.{module}.lora_{kind[-1].upper()}.weight"
     layer, rest = name.split(".", 2)[1:]
     weight, kind = rest.rsplit(".", 1)
     suffix = f"lora_{kind[-1].upper()}.weight"
@@ -418,6 +452,14 @@ def target_modules(config: TransformerConfig | None, lora: LoraConfig) -> list[s
     if config is not None and config.family == "modernbert":
         modules = [m for m, parts in MODERNBERT_MODULES.items() if parts[0] in _modernbert_targets(lora)]
         return rf".*layers\.\d+\.(?:{'|'.join(m.replace('.', chr(92) + '.') for m in modules)})"
+    if config is not None and config.is_text_to_text:
+        alternatives = []
+        for target in lora.targets:
+            if target in ("q", "k", "v", "o"):
+                alternatives.append(rf"(?:SelfAttention|EncDecAttention)\.{target}")
+            elif target in t5_modules(config):
+                alternatives.append(t5_modules(config)[target].split(".", 2)[2].replace(".", r"\."))
+        return rf".*(?:encoder|decoder)\.block\.\d+\.layer\.\d\.(?:{'|'.join(alternatives)})"
     if config is not None and config.family == "t5":
         modules = t5_modules(config)
         names = "|".join(modules[t].replace(".", r"\.") for t in lora.targets if t in modules)
@@ -483,6 +525,8 @@ def write_peft(
 
 
 def _task_type(config: TransformerConfig | None) -> str:
+    if config is not None and config.is_text_to_text:
+        return "SEQ_2_SEQ_LM"
     if config is None or not config.is_encoder:
         return "CAUSAL_LM"
     return "SEQ_CLS" if config.classifier_labels else "FEATURE_EXTRACTION"
@@ -517,6 +561,23 @@ def _adapter_name(key: str, config: TransformerConfig, directory: Path) -> tuple
             raise AdapterError(f"{directory}: tensor {key!r} does not fit the model")
         first = MODERNBERT_MODULES[modern.group(3)][0]
         return f"layers.{int(modern.group(2))}.{_WEIGHT_NAMES[first]}.lora_{modern.group(4).lower()}", first
+    if config.is_text_to_text:
+        found = _TEXT_TO_TEXT_PEFT_KEY.match(key)
+        if found is None:
+            raise AdapterError(f"{directory}: unsupported adapter tensor {key!r}")
+        stack, layer, module, kind = found.group(1), int(found.group(2)), found.group(3), found.group(4).lower()
+        if stack == "encoder":
+            target = {m: t for t, m in t5_modules(config).items()}.get(module)
+            weight = _WEIGHT_NAMES[target] if target else None
+            name = f"layers.{layer}.{weight}.lora_{kind}"
+        else:
+            weight = text_to_text_modules(config).get(module)
+            name = f"decoder.layers.{layer}.{weight}.lora_{kind}"
+        if weight is None:
+            raise AdapterError(f"{directory}: unsupported adapter tensor {key!r}")
+        if not 0 <= layer < (config.layers if stack == "encoder" else config.decoder_layers):
+            raise AdapterError(f"{directory}: tensor {key!r} does not fit the model")
+        return name, _text_to_text_target(weight)
     if config.family == "t5":
         t5 = _T5_PEFT_KEY.match(key)
         target = {module: t for t, module in t5_modules(config).items()}.get(t5.group(2)) if t5 else None

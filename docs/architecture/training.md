@@ -156,6 +156,25 @@ Everything after the gradients is shared with decoder runs: AdamW, checkpoints, 
 exports and LoRA, which adapts the encoder's `q k v o up down` under `transformers`' module names. The tuned model
 keeps its pooling or classifier settings.
 
+## Text-to-text models
+
+A T5 text-to-text model trains on `TextToTextData` (`training/seq2seq_data.py`: source and target token pairs, each
+ending with `</s>`) with the language-model objective. `TextToTextGradients` (`training/seq2seq_backprop.py`) runs
+the encoder through `EncoderGradients` and the decoder over the whole target at once, its causal self-attention a
+`-inf` bias on later keys, so its logits are the served model's bits.
+
+```mermaid
+flowchart LR
+    ex["a step's (source, target) pairs<br/>(seeded per-epoch order)"] --> enc["EncoderGradients.encode(source)"]
+    enc --> dec["decoder over [pad, *target[:-1]]<br/>self-attention (causal bias), cross-attention, MLP"]
+    dec --> ce["cross_entropy against target,<br/>scale 1 / the step's target tokens"]
+    ce --> back["decoder backward; cross K/V gradients<br/>into the encoder states, then the encoder's backward"]
+    back --> adam["AdamW, as for any run"]
+```
+
+The rest is shared: AdamW, checkpoints, receipts (counting `"examples"`), LoRA over the encoder and the decoder
+(cross-attention included) and the export to `T5ForConditionalGeneration`.
+
 ## Checkpoints and resume
 
 ```mermaid

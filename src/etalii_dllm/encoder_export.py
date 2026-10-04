@@ -1,4 +1,5 @@
-"""Encoders back to the ecosystem (issues #355, #360, #370, #380): ``dllm export`` of BERT, RoBERTa, XLM-RoBERTa,
+"""Encoders and T5 text-to-text models back to the ecosystem (issues #355, #360, #370, #380, #390): ``dllm export``
+of BERT, RoBERTa, XLM-RoBERTa,
 ModernBERT, DeBERTa and T5 models.
 
 - ``safetensors``: a Hugging Face model directory that transformers and sentence-transformers load: ``config.json``
@@ -16,6 +17,9 @@ ModernBERT, DeBERTa and T5 models.
   ``relu``, ``gelu``, ``gelu_new``, ``silu`` or ``gated-gelu``; transformers has no gated MLP with another
   activation). An embedder's ``Dense`` projection (any family) is the sentence-transformers module ``2_Dense``
   (``config.json`` and ``model.safetensors`` with ``linear.weight`` and ``linear.bias``) before ``Normalize``.
+  A T5 text-to-text model (#390) is written as ``T5ForConditionalGeneration``: the encoder as above, the decoder
+  under ``decoder.block.N`` (``layer.0.SelfAttention``, ``layer.1.EncDecAttention``, ``layer.2.DenseReluDense``), its
+  bucket table in the first block, and ``lm_head`` unless the head is tied to ``shared``.
 - ``gguf``: one float32 GGUF v3 file in llama.cpp's ``bert`` layout (``token_embd``, ``token_types``,
   ``position_embd``, ``token_embd_norm``, ``blk.N.attn_q`` ... ``layer_output_norm``; a cross-encoder's pooler and
   classifier as ``cls`` and ``cls.output``, so the head computes ``cls.output(tanh(cls(h[0])))``), the pooling type,
@@ -281,10 +285,11 @@ def _deberta_config(model: ModelFile) -> dict[str, Any]:
     return document
 
 
-def _t5_config(model: ModelFile) -> dict[str, Any]:
+def _t5_config(model: ModelFile, config: TransformerConfig | None = None) -> dict[str, Any]:
+    """A ``T5EncoderModel`` ``config.json`` for ``config`` (default: the model's), checked to import back as it."""
     from etalii_dllm.importing.importer import ModelImportError, t5_config
 
-    config = model.config
+    config = config or model.config
     if config.gated_mlp:
         if config.activation != "gelu_tanh":
             raise _export_error(f"T5 has no gated {config.activation} MLP that transformers would run exactly")
@@ -352,6 +357,92 @@ def t5_tensor_name(name: str, config: TransformerConfig) -> str:
         raise _export_error(f"unexpected encoder tensor {name!r}")
     assert match is not None
     return f"encoder.block.{match.group(1)}.{module}.weight"
+
+
+def text_to_text_config(model: ModelFile) -> dict[str, Any]:
+    """The ``config.json`` of a T5 text-to-text model as a ``T5ForConditionalGeneration``."""
+    from etalii_dllm.importing.importer import ModelImportError, t5_text_to_text_config
+
+    config = model.config
+    encoder = dataclasses.replace(config, decoder_layers=0, tie_word_embeddings=True, eos_token_ids=())
+    document = _t5_config(model, encoder)
+    document |= {
+        "architectures": ["T5ForConditionalGeneration"],
+        "is_encoder_decoder": True,
+        "use_cache": True,
+        "num_decoder_layers": config.decoder_layers,
+        "tie_word_embeddings": config.tie_word_embeddings,
+        "decoder_start_token_id": 0,
+        "eos_token_id": config.eos_token_ids[0] if config.eos_token_ids else 1,
+    }
+    try:
+        again = t5_text_to_text_config(document)
+    except ModelImportError as error:
+        raise _export_error(f"the model cannot be described as a Hugging Face config.json: {error}") from None
+    if again != config:
+        raise _export_error("the model cannot be described exactly as a Hugging Face config.json")
+    return document
+
+
+_TEXT_TO_TEXT_EXPORT_NAMES = {
+    "attention.q": "layer.0.SelfAttention.q",
+    "attention.k": "layer.0.SelfAttention.k",
+    "attention.v": "layer.0.SelfAttention.v",
+    "attention.o": "layer.0.SelfAttention.o",
+    "attention_norm": "layer.0.layer_norm",
+    "cross.q": "layer.1.EncDecAttention.q",
+    "cross.k": "layer.1.EncDecAttention.k",
+    "cross.v": "layer.1.EncDecAttention.v",
+    "cross.o": "layer.1.EncDecAttention.o",
+    "cross_norm": "layer.1.layer_norm",
+    "mlp_norm": "layer.2.layer_norm",
+    "mlp.gate": "layer.2.DenseReluDense.wi_0",
+    "mlp.down": "layer.2.DenseReluDense.wo",
+}
+_DECODER_LAYER = re.compile(r"^decoder\.layers\.(\d+)\.(.+)\.weight$")
+
+
+def text_to_text_tensor_name(name: str, config: TransformerConfig) -> str:
+    """transformers' name of a T5 text-to-text tensor in a ``T5ForConditionalGeneration``: the encoder's as
+    :func:`t5_tensor_name`, the decoder's under ``decoder.block.N`` (self-attention, ``EncDecAttention``, the MLP as
+    ``layer.2``), its bucket table in the first block, ``lm_head`` when it is not tied."""
+    if name == "lm_head.weight":
+        return name
+    if name == "decoder.relative_bias.weight":
+        return "decoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight"
+    if name == "decoder.final_norm.weight":
+        return "decoder.final_layer_norm.weight"
+    if not name.startswith("decoder."):
+        return t5_tensor_name(name, config)
+    match = _DECODER_LAYER.match(name)
+    stem = match.group(2) if match else ""
+    if stem == "mlp.up":
+        module = "layer.2.DenseReluDense.wi_1" if config.gated_mlp else "layer.2.DenseReluDense.wi"
+    elif stem in _TEXT_TO_TEXT_EXPORT_NAMES:
+        module = _TEXT_TO_TEXT_EXPORT_NAMES[stem]
+    else:
+        raise _export_error(f"unexpected decoder tensor {name!r}")
+    assert match is not None
+    return f"decoder.block.{match.group(1)}.{module}.weight"
+
+
+def export_text_to_text_safetensors(model: ModelFile, directory: str | Path) -> list[Path]:
+    """Writes the T5 text-to-text ``model`` as a ``T5ForConditionalGeneration`` directory (config, tokenizer,
+    safetensors); returns the files written, in name order."""
+    from etalii_dllm.exporting import _tokenizer_files, write_safetensors
+
+    config = model.config
+    files: dict[str, bytes] = {"config.json": _json_bytes(text_to_text_config(model))}
+    files |= _tokenizer_files(model.tokenizer, None)
+    files["README.md"] = _readme(model, "transformers")
+    if model.licence.get("text"):
+        files["LICENSE"] = str(model.licence["text"]).encode("utf-8")
+    directory = Path(directory)
+    for name, data in files.items():
+        (directory / name).write_bytes(data)
+    tensors = {text_to_text_tensor_name(name, config): model.tensors[name] for name in model.tensors}
+    write_safetensors(directory / "model.safetensors", tensors)
+    return [directory / name for name in sorted([*files, "model.safetensors"])]
 
 
 _DEBERTA_EXPORT_NAMES = {
