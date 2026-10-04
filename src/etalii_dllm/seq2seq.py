@@ -21,25 +21,39 @@ scaling), for the new token at decoder position ``t``:
 4. the MLP: ``h = h + down(act(up(RMSNorm(h))))`` or ``down(act(gate(x)) * up(x))``;
 5. ``RMSNorm(h)`` with the final norm, times ``hidden ** -0.5`` (rounded to float32) when the LM head is the tied
    word embedding (T5 v1.0), then the LM head.
+
+A steering vector (#405) is added (float32) to ``h`` after its decoder layer, as decoder-only models add theirs. A
+:class:`Recorder` passed to the encoder and decoder steps is shown every intermediate (``etalii_dllm.interpret``);
+it only copies, so a traced pass has exactly the bits of an untraced one (#402).
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
 import numpy.typing as npt
 
 from etalii_dllm.architecture import TransformerConfig
 from etalii_dllm.encoder import Encoder, activate, t5_relative_buckets
-from etalii_dllm.numerics import FloatArray, biased_attention, linear, rms_norm
+from etalii_dllm.numerics import FloatArray, biased_attention, biased_attention_weights, linear, rms_norm
 from etalii_dllm.tensor import Tensor
-from etalii_dllm.transformer import _MATRICES, _prepare, quantized_fingerprint
+from etalii_dllm.transformer import _MATRICES, _prepare, quantized_fingerprint, steered_fingerprint
 
 DECODER_START = 0
 """The decoder's first input, T5's ``decoder_start_token_id`` (the padding token)."""
+
+
+class Recorder(Protocol):
+    """Watches a T5 encoder or decoder pass (:func:`etalii_dllm.interpret.trace`). ``record`` is shown each
+    intermediate by name and 0-based layer; the attention probabilities (``attention``, ``cross_attention``:
+    ``[rows, heads, keys]``) are computed only when ``wants_attention``."""
+
+    wants_attention: bool
+
+    def record(self, part: str, layer: int, values: np.ndarray) -> None: ...
 
 
 @dataclass
@@ -89,8 +103,11 @@ class TextToText:
         weights_fingerprint: str = "",
         quantize: str | None = None,
         device: str = "cpu",
+        steering: Mapping[int, npt.ArrayLike] | None = None,
         release: Callable[[str], None] | None = None,
     ) -> None:
+        """``steering`` maps 0-based decoder layer indices to vectors ``[hidden]`` added (float32) to the decoder's
+        residual stream after that layer at every position (#405); it changes the output and the fingerprint."""
         if not config.is_text_to_text:
             raise ValueError(f"{config.family} is not a text-to-text model")
         if device != "cpu":
@@ -102,7 +119,18 @@ class TextToText:
         self.config = config
         self.quantization = quantize
         self.device = device
-        self.weights_fingerprint = quantized_fingerprint(weights_fingerprint, quantize)
+        self.steering: dict[int, np.ndarray] = {}
+        for layer, vector in (steering or {}).items():
+            values = np.ascontiguousarray(vector, dtype=np.float32)
+            if not 0 <= int(layer) < config.decoder_layers or values.shape != (config.hidden_size,):
+                raise ValueError(
+                    f"steering needs a decoder layer in 0..{config.decoder_layers - 1} and a vector of "
+                    f"{config.hidden_size}"
+                )
+            self.steering[int(layer)] = values
+        self.weights_fingerprint = quantized_fingerprint(
+            steered_fingerprint(weights_fingerprint, self.steering), quantize
+        )
         self._id = model_id
         encoder_config = replace(config, decoder_layers=0, tie_word_embeddings=True)
         encoder_names = encoder_config.tensor_shapes()
@@ -224,13 +252,26 @@ class TextToText:
         self._encode(source, cache)
         return np.stack([self._steps([token], [cache])[0] for token in [DECODER_START, *answer[:-1]]])
 
-    def encoder_states(self, source: Sequence[int]) -> FloatArray:
-        """The encoder's last states ``[source, hidden]`` (after its final norm)."""
-        return self.encoder.hidden_states(source)
+    def encoder_states(self, source: Sequence[int], recorder: Recorder | None = None) -> FloatArray:
+        """The encoder's last states ``[source, hidden]`` (after its final norm), shown to ``recorder`` on the way."""
+        return self.encoder.hidden_states(source, recorder=recorder)
 
-    def _encode(self, source: Sequence[int], cache: TextToTextCache) -> None:
+    def final_norm(self, x: npt.ArrayLike) -> FloatArray:
+        """The decoder's final RMSNorm of residual stream rows ``[rows, hidden]``."""
+        weight = self._w["decoder.final_norm.weight"]
+        return rms_norm(x, weight, self.config.rms_norm_eps).numpy().copy()  # type: ignore[arg-type]
+
+    def logits_from_hidden(self, hidden: npt.ArrayLike) -> FloatArray:
+        """Logits ``[rows, vocabulary]`` of final-norm decoder states: the tied head's scale (T5 v1.0), then the LM
+        head, exactly as :meth:`forward` applies them."""
+        out = np.ascontiguousarray(hidden, dtype=np.float32)
+        if self._head_scale is not None:
+            out = (out * self._head_scale).astype(np.float32)
+        return linear(out, self._head).numpy()  # type: ignore[arg-type,no-any-return]
+
+    def _encode(self, source: Sequence[int], cache: TextToTextCache, recorder: Recorder | None = None) -> None:
         config = self.config
-        states = self.encoder_states(source)
+        states = self.encoder_states(source, recorder)
         count, heads, head_dim = len(source), config.heads, config.head_dim
         cache.source = tuple(source)
         cache.cross = []
@@ -241,9 +282,14 @@ class TextToText:
             cache.cross.append((k, v))
         cache.tokens, cache.keys, cache.values = [], [], []
 
-    def _steps(self, tokens: Sequence[int], caches: Sequence[TextToTextCache]) -> np.ndarray:
+    def _steps(
+        self, tokens: Sequence[int], caches: Sequence[TextToTextCache], recorder: Recorder | None = None
+    ) -> np.ndarray:
         """Appends ``tokens[i]`` at the next decoder position of ``caches[i]`` and returns the logits after each
-        ``[len(tokens), vocabulary]``: the rows go through the linear layers together, attention runs per cache."""
+        ``[len(tokens), vocabulary]``: the rows go through the linear layers together, attention runs per cache.
+        ``recorder`` (one cache only) sees every intermediate."""
+        if recorder is not None and len(caches) != 1:
+            raise ValueError("a recorder watches one sequence")
         config = self.config
         heads, head_dim, eps = config.heads, config.head_dim, config.rms_norm_eps
         count = len(tokens)
@@ -262,8 +308,11 @@ class TextToText:
             source_length = len(cache.cross[0][0]) if cache.cross else 0
             zeros.append(np.zeros((heads, 1, source_length), dtype=np.float32))
         h = self._embedding[list(tokens)].copy()
+        watcher = recorder if recorder is not None and recorder.wants_attention else None
         for i in range(config.decoder_layers):
             p = f"decoder.layers.{i}."
+            if recorder is not None:
+                recorder.record("residual", i, h.copy())
             x = rms_norm(h, self._w[p + "attention_norm.weight"], eps).numpy()  # type: ignore[arg-type]
             q = self._linear(x, p + "attention.q").reshape(count, 1, heads, head_dim)
             k_new = self._linear(x, p + "attention.k").reshape(count, heads, head_dim)
@@ -274,21 +323,39 @@ class TextToText:
                 cache.values[i].append(v_new[row])
                 k, v = np.stack(cache.keys[i]), np.stack(cache.values[i])
                 mixed[row] = biased_attention(q[row], k, v, biases[row], 1.0).numpy().reshape(-1)
-            h = h + self._linear(mixed, p + "attention.o")
+                if watcher is not None:
+                    watcher.record("attention", i, biased_attention_weights(q[row], k, biases[row], 1.0).numpy())
+            out = self._linear(mixed, p + "attention.o")
+            h = h + out
+            if recorder is not None:
+                recorder.record("attention_output", i, out)
+                recorder.record("middle", i, h.copy())
             x = rms_norm(h, self._w[p + "cross_norm.weight"], eps).numpy()  # type: ignore[arg-type]
             q = self._linear(x, p + "cross.q").reshape(count, 1, heads, head_dim)
             for row, cache in enumerate(caches):
                 k, v = cache.cross[i]
                 mixed[row] = biased_attention(q[row], k, v, zeros[row], 1.0).numpy().reshape(-1)
-            h = h + self._linear(mixed, p + "cross.o")
+                if watcher is not None:
+                    watcher.record("cross_attention", i, biased_attention_weights(q[row], k, zeros[row], 1.0).numpy())
+            out = self._linear(mixed, p + "cross.o")
+            h = h + out
+            if recorder is not None:
+                recorder.record("cross_attention_output", i, out)
+                recorder.record("cross_middle", i, h.copy())
             x = rms_norm(h, self._w[p + "mlp_norm.weight"], eps).numpy()  # type: ignore[arg-type]
-            h = h + self._linear(self._mlp(x, p), p + "mlp.down")
+            activation = self._mlp(x, p)
+            out = self._linear(activation, p + "mlp.down")
+            if recorder is not None:
+                recorder.record("mlp_activation", i, activation)
+                recorder.record("mlp_output", i, out)
+            h = h + out
+            if i in self.steering:
+                h = h + self.steering[i]
+        if recorder is not None:
+            recorder.record("residual", config.decoder_layers, h.copy())
         for token, cache in zip(tokens, caches, strict=True):
             cache.tokens.append(int(token))
-        out = rms_norm(h, self._w["decoder.final_norm.weight"], eps).numpy()  # type: ignore[arg-type]
-        if self._head_scale is not None:
-            out = (out * self._head_scale).astype(np.float32)
-        return linear(out, self._head).numpy()  # type: ignore[arg-type,no-any-return]
+        return self.logits_from_hidden(self.final_norm(h))
 
     def _mlp(self, x: np.ndarray, p: str) -> np.ndarray:
         up = self._linear(x, p + "mlp.up")

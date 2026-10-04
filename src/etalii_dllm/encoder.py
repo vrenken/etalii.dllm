@@ -70,6 +70,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -79,6 +80,7 @@ from etalii_dllm.numerics import (
     FloatArray,
     attention,
     biased_attention,
+    biased_attention_weights,
     gelu,
     layer_norm,
     linear,
@@ -252,10 +254,15 @@ class Encoder:
     def forward(self, tokens: Sequence[int]) -> FloatArray:
         raise ValueError(ENCODER_ONLY)
 
-    def hidden_states(self, tokens: Sequence[int], types: Sequence[int] | None = None) -> FloatArray:
+    def hidden_states(
+        self, tokens: Sequence[int], types: Sequence[int] | None = None, recorder: Any = None
+    ) -> FloatArray:
         """The last layer's states ``[positions, hidden]`` for ``tokens`` of token ``types`` (all 0 by default;
-        ModernBERT has no token types and ignores them)."""
+        ModernBERT has no token types and ignores them). ``recorder`` (T5 only, a :class:`etalii_dllm.seq2seq.Recorder`)
+        is shown every layer's intermediates without changing a bit (#402)."""
         config = self.config
+        if recorder is not None and config.family != "t5":
+            raise ValueError("only T5 encoders can be traced")
         if not tokens:
             raise ValueError("the encoder needs at least one token")
         if len(tokens) > config.context_length:
@@ -265,7 +272,7 @@ class Encoder:
         if config.family == "modernbert":
             return self._modernbert_states(tokens)
         if config.family == "t5":
-            return self._t5_states(tokens)
+            return self._t5_states(tokens, recorder)
         kinds = np.zeros(len(tokens), dtype=np.int64) if types is None else np.asarray(types, dtype=np.int64)
         if config.family == "deberta" and not config.type_vocabulary_size:
             kinds = np.zeros(len(tokens), dtype=np.int64)  # no token types: a pair's second text reads like the first
@@ -349,7 +356,7 @@ class Encoder:
             raise ValueError(f"model {self.id} has no projection")
         return project(vector, self._w["projection.weight"], self._w.get("projection.bias"), activation)
 
-    def _t5_states(self, tokens: Sequence[int]) -> FloatArray:
+    def _t5_states(self, tokens: Sequence[int], recorder: Any = None) -> FloatArray:
         config, w = self.config, self._w
         count, heads, head_dim = len(tokens), config.heads, config.head_dim
         h = np.ascontiguousarray(np.asarray(w["token_embedding.weight"])[np.asarray(tokens, dtype=np.int64)])
@@ -357,14 +364,29 @@ class Encoder:
         eps = config.rms_norm_eps
         for i in range(config.layers):
             p = f"layers.{i}."
+            if recorder is not None:
+                recorder.record("residual", i, h.copy())
             x = rms_norm(h, w[p + "attention_norm.weight"], eps).numpy()  # type: ignore[arg-type]
             q = self._linear(x, p + "attention.q").reshape(count, heads, head_dim)
             k = self._linear(x, p + "attention.k").reshape(count, heads, head_dim)
             v = self._linear(x, p + "attention.v").reshape(count, heads, head_dim)
             mixed = biased_attention(q, k, v, bias, 1.0).numpy()
-            h = h + self._linear(mixed.reshape(count, -1), p + "attention.o")
+            out = self._linear(mixed.reshape(count, -1), p + "attention.o")
+            h = h + out
             x = rms_norm(h, w[p + "mlp_norm.weight"], eps).numpy()  # type: ignore[arg-type]
-            h = h + self._linear(self._t5_mlp(x, p), p + "mlp.down")
+            activation = self._t5_mlp(x, p)
+            if recorder is not None:
+                if recorder.wants_attention:
+                    recorder.record("attention", i, biased_attention_weights(q, k, bias, 1.0).numpy())
+                recorder.record("attention_output", i, out)
+                recorder.record("middle", i, h.copy())
+                recorder.record("mlp_activation", i, activation)
+            out = self._linear(activation, p + "mlp.down")
+            if recorder is not None:
+                recorder.record("mlp_output", i, out)
+            h = h + out
+        if recorder is not None:
+            recorder.record("residual", config.layers, h.copy())
         return rms_norm(h, w["final_norm.weight"], eps).numpy()  # type: ignore[arg-type,no-any-return]
 
     def _t5_mlp(self, x: np.ndarray, p: str) -> np.ndarray:

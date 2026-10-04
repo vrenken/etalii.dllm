@@ -627,6 +627,17 @@ def attention_weights(
     return Tensor(_kernels.attention_weights(qa, _float32(k), s, causal, offset, _window(window), softcap or 0.0))
 
 
+def biased_attention_weights(
+    q: npt.ArrayLike | Tensor,
+    k: npt.ArrayLike | Tensor,
+    bias: npt.ArrayLike | Tensor,
+    scale: float,
+) -> Tensor:
+    """The attention probabilities ``[q_len, heads, kv_len]`` that :func:`biased_attention` with the same arguments
+    applies to the values, computed in its exact order."""
+    return Tensor(_kernels.biased_attention_weights(_float32(q), _float32(k), _float32(bias), float(scale)))
+
+
 def cosine_similarity(matrix: npt.ArrayLike | Tensor, query: npt.ArrayLike | Tensor) -> FloatArray:
     """Cosine similarity of every row of ``matrix[rows, dim]`` with ``query[dim]`` (double sums over ``dim``
     ascending); a zero row or query gives 0."""

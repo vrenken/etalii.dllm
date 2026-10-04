@@ -500,7 +500,9 @@ class DllmEngine:
                 contrast_model=contrast_model,
                 ensemble=ensemble,
                 ensemble_weight=ensemble_weight,
-                used={"steer": steer, "index": index, "draft_model": draft_model, "speculate": speculate},
+                steer=steer,
+                steer_strength=steer_strength,
+                used={"index": index, "draft_model": draft_model, "speculate": speculate},
             )
         tensors: Mapping[str, np.ndarray] = file.tensors
         weights_fingerprint = file.fingerprint
@@ -602,10 +604,13 @@ class DllmEngine:
         ensemble: Sequence[tuple[str | Path, float]],
         ensemble_weight: float,
         used: Mapping[str, Any],
+        steer: str | Path | None = None,
+        steer_strength: float | None = None,
     ) -> DllmEngine:
         """A T5 text-to-text model (:mod:`etalii_dllm.seq2seq`): the prompt is the source, the answer is generated
         by the decoder. ``contrast_model`` and ``ensemble`` are other text-to-text models with the same tokenizer
-        (#394). Decoding options that need a decoder-only model are refused."""
+        (#394); ``steer`` is a steering vector file for the decoder (#405). Decoding options that need a decoder-only
+        model are refused."""
         from etalii_dllm.bpe import from_model_header
         from etalii_dllm.modelfile import ModelFile
         from etalii_dllm.seq2seq import TextToText
@@ -621,6 +626,15 @@ class DllmEngine:
 
             tensors, _ = apply_adapter(file.config, file.tensors, adapter)
             weights_fingerprint = data_fingerprint(tensors)
+        steering = None
+        if steer:
+            from etalii_dllm.interpret.steering import SteeringVector
+
+            vector = SteeringVector.load(steer)
+            layers = file.config.decoder_layers
+            if not 1 <= vector.layer <= layers or vector.vector.shape != (file.config.hidden_size,):
+                raise ValueError(f"{steer}: the steering vector does not fit this model")
+            steering = {vector.layer - 1: vector.scaled(steer_strength)}
         model = TextToText(
             file.config,
             tensors,
@@ -628,6 +642,7 @@ class DllmEngine:
             weights_fingerprint=weights_fingerprint,
             quantize=quantize,
             device=device,
+            steering=steering,
             release=None if adapter else file.release,
         )
         tokenizer = from_model_header(file.tokenizer)

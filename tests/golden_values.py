@@ -494,3 +494,12 @@ T5_DPO_FINGERPRINT = {
     "t5": "f8fda9913bd8b9e2e58ebf396a2de3d5530af18486840de27b1826a550d5b9b3",
     "flan": "738df59708a2b41f877e8dbeaee709bb3c16aef1dcb79e940a0922761391c424",
 }
+
+# Phase 68 (#402, #405): traces of the tiny T5 v1.0 and Flan-T5 models in tests/test_t5_interpret.py over TEXTS[0] as
+# the source and the first 6 tokens of TEXTS[1] as the answer, and a sampled generation of the Flan-T5 model steered
+# by a vector from its decoder's first layer.
+T5_INTERPRET_FINGERPRINT = {
+    "trace_t5": "ada39c0f599490ea3c9c4af5d8d6f66451fcc6eb7b12e8c088902e2ef93779c3",
+    "trace_flan": "3358d75f42c19aa219f290808048cc713b9708f93cca067ae8c50d5ae8ac5ca0",
+    "steered": "ddb3cb7e38c31e37318a6346c8713f5a463b6feeb16df2d6cf0b6c484c7e3692",
+}

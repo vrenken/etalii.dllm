@@ -1128,6 +1128,23 @@ prefer one kind of answer over another. Each line of `pairs.jsonl` holds a `prom
 measures how often the model now prefers the chosen answer. Multiple-choice tasks work on these models too.
 Details: [preference tuning of text-to-text models](training.md#preference-tuning-of-text-to-text-models).
 
+## 64. Looking inside T5 text-to-text models
+
+```bash
+dllm --model flan-t5-small.dllm lens --prompt "translate English to German: The house is wonderful." --answer "Das Haus"
+dllm --model flan-t5-small.dllm attention --prompt "translate English to German: The house is wonderful." \
+    --answer "Das Haus ist" --cross --html cross.html
+dllm --model flan-t5-small.dllm steer --positive "Wonderful, I love it." --negative "Terrible, I hate it." -o happy.json
+dllm --model flan-t5-small.dllm --steer happy.json generate --prompt "Describe the weather."
+```
+
+The interpretability tools of section 11 now work on the T5 and Flan-T5 models of section 60. The prompt is the
+source and `--answer` is the answer written so far. `dllm lens` shows what the decoder would predict after each of
+its layers, `dllm attention --cross` shows which source words each answer word looks at (open `cross.html` in a
+browser), and `dllm steer` builds a steering vector for the decoder that `--steer` adds while it writes. Every
+number is the same on every machine. Details:
+[T5 text-to-text models](interpretability.md#t5-text-to-text-models).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
@@ -1175,10 +1192,10 @@ Details: [preference tuning of text-to-text models](training.md#preference-tunin
   encoders and BERT models with the tanh GELU export to safetensors but not to GGUF (llama.cpp's layout cuts their
   position rows), and GGUF files of RoBERTa or XLM-RoBERTa written by llama.cpp do not import. Unigram tokenizers
   come from `tokenizer.json`; GGUF files with a Unigram vocabulary (T5) are refused.
-- T5 text-to-text models (sections 60 to 63) are checked against `transformers` only on tiny synthetic models, run
+- T5 text-to-text models (sections 60 to 64) are checked against `transformers` only on tiny synthetic models, run
   on the CPU without speculation or prompt caching, have no perplexity in `dllm eval`, export to safetensors but
-  not to GGUF, and cannot be steered or inspected with the
-  interpretability commands yet. Their prompt cannot roll or be healed, `echo` on `/v1/completions` cannot score
+  not to GGUF, and work with `dllm lens`, `attention` and `steer` but not yet with `dllm experts`, `neighbours`,
+  `edit` or `sae`. Their prompt cannot roll or be healed, `echo` on `/v1/completions` cannot score
   their source, and the chat endpoints join the messages' text into one source (T5 has no chat template).
 - Granite MoE's experts are stored fused, so a LoRA adapter on them cannot be exported in the PEFT format (the
   merged model exports fine), and llama.cpp has no Granite MoE architecture to export a GGUF file to.

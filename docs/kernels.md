@@ -381,6 +381,10 @@ double accumulator per output element, a fixed order, one rounding; threads spli
 - **`attention_weights`**: the probabilities of [attention](#attention), written out instead of applied: steps 1 and 2
   above in the same order, then `p_j * (1 / Z)` rounded once to float. Keys a query cannot see (causal horizon,
   window) get 0. Output `[q_len, heads, kv_len]`.
+- **`biased_attention_weights`**: the probabilities of `biased_attention` (DeBERTa, T5), written out instead of
+  applied: scores `(q . k_j + bias_j) * scale` with the dot over `head_dim` ascending in double, the maximum
+  subtracted, `dllm::exp`, the total over keys ascending, then `p_j * (1 / Z)` rounded once to float. Every key is
+  visible. Output `[q_len, heads, kv_len]`; T5's [attention maps](interpretability.md#t5-text-to-text-models).
 - **`cosine_similarity`**: for every row `r` of `matrix[rows, dim]`, `(sum_i m_ri q_i) / (sqrt(sum_i m_ri^2) *
   sqrt(sum_i q_i^2))`, each sum over `i` ascending in double; a zero row or query gives 0.
 - **`column_mean`**: `(sum_r x[r, c]) / rows`, rows ascending in double.
