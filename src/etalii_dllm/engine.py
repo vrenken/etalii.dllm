@@ -502,7 +502,10 @@ class DllmEngine:
                 ensemble_weight=ensemble_weight,
                 steer=steer,
                 steer_strength=steer_strength,
-                used={"index": index, "draft_model": draft_model, "speculate": speculate},
+                prompt_cache=prompt_cache,
+                speculate=speculate,
+                draft_model=draft_model,
+                used={"index": index, "prompt_cache_dir": prompt_cache_dir},
             )
         tensors: Mapping[str, np.ndarray] = file.tensors
         weights_fingerprint = file.fingerprint
@@ -606,11 +609,15 @@ class DllmEngine:
         used: Mapping[str, Any],
         steer: str | Path | None = None,
         steer_strength: float | None = None,
+        prompt_cache: int = 0,
+        speculate: int | None = None,
+        draft_model: str | Path | None = None,
     ) -> DllmEngine:
         """A T5 text-to-text model (:mod:`etalii_dllm.seq2seq`): the prompt is the source, the answer is generated
-        by the decoder. ``contrast_model`` and ``ensemble`` are other text-to-text models with the same tokenizer
-        (#394); ``steer`` is a steering vector file for the decoder (#405). Decoding options that need a decoder-only
-        model are refused."""
+        by the decoder. ``contrast_model``, ``ensemble`` and ``draft_model`` are other text-to-text models with the
+        same tokenizer (#394, #413); ``steer`` is a steering vector file for the decoder (#405). ``prompt_cache``
+        keeps that many caches in memory (#414) and ``speculate`` drafts answer tokens (#413); neither changes the
+        output. Options that need a decoder-only model are refused."""
         from etalii_dllm.bpe import from_model_header
         from etalii_dllm.modelfile import ModelFile
         from etalii_dllm.seq2seq import TextToText
@@ -655,11 +662,17 @@ class DllmEngine:
                 raise ValueError(f"{other}: the {role} model of a text-to-text model must be a text-to-text model")
             return TextToText(loaded.config, loaded.tensors, weights_fingerprint=loaded.fingerprint, quantize=quantize)
 
+        drafter = companion(draft_model, "draft") if draft_model else None
+        if drafter is not None and speculate is None:
+            speculate = DEFAULT_DRAFT_TOKENS
         return DllmEngine(
             model,  # type: ignore[arg-type]
             tokenizer,
             "fp_" + model.weights_fingerprint[:12],
             stop_tokens=[*file.config.eos_token_ids, tokenizer.end_of_sequence],
+            prompt_cache=prompt_cache,
+            speculate=speculate or 0,
+            draft_model=drafter,  # type: ignore[arg-type]
             contrast_model=companion(contrast_model, "contrast") if contrast_model else None,  # type: ignore[arg-type]
             ensemble=[(companion(other, "ensemble"), float(weight)) for other, weight in ensemble],  # type: ignore[misc]
             ensemble_weight=ensemble_weight,

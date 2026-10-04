@@ -602,8 +602,8 @@ answer is written one token at a time after it. The sequence the sampler sees as
    decoder matrix and the LM head (the tied word embedding included), as for the encoder's matrices.
 
 Decoding is [the decoder's](#5-the-decoder) sampling over these logits, with the source as the prompt; the answer
-stops at `</s>`. The context window counts the source and the answer together. Rolling, token healing and
-speculation do not apply to text-to-text models. The other decoding modes carry over with the source in the
+stops at `</s>`. The context window counts the source and the answer together. Rolling and token healing do not
+apply to text-to-text models; speculation and the prompt cache only save work, so they need no rule here. The other decoding modes carry over with the source in the
 prompt's place:
 
 - [Beam search](#beam-search) extends answers after the source exactly as after a prompt.

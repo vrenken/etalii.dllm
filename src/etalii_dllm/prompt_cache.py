@@ -33,6 +33,8 @@ import numpy as np
 
 class TokenCache(Protocol):
     tokens: list[int]
+    """The tokens the cache holds. A cache can define ``reusable(prompt)`` and ``covers(other)`` instead of the
+    shared-prefix rules (a T5 cache, whose encoder states only serve the very same source)."""
 
 
 C = TypeVar("C", bound=TokenCache)
@@ -55,6 +57,19 @@ def reusable(cache_tokens: Sequence[int], prompt: Sequence[int]) -> int:
     """How many prompt tokens a cache holding ``cache_tokens`` saves: the shared prefix, less one when it covers the
     whole prompt (the last position is recomputed to get its hidden state)."""
     return min(shared_prefix(cache_tokens, prompt), max(len(prompt) - 1, 0))
+
+
+def _reusable(cache: TokenCache, prompt: Sequence[int]) -> int:
+    own = getattr(cache, "reusable", None)
+    return int(own(prompt)) if own is not None else reusable(cache.tokens, prompt)
+
+
+def _covers(cache: TokenCache, other: TokenCache) -> bool:
+    """Whether ``cache`` serves every prompt ``other`` would (``other`` holds a prefix of it)."""
+    own = getattr(cache, "covers", None)
+    if own is not None:
+        return bool(own(other))
+    return shared_prefix(other.tokens, cache.tokens) >= len(other.tokens)
 
 
 _MAGIC = b"DLLMKV1\n"
@@ -191,7 +206,7 @@ class PromptCache(Generic[C]):
         with self._lock:
             best, saved = -1, 0
             for index, cache in enumerate(self._idle):
-                length = reusable(cache.tokens, prompt)
+                length = _reusable(cache, prompt)
                 if length > 0 and length >= saved:
                     best, saved = index, length
             if best >= 0:
@@ -205,7 +220,7 @@ class PromptCache(Generic[C]):
             return
         with self._lock:
             tokens = cache.tokens
-            self._idle = [c for c in self._idle if c is not cache and shared_prefix(c.tokens, tokens) < len(c.tokens)]
+            self._idle = [c for c in self._idle if c is not cache and not _covers(cache, c)]
             self._idle.append(cache)
             del self._idle[: max(0, len(self._idle) - self.capacity)]
             if self.store is None:

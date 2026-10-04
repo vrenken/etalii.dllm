@@ -1159,6 +1159,20 @@ edit` changes one fact by editing the encoder, which reads the subject; repeatin
 byte for byte. `dllm sae` finds features in the decoder that you can steer with (section 64), and `dllm neighbours`
 explores the word embedding. Details: [T5 text-to-text models](interpretability.md#t5-text-to-text-models).
 
+## 66. Faster T5 answers with the same bits
+
+```bash
+dllm --model flan-t5-small.dllm generate --prompt "Translate to German: My name is Wolfgang Amadeus." --speculate
+dllm --model flan-t5-base.dllm --draft-model flan-t5-small.dllm generate --prompt "Summarize: ..."
+```
+
+T5 and Flan-T5 models (section 60) now use speculative decoding and the prompt cache, like the chat models of
+sections 3 and 4. `--speculate` guesses the next answer tokens from the source and the answer so far and checks them
+in one decoder pass; `--draft-model` lets a smaller T5 model with the same tokenizer guess. The server also remembers
+the encoder pass of recent sources, so asking about the same text again skips it (`cached_tokens` in the usage). The
+answers, logprobs and fingerprints are exactly those of plain decoding; only the speed changes. Details:
+[speculative decoding](api.md#speculative-decoding) and [prompt caching](api.md#prompt-caching).
+
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
   Qwen2.5-0.5B-Instruct, Qwen2.5-1.5B-Instruct, Qwen3-0.6B, TinyLlama-1.1B-Chat, OLMo-2-1B-Instruct,
@@ -1205,8 +1219,8 @@ explores the word embedding. Details: [T5 text-to-text models](interpretability.
   encoders and BERT models with the tanh GELU export to safetensors but not to GGUF (llama.cpp's layout cuts their
   position rows), and GGUF files of RoBERTa or XLM-RoBERTa written by llama.cpp do not import. Unigram tokenizers
   come from `tokenizer.json`; GGUF files with a Unigram vocabulary (T5) are refused.
-- T5 text-to-text models (sections 60 to 65) are checked against `transformers` only on tiny synthetic models, run
-  on the CPU without speculation or prompt caching, have no perplexity in `dllm eval`, and export to safetensors but
+- T5 text-to-text models (sections 60 to 66) are checked against `transformers` only on tiny synthetic models, run
+  on the CPU with an in-memory prompt cache only (no `--persistent-cache`), have no perplexity in `dllm eval`, and export to safetensors but
   not to GGUF. Their prompt cannot roll or be healed, `echo` on `/v1/completions` cannot score
   their source, and the chat endpoints join the messages' text into one source (T5 has no chat template).
 - Granite MoE's experts are stored fused, so a LoRA adapter on them cannot be exported in the PEFT format (the

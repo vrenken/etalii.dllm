@@ -179,6 +179,7 @@ class Generation:
             new_text and not healed and bool(getattr(generator.tokenizer, "strips_leading_space", False))
         )
         self._cache = cache
+        self._end_of_source = getattr(generator.model, "end_of_source", None)
         self._steps = self._run(generator, context, max_tokens, options, stop, constraint, top_logprobs)
 
     def __iter__(self) -> Iterator[Step]:
@@ -353,7 +354,9 @@ class Generation:
             return []
         draft = drafter.propose(context, min(speculate, room))
         for i, token in enumerate(draft):
-            if not 0 <= token < vocabulary:  # a draft model's own tokens past the model's vocabulary
+            # A draft model's own tokens past the model's vocabulary; and a text-to-text model's answer never holds
+            # </s>, which would start a new source (#413), so a draft stops before it.
+            if not 0 <= token < vocabulary or token == self._end_of_source:
                 del draft[i:]
                 break
         self.drafted_tokens += len(draft)
@@ -435,6 +438,8 @@ class Generator:
         self.prompt_cache: PromptCache | None = None
         if new_cache is not None and prompt_cache > 0:
             store = None
+            if prompt_cache_dir and getattr(model, "end_of_source", None) is not None:
+                raise ValueError("a text-to-text model's prompt cache is kept in memory only")
             if prompt_cache_dir:
                 from etalii_dllm import __version__
 

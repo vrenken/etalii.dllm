@@ -222,7 +222,12 @@ the bits of a lone run.
 
 The cache can be copied (`export` and `restore`), so beam search gives every hypothesis its own copy.
 `answer_logits(source, answer)` gives the logits before every answer token, for scoring and `dllm eval`.
-Text-to-text models do not speculate or use the prompt cache.
+`forward_cached_last` reads several answer tokens in one decoder pass: their rows go through every linear layer
+together and each attends to the keys up to its own position, so each row has the bits of a single step. Speculative
+decoding checks a draft with it (prompt lookup over the source and the answer, or a T5 draft model), and drafts stop
+before `</s>`, which would start a new source. A cache whose answer diverges from the new one keeps the positions they
+share. The prompt cache lends a T5 cache only to a request with the very same source, since one changed token changes
+every encoder state; it is kept in memory, not on disk.
 
 A steering vector is added to the decoder's residual stream after its layer, as in decoder-only models. A recorder
 passed to the encoder and to the decoder steps (`seq2seq.Recorder`) is shown every intermediate and only copies it;
