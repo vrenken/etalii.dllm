@@ -201,7 +201,10 @@ original checkpoint import to the same bytes and the same fingerprint.
   `experts.gate_up_proj`/`down_proj` import to the same tensors; the router is `mlp.gate` (`block_sparse_moe.gate`).
   GGUF files of architecture `qwen3moe`, `olmoe` and `llama` with `expert_count` (Mixtral) import from
   `ffn_gate_inp` and the stacked `ffn_{gate,up,down}_exps` (or older per-expert `ffn_gate.E`); `expert_weights_norm`
-  is honoured when present. OLMoE's `clip_qkv`, shared experts other than those below and gating other than softmax
+  is honoured when present. GGUF `t5` and `t5encoder` files (T5 through GGUF, [building
+  models](model-building.md#t5-models-through-gguf)) import as a T5 text-to-text model or encoder:
+  `relative_buckets_count` sets `position_buckets`, `max_relative_positions` is llama.cpp's 128, a gated MLP
+  (`ffn_gate`) runs the tanh GELU and a plain one ReLU, and the head is tied when `output` is missing. OLMoE's `clip_qkv`, shared experts other than those below and gating other than softmax
   are refused. The routing is in the [specification](specification.md#5-the-decoder).
 - **Shared experts.** `shared_expert_intermediate_size` adds an MLP every token of a sparse layer runs, stored as
   `layers.N.mlp.shared.{gate,up,down}.weight`; `shared_expert_gate` scales its output by

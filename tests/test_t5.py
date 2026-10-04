@@ -729,7 +729,7 @@ def test_export_round_trips(embedder, sentence_t5, tmp_path):
         tokens = long_tokens(engine)
         expected = transformers_states(tmp_path / name, tokens)
         np.testing.assert_allclose(engine.model.hidden_states(tokens), expected, atol=3e-5)
-        with pytest.raises(ExportError, match="T5"):
+        with pytest.raises(ExportError, match="safetensors"):
             export_gguf(original, tmp_path / f"{name}.gguf")
     modules = json.loads((tmp_path / "sentence-t5" / "modules.json").read_text())
     assert [m["path"] for m in modules] == ["", "1_Pooling", "2_Dense", "3_Normalize"]

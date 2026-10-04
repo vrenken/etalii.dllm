@@ -1173,6 +1173,18 @@ the encoder pass of recent sources, so asking about the same text again skips it
 answers, logprobs and fingerprints are exactly those of plain decoding; only the speed changes. Details:
 [speculative decoding](api.md#speculative-decoding) and [prompt caching](api.md#prompt-caching).
 
+## 67. T5 models as GGUF files
+
+```bash
+dllm export flan-t5-small.dllm --format gguf -o flan-t5-small.gguf
+dllm import flan-t5-small.gguf -o again.dllm
+```
+
+T5 and Flan-T5 models (section 60) and T5 embedders (section 58) now export to GGUF in llama.cpp's own `t5` and
+`t5encoder` layouts, vocabulary included, and GGUF files of T5 models import. Importing a file you exported gives
+back the same model, with the same answers and fingerprints; exporting twice writes the same bytes. Details:
+[T5 models through GGUF](model-building.md#t5-models-through-gguf).
+
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
   Qwen2.5-0.5B-Instruct, Qwen2.5-1.5B-Instruct, Qwen3-0.6B, TinyLlama-1.1B-Chat, OLMo-2-1B-Instruct,
@@ -1214,14 +1226,15 @@ answers, logprobs and fingerprints are exactly those of plain decoding; only the
   has no ModernBERT layout), and its fine-tuning does not freeze the padding row. DeBERTa (section 56) is checked
   only on tiny synthetic models too, imports only DeBERTa-v3's layout from a `tokenizer.json`, and exports to
   safetensors but not to GGUF (llama.cpp has no DeBERTa layout). T5 encoders (sections 58 and 59) are checked only
-  on tiny synthetic models, train only with the embedding objective, and export to safetensors but not to GGUF, as do embedders with a `Dense` projection; a T5 with a gated
+  on tiny synthetic models, train only with the embedding objective, and export to GGUF only with llama.cpp's fixed bucket distance of 128 and without a `Dense` projection; a T5 with a gated
   MLP other than the tanh GELU does not export (transformers has no such `feed_forward_proj`). RoBERTa and XLM-RoBERTa
   encoders and BERT models with the tanh GELU export to safetensors but not to GGUF (llama.cpp's layout cuts their
   position rows), and GGUF files of RoBERTa or XLM-RoBERTa written by llama.cpp do not import. Unigram tokenizers
-  come from `tokenizer.json`; GGUF files with a Unigram vocabulary (T5) are refused.
-- T5 text-to-text models (sections 60 to 66) are checked against `transformers` only on tiny synthetic models, run
-  on the CPU with an in-memory prompt cache only (no `--persistent-cache`), have no perplexity in `dllm eval`, and export to safetensors but
-  not to GGUF. Their prompt cannot roll or be healed, `echo` on `/v1/completions` cannot score
+  come from `tokenizer.json` or, for T5, a GGUF `t5` vocabulary; other GGUF Unigram vocabularies are refused.
+- T5 text-to-text models (sections 60 to 67) are checked against `transformers` only on tiny synthetic models, run
+  on the CPU with an in-memory prompt cache only (no `--persistent-cache`), have no perplexity in `dllm eval`, and
+  export to GGUF only with llama.cpp's fixed bucket distance of 128 (real T5 models have it); GGUF files are not
+  checked against llama.cpp itself, only against the `gguf` package's layout. Their prompt cannot roll or be healed, `echo` on `/v1/completions` cannot score
   their source, and the chat endpoints join the messages' text into one source (T5 has no chat template).
 - Granite MoE's experts are stored fused, so a LoRA adapter on them cannot be exported in the PEFT format (the
   merged model exports fine), and llama.cpp has no Granite MoE architecture to export a GGUF file to.
