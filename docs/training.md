@@ -294,6 +294,47 @@ same for ModernBERT, its fused adapters included, `tests/test_deberta.py` for De
 finite differences too), and `tests/test_t5.py` for T5 (ReLU, SiLU, GELU, gated ReLU and gated tanh GELU MLPs) and
 for the `Dense` projection, checked through sentence-transformers' whole module chain on T5 and on BERT.
 
+## Text-to-text models
+
+T5 and Flan-T5 text-to-text models (Phase 65) fine-tune on pairs of a source text and the answer it should get,
+with the same command, options, checkpoints, receipts and LoRA as the other families:
+
+```bash
+dllm finetune flan-t5-small.dllm --data pairs.jsonl -o flan-tuned.dllm --steps 100 --batch-size 8 --lora-rank 8
+```
+
+```jsonl
+{"input": "translate English to German: How old are you?", "target": "Wie alt bist du?"}
+{"prompt": "summarize: The meeting moved to Thursday at ten.", "completion": "Meeting: Thursday 10:00."}
+{"messages": [{"role": "user", "content": "Is the sky blue?"}, {"role": "assistant", "content": "Yes."}]}
+```
+
+- **Examples.** `input`/`target`, `prompt`/`completion`, or a conversation whose last message is the assistant's
+  answer (what `dllm finetune --teacher` writes, so distillation into a text-to-text model works too). The source of
+  a conversation is the other messages' contents joined by a blank line, as the engine renders a chat for T5. Each
+  text is cut to `--sequence-length - 1` tokens and ended with `</s>`. The receipt counts `"examples"`.
+- **The loss** is teacher forcing, as `transformers` computes it with `labels=target`: the decoder reads
+  `[<pad>, *target[:-1]]` and the loss is the mean cross-entropy of every target token (`</s>` included) over the
+  step's examples. Only the language-model objective applies; `--dpo` is refused.
+- **The backward pass** (`training/seq2seq_backprop.py`) runs the whole target at once. Its self-attention is
+  `biased_attention` with the decoder's one-directional bucket bias and `-inf` for later keys, whose exponentials are
+  exactly 0, so every row equals the served model's incremental step bit for bit. The gradients flow back through
+  the LM head (with a tied head, times the forward's `d_model ** -0.5`), the decoder's layers (MLP, then
+  cross-attention, whose key and value gradients go through each layer's `k` and `v` projections into the encoder
+  states, added in float32 last layer first, then self-attention, whose bias gradient scatters into the decoder's
+  bucket table), and then the encoder's T5 backward pass. The word embedding adds its three gradients in float32 in
+  a fixed order: the tied head's, the decoder inputs', then the encoder's.
+- **LoRA** adapts `q k v o up down` (and `gate` for a gated MLP) in the encoder and the decoder; q, k, v and o adapt
+  both the self-attention and the cross-attention, as PEFT's T5 targets (`q`, `v`) do. The PEFT file uses
+  `T5ForConditionalGeneration`'s names (`encoder.block.N.layer.0.SelfAttention.q`,
+  `decoder.block.N.layer.1.EncDecAttention.k`, `decoder.block.N.layer.2.DenseReluDense.wi_0`) with task type
+  `SEQ_2_SEQ_LM`; `--adapter` and `dllm import ADAPTER --base` merge it.
+
+`tests/test_t5_text_finetuning.py` checks that the training logits equal the served bits, the gradients against
+`transformers`' autograd for T5 v1.0 (tied head, ReLU) and Flan-T5 (gated tanh GELU, own head), golden runs with
+bit-exact resumption, `dllm finetune` with receipts and `dllm replay`, and LoRA adapters whose names are
+`transformers`' own modules.
+
 ## What makes it reproducible
 
 - **Gradients** come from C++ backward kernels with the same rules as the forward kernels (`docs/kernels.md`):

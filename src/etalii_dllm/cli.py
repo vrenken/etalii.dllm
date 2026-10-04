@@ -179,8 +179,6 @@ def _finetune(args: argparse.Namespace) -> int:
         return 1
     try:
         base = ModelFile(args.base)
-        if base.config.is_text_to_text:
-            raise ValueError("text-to-text models cannot be fine-tuned yet")
         objective = args.objective or ("dpo" if args.dpo else "lm")
         if args.objective is None and not args.dpo and base.config.is_encoder:
             objective = "classifier" if base.config.classifier_labels else "embedding"
@@ -235,6 +233,7 @@ def _finetune(args: argparse.Namespace) -> int:
             f" (float32: {tuner.base.float_nbytes / 2**20:.1f} MiB)"
         )
     unit = {"dpo": "pairs", "embedding": "examples", "classifier": "examples"}.get(objective, "windows")
+    unit = "examples" if base.config.is_text_to_text else unit
     print(f"data:               {len(data)} {unit} of up to {data.sequence_length} tokens, {data.fingerprint[:16]}")
     total = tuner.run.steps
 
@@ -544,7 +543,8 @@ def main(argv: list[str] | None = None) -> int:
     finetune.add_argument("base", help="the model.dllm file to start from")
     finetune.add_argument(
         "--data",
-        help=".txt file, or .jsonl with {'text'} or {'messages'} lines (with --teacher: where to write its answers, "
+        help=".txt file, or .jsonl with {'text'} or {'messages'} lines ({'input', 'target'} for a text-to-text model; "
+        "with --teacher: where to write its answers, "
         "default OUTPUT.distill.jsonl)",
     )
     finetune.add_argument("--teacher", help="distill: train on this model.dllm's greedy answers to --prompts")

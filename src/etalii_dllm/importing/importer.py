@@ -957,29 +957,35 @@ def _t5_text_to_text_name(name: str, tied: bool) -> str | None:
     return _t5_name(name)
 
 
-def _convert_t5_text_to_text(directory: Path, raw_config: dict[str, Any], context_length: int | None) -> _Converted:
-    """A T5ForConditionalGeneration checkpoint (T5 v1.0, v1.1, Flan-T5) as a text-to-text model that keeps its
-    decoder (:mod:`etalii_dllm.seq2seq`): ``num_decoder_layers`` decoder layers, the LM head tied to the shared
-    embedding (``tie_word_embeddings``, T5 v1.0) or its own ``lm_head``, ``</s>`` as the end of the source."""
+def t5_text_to_text_config(raw_config: dict[str, Any], context_length: int | None = None) -> TransformerConfig:
+    """The description of a T5ForConditionalGeneration ``config.json``: :func:`t5_config`'s encoder with
+    ``num_decoder_layers`` decoder layers, the LM head tied to the shared embedding (``tie_word_embeddings``, T5
+    v1.0) or not, and ``</s>`` (``eos_token_id``) as the end of the source."""
     config = t5_config(raw_config, context_length)
     if int(raw_config.get("decoder_start_token_id", 0)) != 0:
         raise ModelImportError("only T5 models whose decoder starts with token 0 (<pad>) are supported")
+    eos = raw_config.get("eos_token_id", 1)
+    try:
+        return dataclasses.replace(
+            config,
+            decoder_layers=int(raw_config.get("num_decoder_layers") or raw_config["num_layers"]),
+            tie_word_embeddings=bool(raw_config.get("tie_word_embeddings", True)),
+            eos_token_ids=(int(eos[0] if isinstance(eos, list) else eos),),
+        )
+    except ValueError as error:
+        raise ModelImportError(str(error)) from error
+
+
+def _convert_t5_text_to_text(directory: Path, raw_config: dict[str, Any], context_length: int | None) -> _Converted:
+    """A T5ForConditionalGeneration checkpoint (T5 v1.0, v1.1, Flan-T5) as a text-to-text model that keeps its
+    decoder (:mod:`etalii_dllm.seq2seq`), described by :func:`t5_text_to_text_config`."""
+    config = t5_text_to_text_config(raw_config, context_length)
     if not (directory / "tokenizer.json").exists():
         raise ModelImportError(
             "this T5 checkpoint has no tokenizer.json (only spm.model); save it with a fast tokenizer first, "
             "for example AutoTokenizer.from_pretrained(dir).save_pretrained(dir)"
         )
-    tied = bool(raw_config.get("tie_word_embeddings", True))
-    eos = raw_config.get("eos_token_id", 1)
-    try:
-        config = dataclasses.replace(
-            config,
-            decoder_layers=int(raw_config.get("num_decoder_layers") or raw_config["num_layers"]),
-            tie_word_embeddings=tied,
-            eos_token_ids=(int(eos[0] if isinstance(eos, list) else eos),),
-        )
-    except ValueError as error:
-        raise ModelImportError(str(error)) from error
+    tied = config.tie_word_embeddings
     checkpoint = open_checkpoint(directory)
     if "shared.weight" not in checkpoint and "encoder.embed_tokens.weight" in checkpoint:
         embedding = checkpoint["encoder.embed_tokens.weight"]

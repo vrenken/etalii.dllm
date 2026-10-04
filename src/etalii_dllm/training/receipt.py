@@ -36,6 +36,7 @@ from etalii_dllm.modelfile import ModelFile, data_fingerprint
 from etalii_dllm.training.data import TrainingData, read_documents
 from etalii_dllm.training.encoder_data import ENCODER_OBJECTIVES, EncoderData, read_examples
 from etalii_dllm.training.preference import PreferenceData, read_pairs
+from etalii_dllm.training.seq2seq_data import TextToTextData
 from etalii_dllm.training.trainer import FineTuner, RunConfig, StepResult
 
 if TYPE_CHECKING:
@@ -47,13 +48,19 @@ FORMAT = "dllm-train/1"
 
 def load_data(
     engine: DllmEngine, base: ModelFile, path: str | Path, sequence_length: int, objective: str = "lm"
-) -> TrainingData | PreferenceData | EncoderData:
+) -> TrainingData | PreferenceData | EncoderData | TextToTextData:
     """The training windows of ``path`` as ``dllm finetune`` builds them: chats rendered with the model's own
     template, documents separated by its end-of-sequence token. For ``objective="dpo"``, the preference pairs of
     ``path`` (chat prompts rendered with the generation prompt, answers ended by the end-of-sequence token); for
-    ``embedding`` and ``classifier``, an encoder's examples (:mod:`etalii_dllm.training.encoder_data`)."""
+    ``embedding`` and ``classifier``, an encoder's examples (:mod:`etalii_dllm.training.encoder_data`); for a
+    text-to-text model, its source and target pairs (:mod:`etalii_dllm.training.seq2seq_data`)."""
     if objective in ENCODER_OBJECTIVES:
         return EncoderData.from_records(read_examples(path, objective), engine, objective, sequence_length)
+    if base.config.is_text_to_text:
+        if objective != "lm":
+            raise ValueError("a text-to-text model trains with the language-model objective (on its targets)")
+        end = base.config.eos_token_ids[0] if base.config.eos_token_ids else 1
+        return TextToTextData.from_file(path, engine.tokenizer.encode, sequence_length, end)
     render: Callable[[Any], str] | None = None
     prompt = objective == "dpo"
     if engine.chat_template is not None:
@@ -100,7 +107,7 @@ def make_receipt(tuner: FineTuner, data_file: str | Path) -> dict[str, Any]:
 
 
 def _unit(data: object) -> str:
-    if isinstance(data, EncoderData):
+    if isinstance(data, EncoderData | TextToTextData):
         return "examples"
     return "pairs" if isinstance(data, PreferenceData) else "windows"
 

@@ -80,6 +80,8 @@ from etalii_dllm.training.encoder_backprop import (
 from etalii_dllm.training.encoder_data import ENCODER_OBJECTIVES, EncoderData
 from etalii_dllm.training.optimizer import AdamW, AdamWConfig
 from etalii_dllm.training.preference import PreferenceData, PreferencePair, log_sigmoid
+from etalii_dllm.training.seq2seq_backprop import TextToTextGradients
+from etalii_dllm.training.seq2seq_data import TextToTextData
 
 CHECKPOINT_MAGIC = b"DLLMCKPT"
 CHECKPOINT_VERSION = 1
@@ -184,16 +186,20 @@ class FineTuner:
         self,
         config: TransformerConfig,
         params: Mapping[str, np.ndarray],
-        data: TrainingData | PreferenceData | EncoderData,
+        data: TrainingData | PreferenceData | EncoderData | TextToTextData,
         run: RunConfig,
         *,
         base_fingerprint: str,
         metadata: Mapping[str, Any],
         reference: Sequence[tuple[float, float]] | None = None,
     ) -> None:
-        if config.is_text_to_text:
-            raise ValueError("text-to-text models cannot be fine-tuned yet")
         encoder_run = run.objective in ENCODER_OBJECTIVES
+        if config.is_text_to_text != isinstance(data, TextToTextData):
+            if config.is_text_to_text:
+                raise ValueError("a text-to-text model trains on source and target pairs")
+            raise ValueError("source and target pairs train text-to-text models")
+        if config.is_text_to_text and run.objective != "lm":
+            raise ValueError("a text-to-text model trains with the language-model objective (on its targets)")
         if config.is_encoder != encoder_run:
             if config.is_encoder:
                 raise ValueError("an encoder trains with the embedding or classifier objective, not language modelling")
@@ -206,7 +212,8 @@ class FineTuner:
             raise ValueError("the model is a cross-encoder; train it with the classifier objective")
         if not encoder_run and isinstance(data, EncoderData):
             raise ValueError("encoder examples train encoders")
-        if not encoder_run and isinstance(data, PreferenceData) != (run.objective == "dpo"):
+        pairs_run = isinstance(data, PreferenceData)
+        if not encoder_run and not config.is_text_to_text and pairs_run != (run.objective == "dpo"):
             raise ValueError("a DPO run trains on preference pairs, a language-model run on text windows")
         if data.sequence_length != run.sequence_length:
             raise ValueError("the data was windowed for a different sequence length")
@@ -242,7 +249,8 @@ class FineTuner:
         self.distillation: dict[str, Any] | None = None
         """Where the training data came from when it is a teacher's answers (:mod:`etalii_dllm.training.distill`)."""
         self.losses: list[float] = []
-        self._gradients = DecoderGradients(config)
+        self._gradients = DecoderGradients(config) if not config.is_text_to_text else None
+        self._text_to_text = TextToTextGradients(config) if config.is_text_to_text else None
         self._encoder = EncoderGradients(config) if encoder_run else None
         self.pooling = str((metadata.get("embedding") or {}).get("pooling", "mean"))
         """Embedding runs: how sentence vectors are pooled (the model's own pooling)."""
@@ -263,7 +271,7 @@ class FineTuner:
 
     @classmethod
     def from_model_file(
-        cls, model: ModelFile, data: TrainingData | PreferenceData | EncoderData, run: RunConfig
+        cls, model: ModelFile, data: TrainingData | PreferenceData | EncoderData | TextToTextData, run: RunConfig
     ) -> FineTuner:
         return cls(
             model.config,
@@ -286,6 +294,8 @@ class FineTuner:
             loss, gradients = self._classifier_gradients(self.data)
         elif isinstance(self.data, PreferenceData):
             loss, gradients = self._preference_gradients(self.data)
+        elif isinstance(self.data, TextToTextData):
+            loss, gradients = self._text_to_text_gradients(self.data)
         else:
             loss, gradients = self._language_model_gradients(self.data)
         if self.lora is not None:
@@ -297,6 +307,7 @@ class FineTuner:
         return StepResult(self.step, loss, learning_rate, norm)
 
     def _language_model_gradients(self, data: TrainingData) -> tuple[float, dict[str, FloatArray]]:
+        assert self._gradients is not None
         windows = data.batch(self.step, self.run.batch_size, self.run.seed)
         targets_total = sum(len(window) - 1 for window in windows)
         scale = 1.0 / targets_total
@@ -320,8 +331,24 @@ class FineTuner:
             return loss_total / targets_total, gradients
         return loss_total / targets_total + coefficient * router_total / len(windows), gradients
 
+    def _text_to_text_gradients(self, data: TextToTextData) -> tuple[float, dict[str, FloatArray]]:
+        """Teacher forcing: the mean cross-entropy over every target token of the step's examples."""
+        assert self._text_to_text is not None
+        examples = data.batch(self.step, self.run.batch_size, self.run.seed)
+        targets_total = sum(len(target) for _, target in examples)
+        weights = self.weights()
+        loss_total = 0.0
+        gradients: dict[str, FloatArray] = {}
+        for source, target in examples:
+            loss, example_gradients = self._text_to_text.loss_and_gradients(
+                weights, source, target, scale=1.0 / targets_total
+            )
+            loss_total += loss
+            _accumulate(gradients, example_gradients)
+        return loss_total / targets_total, gradients
+
     def _preference_gradients(self, data: PreferenceData) -> tuple[float, dict[str, FloatArray]]:
-        assert self.reference is not None
+        assert self.reference is not None and self._gradients is not None
         beta = self.run.beta
         loss_total = 0.0
         gradients: dict[str, FloatArray] = {}
@@ -402,6 +429,7 @@ class FineTuner:
 
     def log_probability(self, weights: Mapping[str, np.ndarray], pair: PreferencePair, which: str) -> float:
         """The log-probability (double) that ``weights`` give the ``chosen`` or ``rejected`` answer of ``pair``."""
+        assert self._gradients is not None
         tokens, targets = pair.sequence(which)
         loss, _ = cross_entropy(self._gradients.logits(weights, tokens), targets)
         return -loss

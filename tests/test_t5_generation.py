@@ -289,27 +289,16 @@ def test_text_to_text_refusals(flan, tmp_path):
         engine.embed(TEXTS[0])
 
 
-def test_training_lora_and_export_refusals(flan, tmp_path, capsys):
-    from etalii_dllm.cli import main as cli
-    from etalii_dllm.exporting import export_gguf, export_safetensors
-    from etalii_dllm.lora import AdapterError, LoraConfig, target_weights
+def test_gguf_and_decoder_refusals(flan, tmp_path):
+    from etalii_dllm.exporting import ExportError, export_gguf
     from etalii_dllm.transformer import Transformer
 
     checkpoint, _ = flan
-    path = checkpoint.parent / "model.dllm"
-    model = ModelFile(path)
-    with pytest.raises(ValueError, match="text-to-text"):
-        export_safetensors(model, tmp_path / "out")
-    with pytest.raises(ValueError, match="text-to-text"):
+    model = ModelFile(checkpoint.parent / "model.dllm")
+    with pytest.raises(ExportError, match="safetensors only"):
         export_gguf(model, tmp_path / "out.gguf")
-    with pytest.raises(AdapterError, match="text-to-text"):
-        target_weights(model.config, LoraConfig(rank=2, alpha=4.0))
     with pytest.raises(ValueError, match="text-to-text"):
         Transformer(model.config, model.tensors)
-    data = tmp_path / "data.jsonl"
-    data.write_text(json.dumps({"text": TEXTS[0]}) + "\n", encoding="utf-8")
-    assert cli(["finetune", str(path), "--data", str(data), "--output", str(tmp_path / "x.dllm")]) == 1
-    assert "text-to-text" in capsys.readouterr().err
 
 
 # The reference implementation and verify (#385)

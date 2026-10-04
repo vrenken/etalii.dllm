@@ -126,6 +126,22 @@ dllm export ms-marco-tuned.dllm --format gguf -o ms-marco-tuned.gguf          # 
   `linear.bias`) between the pooling and `Normalize`. GGUF has no place for it, so such models export to safetensors
   only.
 
+### Text-to-text models
+
+T5 and Flan-T5 text-to-text models (Phase 65) export to safetensors as `T5ForConditionalGeneration`, for example
+after [fine-tuning one](training.md#text-to-text-models):
+
+```bash
+dllm export flan-tuned.dllm --format safetensors -o flan-tuned/
+```
+
+The encoder is written as for a T5 encoder, the decoder under `decoder.block.N` (`layer.0.SelfAttention`,
+`layer.1.EncDecAttention`, `layer.2.DenseReluDense`) with its bucket table in the first block, and `lm_head` unless
+the head is tied to `shared` (T5 v1.0). The config (`num_decoder_layers`, `tie_word_embeddings`,
+`decoder_start_token_id` 0) is read back through the importer first and must give the same model, and importing the
+directory gives back the same fingerprint. `T5ForConditionalGeneration.from_pretrained(dir)` loads it and its greedy
+`generate` gives the engine's answer. GGUF is refused.
+
 ### SentencePiece models through GGUF
 
 GGUF files of TinyLlama, Llama 2, Mistral or Phi-3 usually carry a SentencePiece vocabulary
