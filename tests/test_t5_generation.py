@@ -295,7 +295,7 @@ def test_gguf_and_decoder_refusals(flan, tmp_path):
 
     checkpoint, _ = flan
     model = ModelFile(checkpoint.parent / "model.dllm")
-    with pytest.raises(ExportError, match="safetensors only"):
+    with pytest.raises(ExportError, match="safetensors"):
         export_gguf(model, tmp_path / "out.gguf")
     with pytest.raises(ValueError, match="text-to-text"):
         Transformer(model.config, model.tensors)

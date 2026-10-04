@@ -301,5 +301,5 @@ def test_export_round_trips(t5, flan, tmp_path):
             greedy = model.generate(torch.tensor([source]), **options)[0]
         answer = engine.complete(TEXTS[0], 8, SamplingOptions(temperature=0.0)).tokens
         assert greedy.tolist()[1 : 1 + len(answer)] == list(answer)
-        with pytest.raises(ExportError, match="safetensors only"):
+        with pytest.raises(ExportError, match="safetensors"):
             export_gguf(original, tmp_path / f"{name}.gguf")

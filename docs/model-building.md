@@ -120,7 +120,8 @@ dllm export ms-marco-tuned.dllm --format gguf -o ms-marco-tuned.gguf          # 
   the encoder ties `embed_tokens` to, the bucket table in the first block's attention, the MLP as `wi`, or `wi_0` and
   `wi_1` when it is gated, and `wo`), `feed_forward_proj` `relu`, `gelu`, `gelu_new`, `silu` or `gated-gelu`, plus
   the sentence-transformers modules. transformers has no gated MLP with another activation, so such a model is
-  refused; llama.cpp has no T5 encoder embedder layout, so `--format gguf` refuses T5 too.
+  refused. `--format gguf` writes llama.cpp's `t5encoder` layout (see [T5 models through
+  GGUF](#t5-models-through-gguf)).
 - An embedder's **`Dense` projection** (any encoder family) is written as the sentence-transformers module `2_Dense`
   (`config.json` with the sizes, the bias and the activation; `model.safetensors` with `linear.weight` and
   `linear.bias`) between the pooling and `Normalize`. GGUF has no place for it, so such models export to safetensors
@@ -140,7 +141,32 @@ The encoder is written as for a T5 encoder, the decoder under `decoder.block.N` 
 the head is tied to `shared` (T5 v1.0). The config (`num_decoder_layers`, `tie_word_embeddings`,
 `decoder_start_token_id` 0) is read back through the importer first and must give the same model, and importing the
 directory gives back the same fingerprint. `T5ForConditionalGeneration.from_pretrained(dir)` loads it and its greedy
-`generate` gives the engine's answer. GGUF is refused.
+`generate` gives the engine's answer.
+
+### T5 models through GGUF
+
+```bash
+dllm export flan-t5-small.dllm --format gguf -o flan-t5-small.gguf
+dllm import flan-t5-small.gguf -o again.dllm      # the same weights fingerprint
+```
+
+`--format gguf` writes T5 and Flan-T5 text-to-text models in llama.cpp's `t5` layout and T5 encoders in its
+`t5encoder` layout, as llama.cpp's converter does: `token_embd`, `output` (left out when the head is tied, T5 v1.0),
+`enc.blk.N.attn_q|k|v|o`, `attn_norm`, `ffn_norm`, `ffn_up` (and `ffn_gate` when the MLP is gated), `ffn_down`,
+`enc.output_norm`, and the decoder's `dec.blk.N...` with `cross_attn_*` for the attention over the source, each
+stack's bucket table as `attn_rel_b` in its first block, and the sizes, the buckets and `decoder_start_token_id` in
+the `t5.*` keys. The vocabulary is a GGUF `t5` tokenizer: the Unigram pieces with their scores and SentencePiece
+token types, `precompiled_charsmap`, `add_space_prefix` and `remove_extra_whitespaces`, padded with unused `[PADn]`
+pieces to the embedding's rows; the export checks that this vocabulary encodes probe texts as the original does.
+`tokenizer.huggingface.json` and `dllm.*` keys keep the exact tokenizer, the RMS epsilon and an embedder's pooling,
+so importing the file gives back the same model (`tests/test_t5_gguf.py`); the files are byte-identical from run to
+run. llama.cpp fixes the buckets' maximum distance at 128 and picks the MLP's activation by its shape (ReLU, or the
+tanh GELU when gated), so other T5 models are refused, and so are embedders with a `Dense` projection.
+
+`dllm import` reads `t5` and `t5encoder` files, including those of llama.cpp's converter: without
+`tokenizer.huggingface.json` the tokenizer is rebuilt as transformers' T5 converter lays it out (Precompiled, spaces
+collapsed, WhitespaceSplit and Metaspace, `$A </s>`), which gives the token ids of `tokenizers`. A head tied to the
+embedding is scaled by `hidden ** -0.5`, as transformers defines T5 v1.0.
 
 ### SentencePiece models through GGUF
 

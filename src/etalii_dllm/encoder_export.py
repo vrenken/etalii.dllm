@@ -27,8 +27,8 @@ ModernBERT, DeBERTa and T5 models.
   ``▁``). ``tokenizer.huggingface.json`` keeps the exact tokenizer, and ``dllm.*`` keys the exact LayerNorm epsilon
   and the pooling or classifier settings, so importing the file gives back the same model; llama.cpp ignores them.
   BERT models with WordPiece vocabularies and the exact GELU only: RoBERTa's positions start past the padding token,
-  which llama.cpp's layout cuts from the position table. ModernBERT, DeBERTa, T5 and embedders with a ``Dense``
-  projection are not written to GGUF.
+  which llama.cpp's layout cuts from the position table. ModernBERT, DeBERTa and embedders with a ``Dense`` projection
+  are not written to GGUF; T5 goes to llama.cpp's ``t5``/``t5encoder`` layouts in :mod:`etalii_dllm.t5_gguf`.
 
 Both writers are deterministic (canonical JSON, a fixed tensor order, no clock values).
 """
@@ -656,7 +656,7 @@ GGUF_ENCODER_LAYER_NAMES = {
 GGUF_POOLING = {"mean": 1, "cls": 2, "last_token": 3}
 """llama.cpp's ``pooling_type`` values; a cross-encoder is ``4`` (rank)."""
 
-_U32, _F32, _BOOL, _STRING, _ARRAY, _I32, _F64 = 4, 6, 7, 8, 9, 5, 12
+_U8, _U32, _F32, _BOOL, _STRING, _ARRAY, _I32, _F64 = 0, 4, 6, 7, 8, 9, 5, 12
 _ALIGNMENT = 32
 
 
@@ -710,8 +710,8 @@ def _string(text: str) -> bytes:
 def _value(kind: int, value: Any) -> bytes:
     if kind == _STRING:
         return _string(value)
-    if kind in (_U32, _I32, _F32, _BOOL, _F64):
-        return struct.pack({_U32: "<I", _I32: "<i", _F32: "<f", _BOOL: "<?", _F64: "<d"}[kind], value)
+    if kind in (_U8, _U32, _I32, _F32, _BOOL, _F64):
+        return struct.pack({_U8: "<B", _U32: "<I", _I32: "<i", _F32: "<f", _BOOL: "<?", _F64: "<d"}[kind], value)
     element, items = value
     return struct.pack("<IQ", element, len(items)) + b"".join(_value(element, item) for item in items)
 

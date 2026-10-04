@@ -490,8 +490,10 @@ def _typed(key: str, value: Any) -> tuple[int, Any]:
 def export_gguf(model: ModelFile, path: str | Path) -> Path:
     """Writes ``model`` as a float32 GGUF v3 file."""
     config = model.config
-    if config.is_text_to_text:
-        raise ExportError("T5 text-to-text models export to safetensors only (--format safetensors)")
+    if config.family == "t5":
+        from etalii_dllm.t5_gguf import export_t5_gguf
+
+        return export_t5_gguf(model, path)
     if config.is_encoder:
         from etalii_dllm.encoder_export import export_encoder_gguf
 

@@ -1619,10 +1619,108 @@ def _wordpiece_spec(metadata: dict[str, Any], pieces_of: Callable[..., list[str]
     }
 
 
+def _gguf_t5(gguf: GgufFile, path: Path, context_length: int | None) -> _Converted:
+    """A GGUF file in llama.cpp's ``t5`` (text-to-text) or ``t5encoder`` layout (:mod:`etalii_dllm.t5_gguf`). The
+    tokenizer is ``tokenizer.huggingface.json`` when the file has one, else rebuilt from the t5 vocabulary."""
+    from etalii_dllm.t5_gguf import T5_MAX_DISTANCE, t5_tensor_name, unigram_spec, unigram_tokenizer_config
+
+    metadata = gguf.metadata
+    a = str(metadata["general.architecture"])
+    text_to_text = a == "t5"
+    if context_length is not None:
+        raise ModelImportError("--context-length is for decoders; T5 has relative positions")
+
+    def key(name: str) -> Any:
+        value = metadata.get(f"{a}.{name}")
+        if value is None:
+            raise ModelImportError(f"GGUF metadata {a}.{name} is missing")
+        return value
+
+    tensors: dict[str, TensorSource] = {}
+    for tensor in gguf:
+        name = t5_tensor_name(tensor.name)
+        if name is None or ((name.startswith("decoder.") or name == "lm_head.weight") and not text_to_text):
+            raise ModelImportError(f"unexpected tensor {tensor.name!r}")
+        tensors[name] = TensorSource(tuple(tensor.shape), tensor.to_float32, tensor.type_name)
+    if "token_embedding.weight" not in tensors:
+        raise ModelImportError("the t5 GGUF has no token_embd")
+    if int(key("attention.key_length")) != int(key("attention.value_length")):
+        raise ModelImportError("T5 keys and values of different lengths are not supported")
+    if text_to_text and int(metadata.get(f"{a}.decoder_start_token_id", 0)) != 0:
+        raise ModelImportError("only T5 models whose decoder starts with token 0 (<pad>) are supported")
+    gated = "layers.0.mlp.gate.weight" in tensors
+    eps = metadata.get("dllm.attention.layer_norm_rms_epsilon", key("attention.layer_norm_rms_epsilon"))
+    eos = metadata.get("tokenizer.ggml.eos_token_id", 1)
+    try:
+        config = TransformerConfig(
+            family="t5",
+            vocabulary_size=tensors["token_embedding.weight"].shape[0],
+            hidden_size=int(key("embedding_length")),
+            intermediate_size=int(key("feed_forward_length")),
+            layers=int(key("block_count")),
+            heads=int(key("attention.head_count")),
+            kv_heads=int(key("attention.head_count")),
+            head_dim=int(key("attention.key_length")),
+            context_length=int(metadata.get(f"{a}.context_length", 512)),
+            rms_norm_eps=float(eps),
+            rope_theta=0.0,
+            activation="gelu_tanh" if gated else "relu",
+            tie_word_embeddings=not text_to_text or "lm_head.weight" not in tensors,
+            position_buckets=int(key("attention.relative_buckets_count")),
+            max_relative_positions=T5_MAX_DISTANCE,
+            gated_mlp=gated,
+            decoder_layers=int(metadata.get(f"{a}.decoder_block_count", key("block_count"))) if text_to_text else 0,
+            eos_token_ids=(int(eos),) if text_to_text else (),
+        )
+    except ValueError as error:
+        raise ModelImportError(f"the {a} GGUF does not describe a T5 model: {error}") from error
+    if "tokenizer.huggingface.json" in metadata:
+        spec = json.loads(str(metadata["tokenizer.huggingface.json"]))
+    elif metadata.get("tokenizer.ggml.model") == "t5":
+        try:
+            spec = unigram_spec(metadata)
+        except (KeyError, ValueError) as error:
+            raise ModelImportError(f"the t5 vocabulary cannot be read: {error}") from error
+    else:
+        raise ModelImportError(f"GGUF {a} tokenizer {metadata.get('tokenizer.ggml.model')!r} is not supported")
+    tokenizer_config = unigram_tokenizer_config(metadata, config.context_length)
+    tokenizer = {
+        "format": "huggingface",
+        "tokenizer_json": spec,
+        "tokenizer_config": tokenizer_config,
+        "special_tokens_map": {},
+    }
+    embedding: dict[str, Any] | None = None
+    if not text_to_text:
+        from etalii_dllm.encoder_export import GGUF_POOLING
+
+        pooling = {value: mode for mode, value in GGUF_POOLING.items()}.get(int(metadata.get(f"{a}.pooling_type", 1)))
+        if pooling is None:
+            raise ModelImportError(f"GGUF pooling type {metadata.get(f'{a}.pooling_type')} is not supported")
+        embedding = {"pooling": pooling, "normalize": True, "prompts": {}, "default_prompt_name": None}
+        embedding["max_tokens"] = config.context_length
+        embedding |= json.loads(str(metadata.get("dllm.embedding", "{}")))
+    source: dict[str, Any] = {"format": "gguf", "files": _file_hashes([path], path.parent)}
+    return _Converted(
+        config=config,
+        tensors=tensors,
+        source=source,
+        licence_id=metadata.get("general.license"),
+        licence_text=None,
+        licence_link=metadata.get("general.license.link"),
+        name=metadata.get("general.name") or path.stem,
+        tokenizer=tokenizer,
+        chat_template=None,
+        embedding=embedding,
+    )
+
+
 def _convert_gguf(path: Path, context_length: int | None = None) -> _Converted:
     gguf = GgufFile(path)
     if gguf.metadata.get("general.architecture") == "bert":
         return _gguf_bert(gguf, path, context_length)
+    if gguf.metadata.get("general.architecture") in ("t5", "t5encoder"):
+        return _gguf_t5(gguf, path, context_length)
     config = gguf_config(gguf)
     if context_length is not None:
         config = with_context_length(config, context_length)
