@@ -83,6 +83,10 @@ the same as without it (`tests/test_prompt_cache.py`).
   included) and engine version, and only when its SHA-256 checksum matches, so a damaged file is ignored rather than
   read. The files hold the prompts' keys and values, from which the prompt text can be partly recovered: keep the
   directory as private as the conversations.
+- T5 text-to-text models cache too: a request with the same source as an earlier one reuses its encoder pass, the
+  cross-attention keys and the decoder's keys, and reports the source as cached. A source that differs in any token
+  reuses nothing, because every encoder state depends on the whole source. Their caches stay in memory;
+  `--persistent-cache` is refused for them.
 
 ## Concurrent requests
 
@@ -113,6 +117,11 @@ sequences (`tests/test_speculative.py`). The check pass gives each position the 
 because every kernel computes each row on its own. Speculation only changes the speed: on SmolLM2-135M an answer that
 repeats its prompt is about 1.6× faster, code about 1.3×, free chat about the same. A step that checks a draft runs
 on its own rather than in the shared batch of concurrent requests; either way every request keeps its solo bits.
+
+T5 text-to-text models speculate too: the decoder reads the drafted answer tokens in one pass, each row with the bits
+of a single step, and prompt lookup drafts from the source as well as the answer, which helps when the answer copies
+from the source (names in a translation, a summary, an edit). `--draft-model` takes a smaller T5 model with the same
+tokenizer. Drafts stop before `</s>`, which ends the answer (`tests/test_t5_speculation.py`).
 
 ## Responses API
 

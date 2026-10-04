@@ -68,6 +68,33 @@ class TextToTextCache:
     keys: list[list[np.ndarray]] = field(default_factory=list)
     values: list[list[np.ndarray]] = field(default_factory=list)
 
+    def reusable(self, prompt: Sequence[int]) -> int:
+        """How many tokens of ``prompt`` (a source ending with ``</s>``, then maybe an answer) this cache saves in
+        the prompt cache (#414): none unless it holds the very same source (the encoder is bidirectional, so a
+        changed token changes every state), else the source and the answer tokens it shares, less the last one,
+        which the decoder reads again for its logits."""
+        if not self.source:
+            return 0
+        ends = [i for i, token in enumerate(prompt) if token == self.source[-1]]  # the source ends with </s>
+        if not ends or tuple(prompt[: ends[-1] + 1]) != self.source:
+            return 0
+        answer = list(prompt[ends[-1] + 1 :])
+        shared = 0
+        for cached, token in zip(self.tokens[1:], answer, strict=False):
+            if cached != token:
+                break
+            shared += 1
+        return len(self.source) + min(shared, max(len(answer) - 1, 0))
+
+    def covers(self, other: Any) -> bool:
+        """Whether this cache serves every prompt ``other`` would: the same source, and its answer extends
+        ``other``'s."""
+        return (
+            isinstance(other, TextToTextCache)
+            and other.source == self.source
+            and self.tokens[: len(other.tokens)] == other.tokens
+        )
+
     def export(self) -> tuple[Any, ...]:
         """What :meth:`restore` needs to make an independent copy (beam search's hypotheses each keep one). The
         arrays are shared: they are never changed in place, only appended to the copy's own lists."""
@@ -208,20 +235,7 @@ class TextToText:
             raise ValueError("forward_batch needs one cache per sequence")
         if len({id(cache) for cache in caches}) != len(caches):
             raise ValueError("forward_batch needs a distinct cache per sequence")
-        pending = []
-        for tokens, cache in zip(sequences, caches, strict=True):
-            source, answer = self.split(tokens)
-            if cache.source != tuple(source):
-                self._encode(source, cache)
-            inputs = [DECODER_START, *answer]
-            if cache.tokens != inputs[: len(cache.tokens)] or len(cache.tokens) == len(inputs):
-                cache.tokens = []
-                cache.keys = [[] for _ in range(self.config.decoder_layers)]
-                cache.values = [[] for _ in range(self.config.decoder_layers)]
-            for token in inputs[len(cache.tokens) :]:
-                if not 0 <= token < self.config.vocabulary_size:
-                    raise ValueError("token id out of range")
-            pending.append(inputs[len(cache.tokens) :])
+        pending = [self._pending(tokens, cache) for tokens, cache in zip(sequences, caches, strict=True)]
         results: list[FloatArray | None] = [None] * len(caches)
         step = 0
         while True:  # one decoder position of every sequence that still has tokens to read
@@ -234,6 +248,55 @@ class TextToText:
                     results[i] = logits[row].copy()
             step += 1
         return [logits for logits in results if logits is not None]
+
+    def forward_cached_last(self, tokens: Sequence[int], cache: TextToTextCache, count: int) -> FloatArray:
+        """The logits ``[count, vocabulary]`` after each of the last ``count`` tokens of ``tokens`` (the source,
+        then the answer so far), reusing ``cache`` like :meth:`forward_cached` (#412). The answer tokens the cache
+        does not hold go through the decoder in one pass, their rows stacked through every linear layer, each
+        attending to the keys up to its own position, so row ``i`` has exactly the bits of
+        ``forward_cached(tokens[: len(tokens) - count + 1 + i])``. The last ``count`` tokens must be answer tokens
+        (or the source's closing ``</s>`` for the first row); speculative decoding checks a draft with one call."""
+        _, answer = self.split(tokens)
+        if not 1 <= count <= len(answer) + 1:
+            raise ValueError("count must be between 1 and the number of answer tokens plus one")
+        inputs = self._pending(tokens, cache)
+        if count > len(inputs):  # the cache holds positions whose logits are asked for: recompute them
+            keep = len(cache.tokens) - (count - len(inputs))
+            self._truncate(cache, keep)
+            inputs = [DECODER_START, *answer][keep:]
+        return self._steps(inputs, [cache] * len(inputs))[-count:]
+
+    def _pending(self, tokens: Sequence[int], cache: TextToTextCache) -> list[int]:
+        """Prepares ``cache`` for ``tokens`` and returns the decoder inputs it does not hold yet (at least one): the
+        source is encoded unless the cache has it, and the decoder keeps the keys of the inputs it shares with the
+        new answer (each position's keys depend only on the inputs up to it, so they are what a recompute gives)."""
+        source, answer = self.split(tokens)
+        if cache.source != tuple(source):
+            self._encode(source, cache)
+        inputs = [DECODER_START, *answer]
+        for token in inputs:
+            if not 0 <= token < self.config.vocabulary_size:
+                raise ValueError("token id out of range")
+        shared = 0
+        for cached, token in zip(cache.tokens, inputs, strict=False):
+            if cached != token:
+                break
+            shared += 1
+        self._truncate(cache, min(shared, len(inputs) - 1))
+        return inputs[len(cache.tokens) :]
+
+    def _truncate(self, cache: TextToTextCache, keep: int) -> None:
+        """Drops the decoder positions of ``cache`` from ``keep`` on (the lists are replaced, never changed in
+        place, so a copy :meth:`TextToTextCache.export` made keeps its rows)."""
+        if keep == len(cache.tokens):
+            return
+        cache.tokens = cache.tokens[:keep]
+        if keep == 0:
+            cache.keys = [[] for _ in range(self.config.decoder_layers)]
+            cache.values = [[] for _ in range(self.config.decoder_layers)]
+        else:
+            cache.keys = [layer[:keep] for layer in cache.keys]
+            cache.values = [layer[:keep] for layer in cache.values]
 
     def answer_logits(self, source: Sequence[int], answer: Sequence[int]) -> np.ndarray:
         """The logits ``[len(answer), vocabulary]`` before each answer token: row ``i`` follows the source (ending
@@ -250,7 +313,8 @@ class TextToText:
             raise ValueError("token id out of range")
         cache = self.new_cache()
         self._encode(source, cache)
-        return np.stack([self._steps([token], [cache])[0] for token in [DECODER_START, *answer[:-1]]])
+        inputs = [DECODER_START, *answer[:-1]]
+        return self._steps(inputs, [cache] * len(inputs))  # one pass, the bits of one step per token (#412)
 
     def encoder_states(self, source: Sequence[int], recorder: Recorder | None = None) -> FloatArray:
         """The encoder's last states ``[source, hidden]`` (after its final norm), shown to ``recorder`` on the way."""
@@ -286,8 +350,9 @@ class TextToText:
         self, tokens: Sequence[int], caches: Sequence[TextToTextCache], recorder: Recorder | None = None
     ) -> np.ndarray:
         """Appends ``tokens[i]`` at the next decoder position of ``caches[i]`` and returns the logits after each
-        ``[len(tokens), vocabulary]``: the rows go through the linear layers together, attention runs per cache.
-        ``recorder`` (one cache only) sees every intermediate."""
+        ``[len(tokens), vocabulary]``: the rows go through the linear layers together, attention runs per row. A
+        cache may appear several times (#412): its rows take its next positions in order, each attending to the keys
+        up to its own. ``recorder`` (one cache only) sees every intermediate."""
         if recorder is not None and len(caches) != 1:
             raise ValueError("a recorder watches one sequence")
         config = self.config
@@ -295,11 +360,13 @@ class TextToText:
         count = len(tokens)
         table = np.asarray(self._w["decoder.relative_bias.weight"], dtype=np.float32)
         biases, zeros = [], []
+        offsets: dict[int, int] = {}
         for cache in caches:
             if not cache.keys:
                 cache.keys = [[] for _ in range(config.decoder_layers)]
                 cache.values = [[] for _ in range(config.decoder_layers)]
-            position = len(cache.tokens)
+            position = len(cache.tokens) + offsets.get(id(cache), 0)
+            offsets[id(cache)] = offsets.get(id(cache), 0) + 1
             keys_seen = np.arange(position + 1, dtype=np.int64)
             buckets = t5_relative_buckets(
                 keys_seen - position, config.position_buckets, config.max_relative_positions, bidirectional=False

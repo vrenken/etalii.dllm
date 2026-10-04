@@ -260,7 +260,7 @@ def test_contrast_and_ensembles_of_text_to_text_models(t5, flan, tmp_path):
     with pytest.raises(ValueError, match="must be a text-to-text model"):
         DllmEngine.from_model_file(path, contrast_model=encoder / "model.dllm")
     with pytest.raises(ValueError, match="text-to-text"):
-        DllmEngine.from_model_file(path, speculate=4)
+        DllmEngine.from_model_file(path, prompt_cache_dir=tmp_path / "kv")
 
 
 # Batched decoder steps (#395)

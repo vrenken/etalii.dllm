@@ -65,18 +65,21 @@ class PromptLookup:
 
 
 class DraftModel:
-    """Drafts greedily with a smaller model that uses the same tokenizer, with its own KV cache."""
+    """Drafts greedily with a smaller model that uses the same tokenizer, with its own KV cache. A text-to-text
+    draft model (:class:`etalii_dllm.seq2seq.TextToText`, #413) drafts the answer and stops before ``</s>``, which
+    ends it."""
 
     def __init__(self, model: Any) -> None:
         self.model = model
         self._cache = model.new_cache()
+        self._end = getattr(model, "end_of_source", None)
 
     def propose(self, context: Sequence[int], count: int) -> list[int]:
         draft: list[int] = []
         tokens = list(context)
         for _ in range(count):
             token = argmax(self.model.forward_cached(tokens, self._cache))
-            if not 0 <= token < self.model.vocabulary_size:
+            if not 0 <= token < self.model.vocabulary_size or token == self._end:
                 break
             draft.append(token)
             tokens.append(token)

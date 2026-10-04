@@ -282,7 +282,7 @@ def test_text_to_text_refusals(flan, tmp_path):
     checkpoint, engine = flan
     path = checkpoint.parent / "model.dllm"
     with pytest.raises(ValueError, match="text-to-text"):
-        DllmEngine.from_model_file(path, speculate=4)
+        DllmEngine.from_model_file(path, prompt_cache_dir=tmp_path / "kv")
     with pytest.raises(ValueError, match="cannot roll"):
         engine.complete_stream(TEXTS[0], 4, SamplingOptions(), overflow="roll")
     with pytest.raises(ValueError, match="hidden states"):
