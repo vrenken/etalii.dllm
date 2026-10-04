@@ -459,3 +459,10 @@ T5_EMBEDDING_FINGERPRINT = (
     "acdc59481981ba8dfc3302804f6e95320ef7adf13c658347052851e51fed44ef",
 )
 T5_SENTENCE_FINGERPRINT = "f79a4e69ca37219745ed18cae2dabce6244cce91ba133af3cf7fadc8b0d07579"
+
+# Phase 63: three-step embedding runs of the T5 v1.0 embedder and the sentence-t5 style one (its Dense projection
+# trained too), as exported model.dllm fingerprints (tests/test_t5.py).
+T5_FINETUNE_FINGERPRINT = {
+    "t5": "6cb914466682adac67d2ed0a60155c5f2b153249a9a78109e8c99bb33bd858e7",
+    "sentence-t5": "0522a59ac0d0709893ebce359d2cb34026031d2bb82437959bb82b2a1cc2a583",
+}

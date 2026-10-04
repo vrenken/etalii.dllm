@@ -117,8 +117,9 @@ the engine applies it with the `linear` kernel, for any encoder family (LaBSE's 
 works the same way).
 
 T5 is checked against `transformers`' `T5EncoderModel` on tiny synthetic models with sequences far longer than the
-buckets' maximum distance (`tests/test_t5.py`), not yet on the real checkpoints in CI. It does not fine-tune, take
-LoRA adapters or export yet, nor do embedders with a `Dense` projection.
+buckets' maximum distance (`tests/test_t5.py`), not yet on the real checkpoints in CI. T5 embedders, and embedders
+with a `Dense` projection of any family, fine-tune (with or without LoRA) and export to safetensors (Phase 63;
+[fine-tuning encoders](training.md#encoders), [exporting encoders](model-building.md#encoders)).
 
 all-MiniLM-L6-v2, bge-small-en-v1.5, all-distilroberta-v1, paraphrase-multilingual-MiniLM-L12-v2 and
 [Qwen3-Embedding-0.6B](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B) (Apache 2.0) are checked against

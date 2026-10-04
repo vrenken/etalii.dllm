@@ -131,20 +131,23 @@ language-model runs omit them and keep their old bytes.
 
 ## Encoders
 
-`RunConfig.objective = "embedding"` or `"classifier"` trains a BERT, RoBERTa, XLM-RoBERTa, ModernBERT or DeBERTa encoder on
+`RunConfig.objective = "embedding"` or `"classifier"` trains a BERT, RoBERTa, XLM-RoBERTa, ModernBERT, DeBERTa or T5 encoder on
 `EncoderData` (`training/encoder_data.py`): anchor/positive(/negative) texts, or labelled texts and pairs, tokenized
 with the model's own recipe. `EncoderGradients` (`training/encoder_backprop.py`) runs the encoder's forward pass
 kernel for kernel and its backward pass with `layer_norm_backward`, `gelu_backward` and the bidirectional
 `attention_backward` (DeBERTa: `biased_attention_backward`, whose bias gradient `embedding_backward` scatters back to
-the position terms, the shared query and key projections and the relative table).
+the position terms, the shared query and key projections and the relative table; T5: `rms_norm_backward` and
+`biased_attention_backward` with its bias gradient scattered into the shared bucket table). An embedder's
+sentence-transformers `Dense` projection after the pooling trains with the model (`sentence_vector` and
+`sentence_backward`).
 
 ```mermaid
 flowchart LR
     ex["a step's examples<br/>(seeded per-epoch order)"] --> enc["EncoderGradients.encode / classify<br/>per text, saved activations"]
-    enc -->|embedding| pool["pool + L2-normalise<br/>(the model's pooling)"]
+    enc -->|embedding| pool["pool, Dense projection if any,<br/>L2-normalise (the model's own)"]
     pool --> mnrl["scores = scale * anchors @ candidates^T<br/>(linear kernel); mean cross-entropy"]
     enc -->|classifier| head["logits of the head<br/>BCE with logits, or label cross-entropy"]
-    mnrl --> back["pool_backward, then the encoder's backward pass<br/>per text; g += text gradients (float32, batch order)"]
+    mnrl --> back["sentence_backward, then the encoder's backward pass<br/>per text; g += text gradients (float32, batch order)"]
     head --> back
     back --> adam["AdamW, as for any run"]
 ```

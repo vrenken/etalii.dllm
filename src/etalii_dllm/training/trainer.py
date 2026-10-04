@@ -70,7 +70,13 @@ from etalii_dllm.modelfile import (
 from etalii_dllm.numerics import QUANTIZATIONS, FloatArray, cross_entropy, linear, linear_backward, sigmoid
 from etalii_dllm.training.backprop import DecoderGradients
 from etalii_dllm.training.data import TrainingData
-from etalii_dllm.training.encoder_backprop import EncoderGradients, EncoderPass, pool, pool_backward
+from etalii_dllm.training.encoder_backprop import (
+    EncoderGradients,
+    EncoderPass,
+    SentenceVector,
+    sentence_backward,
+    sentence_vector,
+)
 from etalii_dllm.training.encoder_data import ENCODER_OBJECTIVES, EncoderData
 from etalii_dllm.training.optimizer import AdamW, AdamWConfig
 from etalii_dllm.training.preference import PreferenceData, PreferencePair, log_sigmoid
@@ -238,6 +244,8 @@ class FineTuner:
         self._encoder = EncoderGradients(config) if encoder_run else None
         self.pooling = str((metadata.get("embedding") or {}).get("pooling", "mean"))
         """Embedding runs: how sentence vectors are pooled (the model's own pooling)."""
+        self.projection = (metadata.get("embedding") or {}).get("projection") or None
+        """Embedding runs: the activation of the model's ``Dense`` projection after the pooling, which trains too."""
         self.reference: list[tuple[float, float]] | None = None
         """DPO: the base model's log-probabilities of every pair's chosen and rejected answer."""
         if isinstance(data, PreferenceData):
@@ -344,13 +352,12 @@ class FineTuner:
         # the sentence vectors in candidate order: anchors, positives, negatives (each in batch order)
         order = [(i, 0) for i in range(count)] + [(i, 1) for i in range(count)]
         order += [(i, 2) for i, example in enumerate(examples) if len(example.texts) > 2]
-        passes: dict[tuple[int, int], tuple[EncoderPass, FloatArray, np.float32]] = {}
+        passes: dict[tuple[int, int], tuple[EncoderPass, SentenceVector]] = {}
         for i, which in order:
             result = self._encoder.encode(weights, examples[i].texts[which], examples[i].types[which])
-            normalized, _, norm = pool(result.states, self.pooling)
-            passes[(i, which)] = (result, normalized, norm)
-        anchors = np.stack([passes[key][1] for key in order[:count]])
-        candidates = np.stack([passes[key][1] for key in order[count:]])
+            passes[(i, which)] = (result, sentence_vector(weights, result.states, self.pooling, self.projection))
+        anchors = np.stack([passes[key][1].normalized for key in order[:count]])
+        candidates = np.stack([passes[key][1].normalized for key in order[count:]])
         scores = linear(anchors, candidates).numpy() * scale
         loss, dscores = cross_entropy(scores, np.arange(count, dtype=np.int64), scale=1.0 / count)
         danchors, dcandidates, _ = linear_backward(anchors, candidates, dscores.numpy() * scale)
@@ -358,8 +365,11 @@ class FineTuner:
         gradients: dict[str, FloatArray] = {}
         for i in range(count):  # each example's texts in order: anchor, positive, negative
             for which in range(len(examples[i].texts)):
-                result, normalized, norm = passes[(i, which)]
-                dstates = pool_backward(normalized, norm, dvectors[(i, which)], len(result.tokens), self.pooling)
+                result, vector = passes[(i, which)]
+                dstates, projected = sentence_backward(
+                    weights, vector, dvectors[(i, which)], len(result.tokens), self.pooling, self.projection
+                )
+                _accumulate(gradients, projected)
                 _accumulate(gradients, self._encoder.gradients(weights, result, dstates))
         return loss / count, gradients
 

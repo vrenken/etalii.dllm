@@ -145,21 +145,20 @@ def write_t5_checkpoint(
     (directory / "1_Pooling" / "config.json").write_text(json.dumps(settings), encoding="utf-8")
     (directory / "sentence_bert_config.json").write_text(json.dumps({"max_seq_length": MAX_SEQ_LENGTH}), "utf-8")
     if dense:
-        (directory / "2_Dense").mkdir(exist_ok=True)
-        hidden = config["d_model"]
-        dense_config = {
-            "in_features": hidden,
-            "out_features": dense_size,
-            "bias": dense_bias,
-            "activation_function": DENSE[dense],
-        }
-        (directory / "2_Dense" / "config.json").write_text(json.dumps(dense_config), encoding="utf-8")
-        values = numerics.fill_gaussian(91, dense_size * hidden).reshape(dense_size, hidden) * np.float32(0.3)
-        tensors = {"linear.weight": ("F32", values.astype(np.float32))}
-        if dense_bias:
-            tensors["linear.bias"] = ("F32", numerics.fill_gaussian(92, dense_size) * np.float32(0.1))
-        write_safetensors(directory / "2_Dense" / "model.safetensors", tensors, {"format": "pt"})
+        add_dense(directory, config["d_model"], dense, dense_bias, dense_size)
     return config
+
+
+def add_dense(directory: Path, hidden: int, activation: str, bias: bool = False, size: int = 24) -> None:
+    """A sentence-transformers ``Dense`` module in ``2_Dense`` (``modules.json`` must list it)."""
+    (directory / "2_Dense").mkdir(exist_ok=True)
+    dense_config = {"in_features": hidden, "out_features": size, "bias": bias, "activation_function": DENSE[activation]}
+    (directory / "2_Dense" / "config.json").write_text(json.dumps(dense_config), encoding="utf-8")
+    values = numerics.fill_gaussian(91, size * hidden).reshape(size, hidden) * np.float32(0.3)
+    tensors = {"linear.weight": ("F32", values.astype(np.float32))}
+    if bias:
+        tensors["linear.bias"] = ("F32", numerics.fill_gaussian(92, size) * np.float32(0.1))
+    write_safetensors(directory / "2_Dense" / "model.safetensors", tensors, {"format": "pt"})
 
 
 @pytest.fixture(scope="module")
@@ -466,26 +465,306 @@ def test_reference_implementation_and_verify(embedder, sentence_t5):
         assert verify.check_reference(engine).equal
 
 
-def test_fine_tuning_lora_and_export_are_refused(embedder, sentence_t5, tmp_path):
-    from etalii_dllm.encoder_export import export_encoder_gguf, export_encoder_safetensors
-    from etalii_dllm.lora import AdapterError, LoraConfig, target_weights
+# Gradients (#377)
+
+
+def t5_autograd(directory: Path, tokens: list[int], upstream: np.ndarray) -> dict[str, np.ndarray]:
+    """transformers' float64 gradients of ``sum(upstream * last_hidden_state)`` under our names."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    from etalii_dllm.importing.importer import _t5_name
+
+    model = transformers.T5EncoderModel.from_pretrained(directory).double()
+    states = model(torch.tensor([tokens])).last_hidden_state[0]
+    (states * torch.tensor(upstream, dtype=torch.float64)).sum().backward()
+    return {_t5_name(name): p.grad.numpy() for name, p in model.named_parameters() if p.grad is not None}
+
+
+def assert_close_gradients(ours: dict[str, np.ndarray], theirs: dict[str, np.ndarray]) -> None:
+    assert set(ours) == set(theirs)
+    for name, expected in theirs.items():
+        scale = max(float(np.abs(expected).max()), 1e-3)
+        assert np.abs(ours[name] - expected).max() <= 2e-4 * scale, name
+
+
+def check_t5_gradients(directory: Path, engine: DllmEngine, tokens: list[int]) -> None:
     from etalii_dllm.training.encoder_backprop import EncoderGradients
 
-    checkpoint, _ = embedder
-    file = ModelFile(checkpoint.parent / "model.dllm")
-    with pytest.raises(AdapterError, match="T5"):
-        target_weights(file.config, LoraConfig(rank=2, alpha=4.0))
-    with pytest.raises(ValueError, match="T5"):
-        export_encoder_safetensors(file, tmp_path / "out")
-    with pytest.raises(ValueError, match="T5"):
-        export_encoder_gguf(file, tmp_path / "out.gguf")
-    with pytest.raises(ValueError, match="fine-tuning T5"):
-        EncoderGradients(file.config)
-    checkpoint, _ = sentence_t5
-    projected = ModelFile(checkpoint.parent / "model.dllm")
-    import dataclasses
+    model = engine.model
+    weights = {name: np.asarray(values, dtype=np.float32) for name, values in model.tensors.items()}
+    gradients = EncoderGradients(model.config)
+    result = gradients.encode(weights, tokens)
+    assert result.states.tobytes() == model.hidden_states(tokens).tobytes()
+    upstream = numerics.fill_gaussian(4, len(tokens) * 32).reshape(len(tokens), 32)
+    ours = gradients.gradients(weights, result, upstream)
+    again = gradients.gradients(weights, gradients.encode(weights, tokens), upstream)
+    assert all(ours[name].tobytes() == values.tobytes() for name, values in again.items())
+    theirs = t5_autograd(directory, tokens, upstream)
+    theirs = {name: values for name, values in theirs.items() if not name.startswith("projection.")}
+    assert_close_gradients(ours, theirs)
 
-    bert_like = dataclasses.replace(projected.config, family="bert", type_vocabulary_size=2, gated_mlp=False,
-                                    activation="gelu", position_buckets=0, max_relative_positions=0)  # fmt: skip
-    with pytest.raises(ValueError, match="Dense projection"):
-        EncoderGradients(bert_like)
+
+def test_gradients_match_autograd(embedder, sentence_t5):
+    for checkpoint, engine in (embedder, sentence_t5):
+        check_t5_gradients(checkpoint, engine, long_tokens(engine))  # every bucket, the far ones included
+
+
+@pytest.mark.parametrize("feed_forward_proj", ["silu", "gelu", "gated-relu"])
+def test_gradients_of_other_activations(tmp_path, feed_forward_proj):
+    write_t5_checkpoint(tmp_path / "checkpoint", feed_forward_proj=feed_forward_proj)
+    import_model(tmp_path / "checkpoint", tmp_path / "model.dllm")
+    engine = DllmEngine.from_model_file(tmp_path / "model.dllm")
+    check_t5_gradients(tmp_path / "checkpoint", engine, engine.embedding_tokens(TEXTS[0]))
+
+
+def chain_autograd(
+    directory: Path, family: str, tokens: list[int], upstream: np.ndarray, activation: str
+) -> dict[str, np.ndarray]:
+    """sentence-transformers' chain in float64 torch (the encoder, mean pooling, Dense, Normalize): the gradients of
+    ``upstream . vector`` under our names."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    from etalii_dllm.importing.importer import _bert_name, _t5_name
+    from etalii_dllm.importing.safetensors import SafetensorsFile
+
+    if family == "t5":
+        model = transformers.T5EncoderModel.from_pretrained(directory).double()
+        rename = _t5_name
+    else:
+        model = transformers.BertModel.from_pretrained(directory, add_pooling_layer=False).double()
+        rename = _bert_name
+    dense = {
+        t.name: torch.tensor(t.to_float32(), dtype=torch.float64, requires_grad=True)
+        for t in SafetensorsFile(directory / "2_Dense" / "model.safetensors")
+    }
+    pooled = model(torch.tensor([tokens])).last_hidden_state[0].mean(dim=0)
+    projected = dense["linear.weight"] @ pooled + dense.get("linear.bias", 0)
+    if activation == "tanh":
+        projected = torch.tanh(projected)
+    vector = torch.nn.functional.normalize(projected, dim=0)
+    (vector * torch.tensor(upstream, dtype=torch.float64)).sum().backward()
+    grads = {rename(name): p.grad.numpy() for name, p in model.named_parameters() if p.grad is not None}
+    grads |= {f"projection.{name.split('.')[1]}": p.grad.numpy() for name, p in dense.items()}
+    return grads
+
+
+def check_chain(directory: Path, engine: DllmEngine, text: str) -> None:
+    from etalii_dllm.training.encoder_backprop import EncoderGradients, sentence_backward, sentence_vector
+
+    model, settings = engine.model, engine.embedding
+    weights = {name: np.asarray(values, dtype=np.float32) for name, values in model.tensors.items()}
+    tokens = engine.embedding_tokens(text)
+    gradients = EncoderGradients(model.config)
+    result = gradients.encode(weights, tokens)
+    vector = sentence_vector(weights, result.states, "mean", settings["projection"])
+    assert vector.normalized.tobytes() == engine.embed(text).vector.tobytes()  # what the engine serves
+    upstream = numerics.fill_gaussian(6, len(vector.normalized))
+    dstates, ours = sentence_backward(weights, vector, upstream, len(tokens), "mean", settings["projection"])
+    ours |= gradients.gradients(weights, result, dstates)
+    theirs = chain_autograd(directory, model.config.family, tokens, upstream, settings["projection"])
+    assert_close_gradients(ours, theirs)
+
+
+def test_projection_gradients_match_autograd(sentence_t5, tmp_path):
+    checkpoint, engine = sentence_t5
+    check_chain(checkpoint, engine, TEXTS[0])
+    write_t5_checkpoint(tmp_path / "tanh", dense="tanh", dense_bias=True, dense_size=16)
+    import_model(tmp_path / "tanh", tmp_path / "tanh.dllm")
+    check_chain(tmp_path / "tanh", DllmEngine.from_model_file(tmp_path / "tanh.dllm"), TEXTS[1])
+    from etalii_dllm.training.encoder_backprop import sentence_vector
+
+    with pytest.raises(ValueError, match="projection activation"):
+        sentence_vector(engine.model.tensors, np.ones((2, 32), np.float32), "mean", "relu")
+
+
+def bert_with_dense(directory: Path) -> Path:
+    """A BERT embedder with a tanh Dense module with a bias after its mean pooling (as LaBSE has), and Normalize."""
+    from test_encoders import write_bert_checkpoint
+
+    config, _ = write_bert_checkpoint(directory)
+    add_dense(directory, config["hidden_size"], "tanh", bias=True, size=16)
+    modules = [MODULES[0], MODULES[1], MODULES[2], MODULES[3]]
+    (directory / "modules.json").write_text(json.dumps(modules), encoding="utf-8")
+    return directory
+
+
+def test_bert_projection_gradients(tmp_path):
+    bert_with_dense(tmp_path / "bert")
+    import_model(tmp_path / "bert", tmp_path / "bert.dllm")
+    engine = DllmEngine.from_model_file(tmp_path / "bert.dllm")
+    assert engine.model.config.projection_size == 16 and engine.embedding["projection"] == "tanh"
+    check_chain(tmp_path / "bert", engine, "the quick brown fox")
+
+
+# dllm finetune (#378)
+
+
+def write_pairs(path: Path) -> Path:
+    rows = [
+        {"anchor": "quick fox", "positive": TEXTS[0], "negative": TEXTS[2]},
+        {"anchor": "how are you", "positive": TEXTS[1]},
+        {"anchor": "naive cafe", "positive": TEXTS[2], "negative": TEXTS[1]},
+        {"anchor": "same bits", "positive": TEXTS[3]},
+    ]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    return path
+
+
+def test_finetune_runs_are_golden(embedder, sentence_t5, tmp_path):
+    from golden_values import T5_FINETUNE_FINGERPRINT
+
+    from etalii_dllm.training import AdamWConfig, FineTuner, RunConfig
+    from etalii_dllm.training.encoder_data import EncoderData, read_examples
+
+    for kind, (checkpoint, engine) in (("t5", embedder), ("sentence-t5", sentence_t5)):
+        data = EncoderData.from_records(
+            read_examples(write_pairs(tmp_path / "pairs.jsonl"), "embedding"), engine, "embedding", MAX_SEQ_LENGTH
+        )
+        run = RunConfig(3, 2, MAX_SEQ_LENGTH, 1, AdamWConfig(1e-3), objective="embedding")
+        model_file = ModelFile(checkpoint.parent / "model.dllm")
+        first = FineTuner.from_model_file(model_file, data, run)
+        first.train()
+        second = FineTuner.from_model_file(model_file, data, run)
+        second.train(until=1)
+        second.save_checkpoint(tmp_path / f"{kind}.dllmckpt")
+        resumed = FineTuner.load_checkpoint(tmp_path / f"{kind}.dllmckpt", data)
+        resumed.train()
+        assert resumed.losses == first.losses
+        fingerprint = first.export(tmp_path / f"{kind}.dllm")
+        assert resumed.export(tmp_path / f"{kind}-resumed.dllm") == fingerprint
+        assert fingerprint == T5_FINETUNE_FINGERPRINT[kind]
+        tuned = ModelFile(tmp_path / f"{kind}.dllm")
+        trained = ["relative_bias.weight", *(["projection.weight"] if kind == "sentence-t5" else [])]
+        for name in trained:  # the bucket table and the Dense projection train
+            assert (np.asarray(tuned.tensors[name]) != np.asarray(model_file.tensors[name])).any(), name
+        assert tuned.embedding == model_file.embedding
+        tuned_engine = DllmEngine.from_model_file(tmp_path / f"{kind}.dllm")
+        assert tuned_engine.embed(TEXTS[0]).vector.tobytes() != engine.embed(TEXTS[0]).vector.tobytes()
+
+
+def test_finetune_command(sentence_t5, tmp_path, capsys):
+    from etalii_dllm.cli import main as cli
+
+    checkpoint, _ = sentence_t5
+    pairs = write_pairs(tmp_path / "pairs.jsonl")
+    command = ["finetune", str(checkpoint.parent / "model.dllm"), "--data", str(pairs), "--steps", "2"]
+    command += ["--batch-size", "2", "-o", str(tmp_path / "tuned.dllm")]
+    assert cli(command) == 0
+    assert "4 examples" in capsys.readouterr().out
+    assert ModelFile(tmp_path / "tuned.dllm").config.family == "t5"
+
+
+# LoRA (#379)
+
+
+def test_lora_on_t5(embedder, sentence_t5, tmp_path, capsys):
+    import re
+
+    torch = pytest.importorskip("torch")  # noqa: F841
+    transformers = pytest.importorskip("transformers")
+    from etalii_dllm.cli import main as cli
+    from etalii_dllm.importing.safetensors import SafetensorsFile
+    from etalii_dllm.lora import AdapterError, LoraConfig, read_peft, target_modules, target_weights
+
+    checkpoint, engine = sentence_t5
+    path = checkpoint.parent / "model.dllm"
+    pairs = write_pairs(tmp_path / "pairs.jsonl")
+    common = ["finetune", str(path), "--data", str(pairs), "--steps", "2", "--batch-size", "2"]
+    common += ["--learning-rate", "1e-2", "--lora-rank", "2"]
+    assert cli([*common, "-o", str(tmp_path / "merged.dllm"), "--adapter-output", str(tmp_path / "adapter")]) == 0
+    capsys.readouterr()
+    settings = json.loads((tmp_path / "adapter" / "adapter_config.json").read_text())
+    assert settings["task_type"] == "FEATURE_EXTRACTION"
+    stored = {t.name: t.to_float32() for t in SafetensorsFile(tmp_path / "adapter" / "adapter_model.safetensors")}
+    assert stored["base_model.model.encoder.block.0.layer.0.SelfAttention.q.lora_A.weight"].shape == (2, 32)
+    assert stored["base_model.model.encoder.block.1.layer.1.DenseReluDense.wi_0.lora_B.weight"].shape == (64, 2)
+    modules = {name for name, _ in transformers.T5EncoderModel.from_pretrained(checkpoint).named_modules()}
+    adapted = {key.removeprefix("base_model.model.").rsplit(".lora_", 1)[0] for key in stored}
+    assert adapted <= modules and len(adapted) == 2 * 7
+    assert {m for m in modules if re.fullmatch(settings["target_modules"], m)} == adapted
+    merged = DllmEngine.from_model_file(tmp_path / "merged.dllm").embed("hello there").vector
+    loaded = DllmEngine.from_model_file(path, adapter=tmp_path / "adapter").embed("hello there").vector
+    assert merged.tobytes() == loaded.tobytes()
+    assert merged.tobytes() != engine.embed("hello there").vector.tobytes()
+    import_model(tmp_path / "adapter", tmp_path / "imported.dllm", base=path, licence="mit")
+    assert ModelFile(tmp_path / "imported.dllm").fingerprint == ModelFile(tmp_path / "merged.dllm").fingerprint
+    lora, adapters = read_peft(tmp_path / "adapter", engine.model.config)
+    assert lora.targets == ("q", "k", "v", "o", "gate", "up", "down") and len(adapters) == 2 * 7 * 2
+    # T5 v1.0 has one MLP input, wi; it has no gate to adapt
+    config = embedder[1].model.config
+    pattern = r".*encoder\.block\.\d+\.(?:layer\.0\.SelfAttention\.q|layer\.1\.DenseReluDense\.wi)"
+    assert target_modules(config, LoraConfig(2, 4.0, ("q", "up"))) == pattern
+    with pytest.raises(AdapterError, match="gate"):
+        target_weights(config, LoraConfig(2, 4.0, ("gate",)))
+    # a module T5 does not have, or a block the model does not have
+    for key in (
+        "base_model.model.encoder.block.0.layer.1.DenseReluDense.wi_0.lora_A.weight",
+        "base_model.model.encoder.block.9.layer.0.SelfAttention.q.lora_A.weight",
+        "base_model.model.encoder.layer.0.attention.self.query.lora_A.weight",
+    ):
+        from etalii_dllm.importing.safetensors import write_safetensors as write_tensors
+
+        (tmp_path / "bad").mkdir(exist_ok=True)
+        (tmp_path / "bad" / "adapter_config.json").write_text(json.dumps({"r": 2, "lora_alpha": 2}), encoding="utf-8")
+        write_tensors(tmp_path / "bad" / "adapter_model.safetensors", {key: np.zeros((2, 32), np.float32)})
+        with pytest.raises(AdapterError, match=r"unsupported adapter tensor|does not fit"):
+            read_peft(tmp_path / "bad", config)
+
+
+# Export (#380)
+
+
+def test_export_round_trips(embedder, sentence_t5, tmp_path):
+    from etalii_dllm.exporting import ExportError, export_gguf, export_safetensors
+
+    for name, (checkpoint, engine) in (("t5", embedder), ("sentence-t5", sentence_t5)):
+        original = ModelFile(checkpoint.parent / "model.dllm")
+        export_safetensors(original, tmp_path / name)
+        exported = json.loads((tmp_path / name / "config.json").read_text())
+        assert exported["architectures"] == ["T5EncoderModel"]
+        import_model(tmp_path / name, tmp_path / f"{name}.dllm", repository=f"example/{name}")
+        again = ModelFile(tmp_path / f"{name}.dllm")
+        assert again.fingerprint == original.fingerprint and again.config == original.config
+        assert again.embedding == original.embedding
+        tokens = long_tokens(engine)
+        expected = transformers_states(tmp_path / name, tokens)
+        np.testing.assert_allclose(engine.model.hidden_states(tokens), expected, atol=3e-5)
+        with pytest.raises(ExportError, match="T5"):
+            export_gguf(original, tmp_path / f"{name}.gguf")
+    modules = json.loads((tmp_path / "sentence-t5" / "modules.json").read_text())
+    assert [m["path"] for m in modules] == ["", "1_Pooling", "2_Dense", "3_Normalize"]
+    assert (tmp_path / "sentence-t5" / "3_Normalize").is_dir()
+    tokens = sentence_t5[1].embedding_tokens(TEXTS[3])
+    expected = sentence_transformers_vector(tmp_path / "sentence-t5", tokens, "identity")
+    np.testing.assert_allclose(sentence_t5[1].embed(TEXTS[3]).vector, expected, atol=3e-5)
+
+
+def test_export_refusals_and_bert_projection(tmp_path):
+    from etalii_dllm.exporting import ExportError, export_gguf, export_safetensors
+
+    bert_with_dense(tmp_path / "bert")
+    import_model(tmp_path / "bert", tmp_path / "bert.dllm")
+    original = ModelFile(tmp_path / "bert.dllm")
+    export_safetensors(original, tmp_path / "out")
+    import_model(tmp_path / "out", tmp_path / "again.dllm")
+    assert ModelFile(tmp_path / "again.dllm").fingerprint == original.fingerprint
+    dense = json.loads((tmp_path / "out" / "2_Dense" / "config.json").read_text())
+    assert dense == {"activation_function": DENSE["tanh"], "bias": True, "in_features": 32, "out_features": 16}
+    with pytest.raises(ExportError, match="Dense projection"):
+        export_gguf(original, tmp_path / "bert.gguf")
+    from etalii_dllm.encoder_export import t5_tensor_name
+
+    write_t5_checkpoint(tmp_path / "t5")
+    import_model(tmp_path / "t5", tmp_path / "t5.dllm")
+    with pytest.raises(ExportError, match="unexpected encoder tensor"):
+        t5_tensor_name("layers.0.mlp.experts.0.up.weight", ModelFile(tmp_path / "t5.dllm").config)
+    # T5's gated MLP is the tanh GELU's only: a gated erf GELU or SiLU has no feed_forward_proj
+    for activation in ("gelu", "silu"):
+        write_t5_checkpoint(tmp_path / activation, feed_forward_proj=f"gated-{activation}")
+        import_model(tmp_path / activation, tmp_path / f"{activation}.dllm")
+        model = ModelFile(tmp_path / f"{activation}.dllm")
+        if model.config.activation == "gelu_tanh":  # transformers' gated-gelu is the tanh GELU
+            export_safetensors(model, tmp_path / f"{activation}-out")
+        else:
+            with pytest.raises(ExportError, match="gated"):
+                export_safetensors(model, tmp_path / f"{activation}-out")
