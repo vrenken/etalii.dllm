@@ -265,6 +265,8 @@ class Transformer:
         fingerprint."""
         if config.is_encoder:
             raise ValueError(ENCODER_ONLY)
+        if config.is_text_to_text:
+            raise ValueError("a text-to-text model runs through etalii_dllm.seq2seq.TextToText")
         expected = config.tensor_shapes()
         missing = sorted(set(expected) - set(tensors))
         if missing:

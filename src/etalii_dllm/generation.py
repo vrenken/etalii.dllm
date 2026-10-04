@@ -497,6 +497,12 @@ class Generator:
         if min_tokens < 0:
             raise ValueError("min_tokens must be non-negative")
         context = self.tokenizer.encode(prompt) if isinstance(prompt, str) else list(prompt)
+        end = getattr(self.model, "end_of_source", None)
+        if end is not None:  # a text-to-text model: the prompt is the source, which ends with </s>
+            if overflow == "roll" or guide is not None or healed:
+                raise ValueError("a text-to-text model's prompt cannot roll, be guided or be healed")
+            if not context or context[-1] != end:
+                context.append(end)
         window = self.context_length
         if window is not None and len(context) >= window:
             raise ContextLengthError(

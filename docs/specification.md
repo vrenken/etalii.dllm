@@ -574,6 +574,35 @@ same computation, stored as the pooler and the classifier. ModernBERT's head rea
 types 0 and 1, which only matter when the model has type embeddings. A reranking
 score is the single logit, or `sigmoid(logit)` in double when the model was saved with that activation.
 
+## 7. The T5 encoder-decoder
+
+A `t5` model with `decoder_layers` (T5ForConditionalGeneration, Flan-T5) is a text-to-text model. The source is the
+prompt's tokens followed by `</s>` (the first `eos_token_ids`, else id 1) unless they already end with it; the
+answer is written one token at a time after it. The sequence the sampler sees as the prompt is the source.
+
+1. The encoder computes `s = ` the [`t5` encoder](#6-the-encoder)'s output for the source (with the encoder's own
+   tensors and bucket table). Per decoder layer `l`, `K_l = linear(s, Wk_cross)` and `V_l = linear(s, Wv_cross)`.
+2. The decoder's inputs are `[0, *answer]` (0 is T5's `decoder_start_token_id`). For the input at position `t`,
+   `h = word[token]` (the embedding the encoder uses), and its self-attention bias over keys `j <= t` is
+   `bias[h, j] = dtable[b'(j - t), h]` with `dtable` the decoder's own `decoder.relative_bias` and `b'` the
+   one-directional bucket: with `n = position_buckets`, `e = n // 2` and `r = max(t - j, 0)`, `b'` is `r` when
+   `r < e`, else `min(e + trunc(f32(f32(a / f) * f32(n - e))), n - 1)` with `a` and `f` as in the encoder.
+3. For each decoder layer:
+   1. `x = rms_norm(h, attention_norm)`; `q, k, v = linear(x, W)`; `k` and `v` join the keys and values of positions
+      `0..t-1`.
+   2. `h = h + linear(biased_attention(q, K, V, bias, 1), Wo)` over the keys and values of positions `0..t`. A
+      position never sees a later one, so keeping the earlier keys and values gives the same bits as recomputing them.
+   3. `x = rms_norm(h, cross_norm)`, `h = h + linear(biased_attention(linear(x, Wq_cross), K_l, V_l, 0, 1),
+      Wo_cross)`: every source position, no bias, no scale.
+   4. `x = rms_norm(h, mlp_norm)` and the MLP as in the encoder.
+4. `y = rms_norm(h, decoder.final_norm)`. With tied embeddings (T5 v1.0) `y = f32(y * f32(hidden ** -0.5))` and the
+   logits are `linear(y, word)`; otherwise (v1.1, Flan-T5) `linear(y, Wlm_head)`. Quantisation covers every
+   decoder matrix and the LM head (the tied word embedding included), as for the encoder's matrices.
+
+Decoding is [the decoder's](#5-the-decoder) sampling over these logits, with the source as the prompt; the answer
+stops at `</s>`. The context window counts the source and the answer together. Rolling, guidance, token healing,
+speculation and batching do not apply to text-to-text models.
+
 ## Checking an implementation
 
 **On one machine.** `dllm --model m.dllm verify --reference` compares this machine's compiled kernels (whatever
@@ -595,9 +624,11 @@ for SmolLM2-135M on every release platform and SIMD path, in float32 and Q8_0.
   activations, `softmax`, `rope_inv_freq`, `rope`, `attention`, `random` (the `next_u64`, `next_double` and
   `next_gaussian` streams), `sample`, `sample_controls` (logit adjustments, the watermark and DRY included, `min_p`, top-n-sigma, typical-p, XTC, Mirostat
   and dynamic temperature
-  over a sequence of steps that starts from a `prompt` input; DRY's breaker tokens are given as `dry_breaker_ids`), `guided`, `contrasted` and `ensembled` (the [guided decoding](#guided-decoding) combinations), and `decoder`.
+  over a sequence of steps that starts from a `prompt` input; DRY's breaker tokens are given as `dry_breaker_ids`), `guided`, `contrasted` and `ensembled` (the [guided decoding](#guided-decoding) combinations), `decoder`, `encoder` and `text_to_text`.
 - **The decoder cases.** Each holds a config, its tensors (inputs named `tensor.<name>`), and the logits after each
   token fed one at a time.
+- **The text-to-text cases.** A T5 encoder-decoder's config, its tensors, a `source` (ending with `</s>`), an
+  `answer`, and the logits after every prefix of the answer (the empty one first).
 
 An implementation conforms when it reproduces every output: the same shape and bits, where any NaN matches any NaN.
 `dllm conformance check DIR [--implementation reference]` runs this build or the reference implementation against

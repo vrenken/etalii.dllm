@@ -196,6 +196,27 @@ Which requests share a step depends on timing, but the output cannot: every kern
 and attention runs per sequence against its own cache, so each request gets the bits of a lone run
 (`tests/test_batch_invariance.py`). This is the guarantee mainstream batching servers do not give.
 
+## Text-to-text models
+
+A T5 text-to-text model (`seq2seq.py`, `TextToText`) fits the same generation loop: the generator appends `</s>` to
+the prompt's tokens, and the model splits the sequence it is given at the last `</s>`. The part before it goes
+through the encoder once; the rest is the answer so far, which the decoder reads after its start token.
+
+```mermaid
+flowchart LR
+    seq["sequence: source, end token, answer so far"] --> split{"split at the<br/>last end token"}
+    split -->|source| enc["Encoder (once per source)"]
+    enc --> kv["cross K, V per decoder layer"]
+    split -->|"[0, *answer]"| dec["decoder step for each new token:<br/>self-attention over cached keys (one-directional buckets),<br/>cross-attention over the source, MLP"]
+    kv --> dec
+    dec --> head["final norm, LM head<br/>(tied: × d_model^-0.5)"]
+    head --> logits["logits"]
+```
+
+The cache keeps the encoder's projections and the decoder's keys and values. A new token's query sees only keys at
+or before it, so no mask is needed and the cached step gives the bits of a recompute; a different source or an
+answer that is not an extension starts afresh. Text-to-text models do not batch, speculate or use the prompt cache.
+
 ## Choosing a token
 
 ```mermaid

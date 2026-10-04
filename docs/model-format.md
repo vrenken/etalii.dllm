@@ -30,7 +30,7 @@ same source twice gives byte-identical files (`tests/test_import.py`).
 | Key | Content |
 | --- | --- |
 | `format`, `format_version` | `"dllm"`, `1` |
-| `architecture` | `TransformerConfig` (`src/etalii_dllm/architecture.py`): family (`bert`, `deberta`, `modernbert`, `t5`, `gemma2`, `gemma3`, `granite`, `llama`, `mistral`, `olmo2`, `phi3`, `qwen2`, `qwen3` and the mixtures of experts), sizes, heads and KV heads, head dim, context length, RMSNorm epsilon, RoPE theta and scaling, attention bias, `qk_norm` (written only when true), `qk_norm_scope` (`head` or `all`), `norm_placement` (`pre`, `post` or `sandwich`) and `norm_unit_offset` (RMSNorms scale by `1 + weight`, Gemma), each written only when not the default, `activation` (`silu` or `gelu_tanh`; `gelu` for the encoders), `type_vocabulary_size`, `classifier_labels` and `padding_index` (BERT only; `classifier_labels` for cross-encoders and `padding_index` for RoBERTa/XLM-RoBERTa positions, each written only when set), `classifier_pooling` (`cls` or `mean`, a ModernBERT cross-encoder's pooling; written only when set), `position_buckets` and `max_relative_positions` (DeBERTa's relative positions; written only when set), `local_rope_theta` (the RoPE base of the sliding-window layers, Gemma 3; written only when set), the Granite multipliers `embedding_multiplier`, `attention_multiplier` (the attention score scale), `residual_multiplier` and `logits_scaling` (each written only when not the plain value), tied embeddings, BOS/EOS token ids, `sliding_window` and `sliding_window_layers` (written only when set; no layer list means every layer), `rotary_dim` (partial rotary, written only when set), `attention_softcap` and `logits_softcap` (Gemma 2 soft-capping, written only when set) |
+| `architecture` | `TransformerConfig` (`src/etalii_dllm/architecture.py`): family (`bert`, `deberta`, `modernbert`, `t5`, `gemma2`, `gemma3`, `granite`, `llama`, `mistral`, `olmo2`, `phi3`, `qwen2`, `qwen3` and the mixtures of experts), sizes, heads and KV heads, head dim, context length, RMSNorm epsilon, RoPE theta and scaling, attention bias, `qk_norm` (written only when true), `qk_norm_scope` (`head` or `all`), `norm_placement` (`pre`, `post` or `sandwich`) and `norm_unit_offset` (RMSNorms scale by `1 + weight`, Gemma), each written only when not the default, `activation` (`silu` or `gelu_tanh`; `gelu` for the encoders), `type_vocabulary_size`, `classifier_labels` and `padding_index` (BERT only; `classifier_labels` for cross-encoders and `padding_index` for RoBERTa/XLM-RoBERTa positions, each written only when set), `classifier_pooling` (`cls` or `mean`, a ModernBERT cross-encoder's pooling; written only when set), `position_buckets` and `max_relative_positions` (DeBERTa's and T5's relative positions; written only when set), `decoder_layers` (a T5 text-to-text model's decoder layers; written only when set), `local_rope_theta` (the RoPE base of the sliding-window layers, Gemma 3; written only when set), the Granite multipliers `embedding_multiplier`, `attention_multiplier` (the attention score scale), `residual_multiplier` and `logits_scaling` (each written only when not the plain value), tied embeddings, BOS/EOS token ids, `sliding_window` and `sliding_window_layers` (written only when set; no layer list means every layer), `rotary_dim` (partial rotary, written only when set), `attention_softcap` and `logits_softcap` (Gemma 2 soft-capping, written only when set) |
 | `tensors` | List of `{name, shape, dtype: "F32", offset, nbytes, source_dtype}`; `source_dtype` is what the source stored (`BF16`, `F16`, `Q8_0`, ...) |
 | `fingerprint` | SHA-256 of the data section (hex) |
 | `source` | `format` (`safetensors`/`gguf`), `repository` and `revision` (the commit hash for `hf:` imports), `url` when known, and `files`: path, SHA-256 and size of every source file read |
@@ -95,6 +95,14 @@ first layer's relative attention bias, which every layer uses), per layer `layer
 `layers.N.mlp.gate.weight`) and `layers.N.mlp.down.weight`, then `final_norm.weight`: no biases, no position or type
 tables. `max_relative_positions` is T5's `relative_attention_max_distance`.
 
+A T5 text-to-text model (family `t5` with `decoder_layers`, written only when set) adds the decoder:
+`decoder.relative_bias.weight` `[position_buckets, heads]` (its own table, used with one-directional buckets), per
+decoder layer `decoder.layers.N.attention_norm.weight`, `decoder.layers.N.attention.{q,k,v,o}.weight`,
+`decoder.layers.N.cross_norm.weight`, `decoder.layers.N.cross.{q,k,v,o}.weight` (the attention over the encoder's
+states), `decoder.layers.N.mlp_norm.weight` and the MLP as in the encoder, then `decoder.final_norm.weight` and,
+unless `tie_word_embeddings` (T5 v1.0, whose logits come from the word embedding scaled by `hidden ** -0.5`),
+`lm_head.weight` `[vocabulary, hidden]`. `eos_token_ids` holds `</s>`, which ends the source and the answer.
+
 An embedder of any encoder family whose sentence-transformers pipeline has a `Dense` module after the pooling
 (sentence-t5, GTR-T5, LaBSE) adds `projection.weight` `[projection_size, hidden]` (and `projection.bias` with
 `projection_bias`); the embedding settings' `projection` names its activation, `identity` or `tanh`.
@@ -132,15 +140,20 @@ original checkpoint import to the same bytes and the same fingerprint.
   DeBERTa-v3 imports: `relative_attention` with `share_att_key`, `pos_att_type` `p2c|c2p`, `norm_rel_ebd`
   `layer_norm` and `position_biased_input` false; the convolution layer, a factorised `embedding_size`, `z_steps`
   and a pooler activation that differs from the MLP's are refused, and so is a checkpoint without `tokenizer.json`.
-- **T5.** `model_type` `t5` (`T5EncoderModel`, `T5Model` or `T5ForConditionalGeneration`, whose decoder and LM head
-  are dropped) maps to family `t5`. `shared.weight` (or `encoder.embed_tokens.weight`) is the embedding,
+- **T5.** `model_type` `t5` (`T5EncoderModel`, `T5Model`, or `T5ForConditionalGeneration` in a sentence-transformers
+  directory, whose decoder and LM head are dropped) maps to family `t5`. A `T5ForConditionalGeneration` without
+  `modules.json` (T5, Flan-T5) imports as a text-to-text model: `decoder.block.N.layer.0.SelfAttention`,
+  `layer.1.EncDecAttention` and `layer.2.DenseReluDense` become the decoder's attention, cross-attention and MLP,
+  `decoder.final_layer_norm` its final norm and `lm_head` the head unless `tie_word_embeddings` (default true);
+  `num_decoder_layers` sets `decoder_layers`, and a `decoder_start_token_id` other than 0 is refused.
+  `shared.weight` (or `encoder.embed_tokens.weight`) is the embedding,
   `SelfAttention.{q,k,v,o}` the projections, `relative_attention_bias` of block 0 the bias table,
   `DenseReluDense.wi` the up projection (`wi_0` and `wi_1` the gate and up of a gated MLP) and `wo` the down
   projection. `feed_forward_proj` sets the activation (`relu`, `gated-gelu` with the tanh GELU, or `[gated-]gelu`,
   `relu` or `silu`); the checkpoint needs a `tokenizer.json`. A sentence-transformers `Dense` module (`2_Dense`:
   `config.json` and `model.safetensors` with `linear.weight` and maybe `linear.bias`, activation `Identity` or
   `Tanh`) right after the pooling becomes the projection, for every encoder family.
-- **Fail loudly.** Unknown tensors, unsupported families (anything but BERT, DeBERTa-v2/v3, ModernBERT, T5 encoders, Gemma 2, Gemma 3 text, Granite, Granite MoE, Llama, Mistral, Mixtral, OLMo 2, OLMoE, Phi-3, Qwen2, Qwen2-MoE, Qwen3 and Qwen3-MoE),
+- **Fail loudly.** Unknown tensors, unsupported families (anything but BERT, DeBERTa-v2/v3, ModernBERT, T5 encoders and text-to-text models, Gemma 2, Gemma 3 text, Granite, Granite MoE, Llama, Mistral, Mixtral, OLMo 2, OLMoE, Phi-3, Qwen2, Qwen2-MoE, Qwen3 and Qwen3-MoE),
   activations other than SiLU and GELU (tanh), MLP biases and RoPE scaling other than `linear`/`llama3`/`longrope`/`yarn` stop the import. Sliding-window
   attention comes from `sliding_window` (Mistral: every layer; Qwen2/Qwen3 with `use_sliding_window`: the layers from
   `max_window_layers` on; a `layer_types` list names them explicitly); a window at least as long as the context is

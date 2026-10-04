@@ -270,8 +270,9 @@ EVAL_FINGERPRINTS = {
 # output file's SHA-256, so it pins the bits of every kernel case, the sampler and the two small decoders. Phase 21
 # added the two sample-penalties cases (penalties, min-p and logit bias); Phase 41 the YaRN and LongRoPE long-factor
 # rope-inv-freq cases; Phase 44 the sigmoid case and the qwen2_moe decoder (a gated shared expert); Phase 62 the T5
-# encoder (relative attention bias, RMS norms, gated tanh GELU).
-CONFORMANCE_MANIFEST_SHA256 = "769fcd0406b203096df6a95798c6163050b44d0f90397de033bbf7c7509cc61e"
+# encoder (relative attention bias, RMS norms, gated tanh GELU); Phase 64 the T5 encoder-decoder (text-to-text, plain
+# and Q8_0).
+CONFORMANCE_MANIFEST_SHA256 = "6db08f74acc2813435cf2a68c0a3125c5ac88c1c684bd9d640fb15f6093a0e6c"
 
 # Phase 21: the placeholder model continuing "Deterministic decoding controls are" with every decoding control set
 # (tests/test_decoding_controls.py::CONTROLLED): penalties, min-p and logit bias.
@@ -466,3 +467,10 @@ T5_FINETUNE_FINGERPRINT = {
     "t5": "6cb914466682adac67d2ed0a60155c5f2b153249a9a78109e8c99bb33bd858e7",
     "sentence-t5": "0522a59ac0d0709893ebce359d2cb34026031d2bb82437959bb82b2a1cc2a583",
 }
+
+# The tiny Flan-T5-style text-to-text model's greedy and sampled (temperature 0.8, seed 7) generations (Phase 64,
+# tests/test_t5_generation.py); the greedy answer also equals transformers' generate.
+T5_GENERATION_FINGERPRINT = (
+    "fa54d544fa221276d859fdd28d882dce46df57ed16df21116eaa366ce3e105cd",
+    "5a10429daa65dfa2f6623d959f945e663b863ff79135a9683af88052eaab6e41",
+)
