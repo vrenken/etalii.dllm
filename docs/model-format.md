@@ -30,7 +30,7 @@ same source twice gives byte-identical files (`tests/test_import.py`).
 | Key | Content |
 | --- | --- |
 | `format`, `format_version` | `"dllm"`, `1` |
-| `architecture` | `TransformerConfig` (`src/etalii_dllm/architecture.py`): family (`bert`, `deberta`, `modernbert`, `t5`, `gemma2`, `gemma3`, `granite`, `llama`, `mistral`, `olmo2`, `phi3`, `qwen2`, `qwen3` and the mixtures of experts), sizes, heads and KV heads, head dim, context length, RMSNorm epsilon, RoPE theta and scaling, attention bias, `qk_norm` (written only when true), `qk_norm_scope` (`head` or `all`), `norm_placement` (`pre`, `post` or `sandwich`) and `norm_unit_offset` (RMSNorms scale by `1 + weight`, Gemma), each written only when not the default, `activation` (`silu` or `gelu_tanh`; `gelu` for the encoders), `type_vocabulary_size`, `classifier_labels` and `padding_index` (BERT only; `classifier_labels` for cross-encoders and `padding_index` for RoBERTa/XLM-RoBERTa positions, each written only when set), `classifier_pooling` (`cls` or `mean`, a ModernBERT cross-encoder's pooling; written only when set), `position_buckets` and `max_relative_positions` (DeBERTa's and T5's relative positions; written only when set), `decoder_layers` (a T5 text-to-text model's decoder layers; written only when set), `local_rope_theta` (the RoPE base of the sliding-window layers, Gemma 3; written only when set), the Granite multipliers `embedding_multiplier`, `attention_multiplier` (the attention score scale), `residual_multiplier` and `logits_scaling` (each written only when not the plain value), tied embeddings, BOS/EOS token ids, `sliding_window` and `sliding_window_layers` (written only when set; no layer list means every layer), `rotary_dim` (partial rotary, written only when set), `attention_softcap` and `logits_softcap` (Gemma 2 soft-capping, written only when set) |
+| `architecture` | `TransformerConfig` (`src/etalii_dllm/architecture.py`): family (`bert`, `deberta`, `modernbert`, `t5`, `gemma2`, `gemma3`, `gpt2`, `gpt_neox`, `granite`, `llama`, `mistral`, `olmo2`, `phi`, `phi3`, `qwen2`, `qwen3` and the mixtures of experts), sizes, heads and KV heads, head dim, context length, RMSNorm epsilon, RoPE theta and scaling, attention bias, `qk_norm` (written only when true), `qk_norm_scope` (`head` or `all`), `norm_placement` (`pre`, `post` or `sandwich`) and `norm_unit_offset` (RMSNorms scale by `1 + weight`, Gemma), each written only when not the default, `activation` (`silu` or `gelu_tanh`; `gelu` for the encoders and GPT-NeoX), `type_vocabulary_size`, `classifier_labels` and `padding_index` (BERT only; `classifier_labels` for cross-encoders and `padding_index` for RoBERTa/XLM-RoBERTa positions, each written only when set), `classifier_pooling` (`cls` or `mean`, a ModernBERT cross-encoder's pooling; written only when set), `position_buckets` and `max_relative_positions` (DeBERTa's and T5's relative positions; written only when set), `decoder_layers` (a T5 text-to-text model's decoder layers; written only when set), `local_rope_theta` (the RoPE base of the sliding-window layers, Gemma 3; written only when set), the Granite multipliers `embedding_multiplier`, `attention_multiplier` (the attention score scale), `residual_multiplier` and `logits_scaling` (each written only when not the plain value), tied embeddings, BOS/EOS token ids, `sliding_window` and `sliding_window_layers` (written only when set; no layer list means every layer), `rotary_dim` (partial rotary, written only when set), `attention_softcap` and `logits_softcap` (Gemma 2 soft-capping, written only when set), `layer_norm`, `linear_bias`, `lm_head_bias`, `plain_mlp`, `parallel_residual` (`shared` or `separate`) and `absolute_positions` (the classic Phi, GPT-NeoX and GPT-2 layouts; each written only when set) |
 | `tensors` | List of `{name, shape, dtype: "F32", offset, nbytes, source_dtype}`; `source_dtype` is what the source stored (`BF16`, `F16`, `Q8_0`, ...) |
 | `fingerprint` | SHA-256 of the data section (hex) |
 | `source` | `format` (`safetensors`/`gguf`), `repository` and `revision` (the commit hash for `hf:` imports), `url` when known, and `files`: path, SHA-256 and size of every source file read |
@@ -103,6 +103,15 @@ states), `decoder.layers.N.mlp_norm.weight` and the MLP as in the encoder, then 
 unless `tie_word_embeddings` (T5 v1.0, whose logits come from the word embedding scaled by `hidden ** -0.5`),
 `lm_head.weight` `[vocabulary, hidden]`. `eos_token_ids` holds `</s>`, which ends the source and the answer.
 
+A classic decoder (families `phi`, `gpt_neox` and `gpt2`, with `layer_norm`, `linear_bias` and `plain_mlp` set)
+has the decoder's tensors without `mlp.gate.weight`, plus a `.bias` for every norm (`layers.N.attention_norm.bias`,
+`layers.N.mlp_norm.bias`, `final_norm.bias`), for every projection (`layers.N.attention.{q,k,v,o}.bias`,
+`layers.N.mlp.up.bias` `[intermediate]`, `layers.N.mlp.down.bias` `[hidden]`) and, with `lm_head_bias` (Phi), for
+the head (`lm_head.bias` `[vocab]`). `parallel_residual` is `shared` (Phi: one `attention_norm` feeds attention and
+the MLP, and there is no `mlp_norm`) or `separate` (GPT-NeoX). With `absolute_positions` (GPT-2) the file adds
+`position_embedding.weight` `[context_length, hidden]` and nothing rotates. Each of these settings is written only
+when set.
+
 An embedder of any encoder family whose sentence-transformers pipeline has a `Dense` module after the pooling
 (sentence-t5, GTR-T5, LaBSE) adds `projection.weight` `[projection_size, hidden]` (and `projection.bias` with
 `projection_bias`); the embedding settings' `projection` names its activation, `identity` or `tanh`.
@@ -120,6 +129,17 @@ original checkpoint import to the same bytes and the same fingerprint.
   import is deterministic, but a quantised source is of course only as precise as its quantisation.
   Running quantised (`--quantize q8_0` or `q4_0`) requantises the float32 tensors at load time; the file itself
   stays float32, so one file serves every precision.
+- **Phi, GPT-NeoX and GPT-2.** `model_type` `phi` (`PhiForCausalLM`: Phi-1, Phi-1.5, Phi-2), `gpt_neox`
+  (`GPTNeoXForCausalLM`: Pythia) and `gpt2` (`GPT2LMHeadModel`: GPT-2, DistilGPT2) map to the families of the same
+  names. Phi's `dense`, `fc1` and `fc2` become `attention.o`, `mlp.up` and `mlp.down`. GPT-NeoX's
+  `query_key_value` interleaves q, k and v a head at a time (`[q_0 k_0 v_0 q_1 …]`) and splits into the three
+  projections; its head is `embed_out` (or `lm_head`). GPT-2's Conv1D weights are stored `[in, out]` and are
+  transposed; `c_attn` stacks q, k and v and splits into them; names import with or without the `transformer.`
+  prefix, and the attention mask buffers are dropped. `partial_rotary_factor` or `rotary_pct` becomes `rotary_dim`,
+  `rope_theta` or `rotary_emb_base` the base, `layer_norm_eps` (`layer_norm_epsilon`) the norm epsilon. `hidden_act`
+  `gelu` maps to the exact GELU, `gelu_new` and `gelu_pytorch_tanh` to the tanh form. A GPT-2 context window can be
+  shortened (the position table is cut) but not lengthened. Phi's `qk_layernorm`, GPT-NeoX without attention biases
+  and GPT-2 without scaled attention, with `scale_attn_by_inverse_layer_idx` or with cross-attention are refused.
 - **BERT.** `model_type` `bert` (`BertModel` or a pre-training checkpoint, with or without the `bert.` prefix;
   sentence-transformers encoders such as all-MiniLM-L6-v2 and bge-small-en-v1.5) maps to family `bert`. The pooler
   and the pre-training heads are dropped, old `gamma`/`beta` LayerNorm names are read as `weight`/`bias`,

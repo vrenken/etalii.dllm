@@ -232,7 +232,7 @@ def test_missing_licence_is_refused(tmp_path):
 @pytest.mark.parametrize(
     ("change", "message"),
     [
-        ({"model_type": "gpt2"}, "not supported"),
+        ({"model_type": "falcon"}, "not supported"),
         ({"hidden_act": "gelu"}, "activation"),
         ({"rope_scaling": {"rope_type": "dynamic", "factor": 4.0}}, "dynamic"),
         ({"mlp_bias": True}, "MLP biases"),

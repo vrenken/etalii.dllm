@@ -32,6 +32,8 @@ from etalii_dllm.numerics import (
     QuantizedWeight,
     attention,
     attention_weights,
+    gelu,
+    layer_norm,
     linear,
     moe_route,
     rms_norm,
@@ -267,6 +269,8 @@ class Transformer:
             raise ValueError(ENCODER_ONLY)
         if config.is_text_to_text:
             raise ValueError("a text-to-text model runs through etalii_dllm.seq2seq.TextToText")
+        if device == "cuda" and config.cpu_only:
+            raise ValueError(f"{config.family} decoders run on the CPU only")
         expected = config.tensor_shapes()
         missing = sorted(set(expected) - set(tensors))
         if missing:
@@ -294,6 +298,7 @@ class Transformer:
         self.tensors: Mapping[str, Tensor] = weights
         """The float32 source tensors (usually memory-mapped from the model file)."""
         self._embedding = weights["token_embedding.weight"].numpy()
+        self._positions = weights["position_embedding.weight"].numpy() if config.absolute_positions else None
         weights = fold_scales(config, weights)
         head = weights["token_embedding.weight" if config.tie_word_embeddings else "lm_head.weight"]
         # Matrices are packed (or quantised, or uploaded to the GPU) once here; norms and biases stay plain (on the
@@ -311,6 +316,7 @@ class Transformer:
             else:
                 self._w[name] = tensor
         self._lm_head = _prepare(head, quantize, self.device)
+        self._lm_head_bias = weights["lm_head.bias"] if config.lm_head_bias else None
         if release is not None:
             release("token_embedding.weight" if config.tie_word_embeddings else "lm_head.weight")
         self._inv_freq = rope_inv_freq(
@@ -440,14 +446,29 @@ class Transformer:
         head = self._lm_head
         if self.device == "cuda":
             head = self._host_lm_head()
-        return self._finish_logits(linear(values, head).numpy())
+        return self._finish_logits(linear(values, head, self._lm_head_bias).numpy())
 
     def final_norm(self, x: npt.ArrayLike) -> FloatArray:
-        """The final RMSNorm of residual stream rows ``[rows, hidden]`` (what :meth:`hidden_states` returns for the
+        """The final norm of residual stream rows ``[rows, hidden]`` (what :meth:`hidden_states` returns for the
         last layer's output)."""
-        weight = self.tensors["final_norm.weight"]
-        normed = rms_norm(x, weight, self.config.rms_norm_eps, add_unit_offset=self.config.norm_unit_offset)
-        return normed.numpy().copy()
+        return self._norm(x, self.tensors, "final_norm").numpy().copy()
+
+    def _norm(self, x: npt.ArrayLike | Tensor, weights: Mapping, prefix: str) -> Tensor:
+        """The norm ``prefix`` (``<prefix>.weight``, and ``<prefix>.bias`` for a LayerNorm) of rows ``x``: RMSNorm,
+        or the ``layer_norm`` kernel for the classic decoders."""
+        config = self.config
+        if config.layer_norm:
+            return layer_norm(x, weights[prefix + ".weight"], weights[prefix + ".bias"], config.rms_norm_eps)
+        return rms_norm(x, weights[prefix + ".weight"], config.rms_norm_eps, add_unit_offset=config.norm_unit_offset)
+
+    def _plain_mlp(self, h: npt.ArrayLike | Tensor, p: str, hook: LayerHook | None, layer: int) -> Tensor:
+        """The classic decoders' MLP ``down(act(up(h)))`` with its biases (``p`` is ``layers.<i>.mlp.``)."""
+        w = self._w
+        approximate = "tanh" if self.config.activation == "gelu_tanh" else "none"
+        activation = gelu(linear(h, w[p + "up.weight"], w.get(p + "up.bias")), approximate=approximate).numpy()
+        if hook is not None:
+            hook.mlp_activation(layer, activation.copy())
+        return linear(activation, w[p + "down.weight"], w.get(p + "down.bias"))
 
     def run_hooked(self, tokens: Sequence[int], hook: LayerHook) -> FloatArray:
         """Runs ``tokens`` from scratch on the CPU with ``hook`` watching every layer and returns the final-norm
@@ -478,11 +499,10 @@ class Transformer:
         w = self._w
         tokens, positions, bounds = self._embed(segments)
         count = len(tokens)
-        x = self._embeddings(tokens)
-        unit = config.norm_unit_offset
+        x = self._embeddings(tokens, positions)
 
         def norm(values: npt.ArrayLike | Tensor, name: str) -> Tensor:
-            return rms_norm(values, w[name], config.rms_norm_eps, add_unit_offset=unit)
+            return self._norm(values, w, name.removesuffix(".weight"))
 
         def observe(layer: int, point: str, values: np.ndarray) -> np.ndarray:
             if hook is None:
@@ -502,9 +522,12 @@ class Transformer:
             q, k = q.reshape(count, config.heads, config.head_dim), k.reshape(count, config.kv_heads, config.head_dim)
             if config.qk_norm and config.qk_norm_scope == "head":  # Qwen3: over each head, before the rotation
                 q, k = norm(q, p + "attention.q_norm.weight"), norm(k, p + "attention.k_norm.weight")
-            inv_freq = self._local_inv_freq if config.uses_local_rope(layer) else self._inv_freq
-            q = rope(q, positions, inv_freq).numpy()
-            k = rope(k, positions, inv_freq).numpy()
+            if config.absolute_positions:
+                q, k = q.numpy(), k.numpy()
+            else:
+                inv_freq = self._local_inv_freq if config.uses_local_rope(layer) else self._inv_freq
+                q = rope(q, positions, inv_freq).numpy()
+                k = rope(k, positions, inv_freq).numpy()
             v = v.numpy().reshape(count, config.kv_heads, config.head_dim)
             attended = []
             for (_, start, cache), lo, hi in zip(segments, bounds[:-1], bounds[1:], strict=True):
@@ -535,14 +558,32 @@ class Transformer:
                         ).numpy(),
                     )
             a = attended[0] if len(attended) == 1 else np.concatenate(attended)
-            out = linear(a.reshape(count, config.heads * config.head_dim), w[p + "attention.o.weight"])
+            flat = a.reshape(count, config.heads * config.head_dim)
+            out = linear(flat, w[p + "attention.o.weight"], w.get(p + "attention.o.bias"))
             if config.has_post_norms:
                 out = norm(out, p + "attention_post_norm.weight")
             if hook is not None:
                 hook.attention_output(layer, out.numpy().copy())
+            if config.parallel_residual is not None:
+                # Attention and the MLP both read the layer's input: "middle" is that input, and the two outputs are
+                # added together before the residual add, (attention + mlp) + x, as transformers' Phi and GPT-NeoX do.
+                x = observe(layer, "middle", x)
+                shared = config.parallel_residual == "shared" and hook is None
+                mlp = self._plain_mlp(
+                    h if shared else norm(x, p + config.mlp_norm + ".weight"), p + "mlp.", hook, layer
+                )
+                if hook is not None:
+                    hook.mlp_output(layer, mlp.numpy().copy())
+                x = (out.numpy() + mlp.numpy()) + x
+                if layer in self.steering:
+                    x = x + self.steering[layer]
+                x = observe(layer, "output", x)
+                continue
             x = observe(layer, "middle", x + out.numpy())
             h = norm(x, p + "mlp_norm.weight") if config.has_pre_norms else x
-            if config.is_sparse(layer):
+            if config.plain_mlp:
+                out = self._plain_mlp(h, p + "mlp.", hook, layer)
+            elif config.is_sparse(layer):
                 out = Tensor(self._experts(h.numpy() if isinstance(h, Tensor) else h, layer, hook))
             else:
                 gate = linear(h, w[p + "mlp.gate.weight"])
@@ -650,14 +691,21 @@ class Transformer:
         w = self._w
         x = np.ascontiguousarray(middle, dtype=np.float32)
         if config.has_pre_norms:
-            norm = w[f"layers.{layer}.mlp_norm.weight"]
-            x = rms_norm(x, norm, config.rms_norm_eps, add_unit_offset=config.norm_unit_offset)
+            x = self._norm(x, w, f"layers.{layer}.{config.mlp_norm}")
+        if config.plain_mlp:
+            approximate = "tanh" if config.activation == "gelu_tanh" else "none"
+            up = linear(x, w[p + "up.weight"], w.get(p + "up.bias"))  # type: ignore[arg-type]
+            return gelu(up, approximate=approximate).numpy().copy()
         gate = linear(x, w[p + "gate.weight"])  # type: ignore[arg-type]
         up = linear(x, w[p + "up.weight"])  # type: ignore[arg-type]
         return swiglu(gate, up, config.activation).numpy().copy()
 
-    def _embeddings(self, tokens: list[int]) -> np.ndarray:
+    def _embeddings(self, tokens: list[int], positions: np.ndarray) -> np.ndarray:
         rows = self._embedding[np.asarray(tokens, dtype=np.int64)]
+        if self._positions is not None:  # GPT-2: token + position rows, elementwise in float32
+            if len(positions) and int(positions.max()) >= self.config.context_length:
+                raise ValueError(f"positions beyond the model's {self.config.context_length} position embeddings")
+            rows = rows + self._positions[positions]
         if self.config.embedding_multiplier != 1.0:
             rows = rows * np.float32(self.config.embedding_multiplier)
         return np.ascontiguousarray(rows, dtype=np.float32)
@@ -680,7 +728,7 @@ class Transformer:
         tokens, positions, bounds = self._embed(segments)
         count = len(tokens)
         scale = config.attention_scale
-        x = CudaTensor.upload(self._embeddings(tokens))
+        x = CudaTensor.upload(self._embeddings(tokens, positions))
         on_gpu_positions = cuda.upload_raw(positions)
         unit = config.norm_unit_offset
 

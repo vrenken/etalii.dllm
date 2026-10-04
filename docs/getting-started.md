@@ -1185,6 +1185,22 @@ T5 and Flan-T5 models (section 60) and T5 embedders (section 58) now export to G
 back the same model, with the same answers and fingerprints; exporting twice writes the same bytes. Details:
 [T5 models through GGUF](model-building.md#t5-models-through-gguf).
 
+## 68. Phi-2, Pythia and GPT-2
+
+```bash
+dllm import hf:microsoft/phi-2 -o phi-2.dllm
+dllm import hf:EleutherAI/pythia-160m -o pythia-160m.dllm
+dllm import hf:openai-community/gpt2 -o gpt2.dllm
+dllm --model pythia-160m.dllm generate --prompt "The capital of France is" --max-tokens 20
+```
+
+The classic decoder families now import and run with the same determinism as every other model: Phi-1, Phi-1.5 and
+Phi-2 (MIT), GPT-NeoX models such as Pythia (Apache 2.0), and GPT-2 and DistilGPT2. They use LayerNorms with
+biases, plain GELU MLPs, attention and MLP side by side (Phi, Pythia), and learned positions (GPT-2, whose context
+window is fixed at 1024 tokens). Quantisation, speculative decoding, the prompt cache, `dllm verify --reference`
+and the interpretability commands (`dllm lens`, `dllm attention`, `dllm steer`, `dllm sae`) work with them. Details:
+[model format](model-format.md#conversion-rules).
+
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
   Qwen2.5-0.5B-Instruct, Qwen2.5-1.5B-Instruct, Qwen3-0.6B, TinyLlama-1.1B-Chat, OLMo-2-1B-Instruct,
@@ -1236,6 +1252,9 @@ back the same model, with the same answers and fingerprints; exporting twice wri
   export to GGUF only with llama.cpp's fixed bucket distance of 128 (real T5 models have it); GGUF files are not
   checked against llama.cpp itself, only against the `gguf` package's layout. Their prompt cannot roll or be healed, `echo` on `/v1/completions` cannot score
   their source, and the chat endpoints join the messages' text into one source (T5 has no chat template).
+- Phi, GPT-NeoX (Pythia) and GPT-2 (section 68) are checked against `transformers` only on tiny synthetic models.
+  They run on the CPU only, and they cannot be fine-tuned, adapted with LoRA, edited with `dllm edit` or exported
+  yet; GGUF files of them do not import.
 - Granite MoE's experts are stored fused, so a LoRA adapter on them cannot be exported in the PEFT format (the
   merged model exports fine), and llama.cpp has no Granite MoE architecture to export a GGUF file to.
 - Mixture-of-experts models (sections 38 and 40) are checked against a float64 transcription of `transformers` only on tiny
