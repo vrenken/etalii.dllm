@@ -233,7 +233,7 @@ def test_finetune_dpo_command(flan, tmp_path, capsys):
 # dllm eval (#400)
 
 
-def test_eval_scores_answers_given_their_source(flan, tmp_path, capsys):
+def test_eval_scores_answers_given_their_source(flan, tmp_path, capsys, cli_environment):
     from etalii_dllm.cli import main as cli
 
     checkpoint, engine = flan

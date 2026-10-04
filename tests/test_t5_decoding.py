@@ -95,13 +95,11 @@ def test_beam_search_matches_transformers(variant, tmp_path):
     assert finished == {"stop", "length"}
 
 
-def test_beam_search_receipts_and_front_ends(flan, capsys, monkeypatch, tmp_path):
+def test_beam_search_receipts_and_front_ends(flan, capsys, cli_environment, tmp_path):
     from golden_values import T5_DECODING_FINGERPRINT
 
     from etalii_dllm.cli import main
 
-    for name in [n for n in __import__("os").environ if n.startswith("DLLM_")]:
-        monkeypatch.delenv(name)
     checkpoint, engine = flan
     request = ChatRequest([ChatMessage("user", TEXTS[1])], 8)
     result = beam.search(engine, request, 3, 2)
@@ -158,13 +156,11 @@ def test_scores_match_transformers(t5, flan):
     assert scoring.score_tokens(flan[1], [], source=[]).tokens == ()
 
 
-def test_score_refusals_receipts_and_front_ends(flan, capsys, monkeypatch, tmp_path):
+def test_score_refusals_receipts_and_front_ends(flan, capsys, cli_environment, tmp_path):
     from golden_values import T5_DECODING_FINGERPRINT
 
     from etalii_dllm.cli import main
 
-    for name in [n for n in __import__("os").environ if n.startswith("DLLM_")]:
-        monkeypatch.delenv(name)
     checkpoint, engine = flan
     with pytest.raises(ValueError, match="answer to a source"):
         scoring.score_text(engine, TEXTS[2])
