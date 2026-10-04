@@ -191,6 +191,8 @@ class FineTuner:
         metadata: Mapping[str, Any],
         reference: Sequence[tuple[float, float]] | None = None,
     ) -> None:
+        if config.is_text_to_text:
+            raise ValueError("text-to-text models cannot be fine-tuned yet")
         encoder_run = run.objective in ENCODER_OBJECTIVES
         if config.is_encoder != encoder_run:
             if config.is_encoder:

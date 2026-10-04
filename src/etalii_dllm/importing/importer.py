@@ -917,6 +917,84 @@ def _t5_name(name: str) -> str | None:
     raise ModelImportError(f"unexpected tensor {name!r}")
 
 
+_T5_DECODER_LAYER = re.compile(r"^decoder\.block\.(\d+)\.layer\.([012])\.(.+)\.weight$")
+_T5_DECODER_LAYER_NAMES = {
+    ("0", "SelfAttention.q"): "attention.q",
+    ("0", "SelfAttention.k"): "attention.k",
+    ("0", "SelfAttention.v"): "attention.v",
+    ("0", "SelfAttention.o"): "attention.o",
+    ("0", "layer_norm"): "attention_norm",
+    ("1", "EncDecAttention.q"): "cross.q",
+    ("1", "EncDecAttention.k"): "cross.k",
+    ("1", "EncDecAttention.v"): "cross.v",
+    ("1", "EncDecAttention.o"): "cross.o",
+    ("1", "layer_norm"): "cross_norm",
+    ("2", "layer_norm"): "mlp_norm",
+    ("2", "DenseReluDense.wi"): "mlp.up",
+    ("2", "DenseReluDense.wi_0"): "mlp.gate",
+    ("2", "DenseReluDense.wi_1"): "mlp.up",
+    ("2", "DenseReluDense.wo"): "mlp.down",
+}
+
+
+def _t5_text_to_text_name(name: str, tied: bool) -> str | None:
+    """Our name for a tensor of a T5ForConditionalGeneration checkpoint: the encoder's as :func:`_t5_name`, the
+    decoder's under ``decoder.``; None for the decoder's copy of the shared embedding and a tied LM head."""
+    if name == "decoder.embed_tokens.weight" or (tied and name == "lm_head.weight"):
+        return None
+    if name == "lm_head.weight":
+        return name
+    if name == "decoder.final_layer_norm.weight":
+        return "decoder.final_norm.weight"
+    if name == "decoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight":
+        return "decoder.relative_bias.weight"
+    if name.startswith("decoder."):
+        match = _T5_DECODER_LAYER.match(name)
+        if match and (match.group(2), match.group(3)) in _T5_DECODER_LAYER_NAMES:
+            stem = _T5_DECODER_LAYER_NAMES[(match.group(2), match.group(3))]
+            return f"decoder.layers.{int(match.group(1))}.{stem}.weight"
+        raise ModelImportError(f"unexpected tensor {name!r}")
+    return _t5_name(name)
+
+
+def _convert_t5_text_to_text(directory: Path, raw_config: dict[str, Any], context_length: int | None) -> _Converted:
+    """A T5ForConditionalGeneration checkpoint (T5 v1.0, v1.1, Flan-T5) as a text-to-text model that keeps its
+    decoder (:mod:`etalii_dllm.seq2seq`): ``num_decoder_layers`` decoder layers, the LM head tied to the shared
+    embedding (``tie_word_embeddings``, T5 v1.0) or its own ``lm_head``, ``</s>`` as the end of the source."""
+    config = t5_config(raw_config, context_length)
+    if int(raw_config.get("decoder_start_token_id", 0)) != 0:
+        raise ModelImportError("only T5 models whose decoder starts with token 0 (<pad>) are supported")
+    if not (directory / "tokenizer.json").exists():
+        raise ModelImportError(
+            "this T5 checkpoint has no tokenizer.json (only spm.model); save it with a fast tokenizer first, "
+            "for example AutoTokenizer.from_pretrained(dir).save_pretrained(dir)"
+        )
+    tied = bool(raw_config.get("tie_word_embeddings", True))
+    eos = raw_config.get("eos_token_id", 1)
+    try:
+        config = dataclasses.replace(
+            config,
+            decoder_layers=int(raw_config.get("num_decoder_layers") or raw_config["num_layers"]),
+            tie_word_embeddings=tied,
+            eos_token_ids=(int(eos[0] if isinstance(eos, list) else eos),),
+        )
+    except ValueError as error:
+        raise ModelImportError(str(error)) from error
+    checkpoint = open_checkpoint(directory)
+    if "shared.weight" not in checkpoint and "encoder.embed_tokens.weight" in checkpoint:
+        embedding = checkpoint["encoder.embed_tokens.weight"]
+        checkpoint = {**checkpoint, "shared.weight": dataclasses.replace(embedding, name="shared.weight")}
+    tensors: dict[str, TensorSource] = {}
+    for tensor in checkpoint.values():
+        name = _t5_text_to_text_name(tensor.name, tied)
+        if name is None:
+            continue
+        if tensor.dtype not in ("F32", "F16", "BF16"):
+            raise ModelImportError(f"tensor {tensor.name!r} has dtype {tensor.dtype}; only F32, F16 and BF16 import")
+        tensors[name] = TensorSource(tensor.shape, tensor.to_float32, tensor.dtype)
+    return _with_tokenizer(directory, config, tensors, None)
+
+
 _DEBERTA_LAYER = re.compile(r"^encoder\.layer\.(\d+)\.(.+)\.(weight|bias)$")
 _DEBERTA_LAYER_NAMES = {
     "attention.self.query_proj": "attention.q",
@@ -1106,6 +1184,9 @@ def _convert_bert(directory: Path, raw_config: dict[str, Any], context_length: i
     modern = raw_config.get("model_type") == "modernbert"
     deberta = raw_config.get("model_type") == "deberta-v2"
     t5 = raw_config.get("model_type") == "t5"
+    generator = "T5ForConditionalGeneration" in (raw_config.get("architectures") or [])
+    if t5 and generator and not (directory / "modules.json").exists():  # a sentence-transformers T5 embeds
+        return _convert_t5_text_to_text(directory, raw_config, context_length)
     mapping = modernbert_config if modern else deberta_config if deberta else t5_config if t5 else bert_config
     config = mapping(raw_config, context_length)
     if (deberta or t5) and not (directory / "tokenizer.json").exists():

@@ -32,7 +32,9 @@ from typing import Any
 # log-bucketed relative position embeddings (disentangled attention). "t5" is the encoder of T5 (sentence-t5,
 # GTR-T5): no positions in the embeddings, pre-norm layers with RMS norms that have neither a mean nor a bias, no
 # biases and no score scaling, a per-head bias over log-bucketed relative positions (the first layer's, shared by
-# every layer), a ReLU MLP (T5 v1.0) or a gated one (v1.1), then a final norm.
+# every layer), a ReLU MLP (T5 v1.0) or a gated one (v1.1), then a final norm. A "t5" with ``decoder_layers`` is a
+# text-to-text model (T5, Flan-T5): that encoder plus a decoder with causal self-attention over one-directional
+# buckets of its own and cross-attention over the encoder's states (:mod:`etalii_dllm.seq2seq`).
 FAMILIES = (
     "bert",
     "deberta",
@@ -159,6 +161,9 @@ class TransformerConfig:
     hidden]``); 0 for none."""
     projection_bias: bool = False
     """Whether that projection has a bias (``projection.bias``)."""
+    decoder_layers: int = 0
+    """T5 text-to-text models (T5ForConditionalGeneration, Flan-T5): the decoder's layers (``decoder.*`` tensors);
+    the model then generates text (:mod:`etalii_dllm.seq2seq`) instead of embedding it. 0 for every other model."""
 
     def __post_init__(self) -> None:
         if self.family not in FAMILIES:
@@ -168,11 +173,13 @@ class TransformerConfig:
                 raise ValueError(f"{name} must be positive")
         if self.heads % self.kv_heads:
             raise ValueError("heads must be a multiple of kv_heads")
-        if self.head_dim % 2 and not self.is_encoder:
+        if self.head_dim % 2 and self.family not in ENCODER_FAMILIES:
             raise ValueError("head_dim must be even for rotary embeddings")
         if self.activation not in ACTIVATIONS:
             raise ValueError(f"unsupported activation {self.activation!r}")
-        if self.is_encoder:
+        if self.decoder_layers and (self.family != "t5" or self.decoder_layers < 0 or self.projection_size):
+            raise ValueError("decoder_layers is for t5 text-to-text models, which have no projection")
+        if self.family in ENCODER_FAMILIES:
             if self.family == "t5":
                 if self.position_buckets < 2 or self.max_relative_positions < 1:
                     raise ValueError("t5 needs position_buckets (at least 2) and max_relative_positions")
@@ -271,7 +278,12 @@ class TransformerConfig:
     @property
     def is_encoder(self) -> bool:
         """Whether the model is an encoder, BERT, DeBERTa, ModernBERT or T5 (it embeds text and does not generate)."""
-        return self.family in ENCODER_FAMILIES
+        return self.family in ENCODER_FAMILIES and not self.decoder_layers
+
+    @property
+    def is_text_to_text(self) -> bool:
+        """Whether the model is a T5 encoder-decoder that generates text from a source text (``decoder_layers``)."""
+        return self.decoder_layers > 0
 
     @property
     def relative_span(self) -> int:
@@ -384,6 +396,7 @@ class TransformerConfig:
             ("gated_mlp", False),
             ("projection_size", 0),
             ("projection_bias", False),
+            ("decoder_layers", 0),
         )
         for name, default in defaults:
             if values[name] == default:
@@ -406,6 +419,8 @@ class TransformerConfig:
         """Every tensor the model expects, with its shape. Weights use the ``[out, in]`` layout of ``linear``."""
         if self.is_encoder:
             return self._encoder_shapes()
+        if self.is_text_to_text:
+            return self._text_to_text_shapes()
         q = self.heads * self.head_dim
         kv = self.kv_heads * self.head_dim
         shapes: dict[str, tuple[int, ...]] = {"token_embedding.weight": (self.vocabulary_size, self.hidden_size)}
@@ -519,6 +534,30 @@ class TransformerConfig:
             shapes[p + "mlp.up.weight"] = (size, hidden)
             shapes[p + "mlp.down.weight"] = (hidden, size)
         shapes["final_norm.weight"] = (hidden,)
+        return shapes
+
+    def _text_to_text_shapes(self) -> dict[str, tuple[int, ...]]:
+        """The T5 encoder's tensors, then the decoder's under ``decoder.`` (its own bucket table, each layer's
+        self-attention, cross-attention over the encoder states and MLP, a final norm), then ``lm_head`` unless it
+        is tied to the word embedding."""
+        hidden, q, size = self.hidden_size, self.heads * self.head_dim, self.intermediate_size
+        shapes = self._t5_shapes()
+        shapes["decoder.relative_bias.weight"] = (self.position_buckets, self.heads)
+        for i in range(self.decoder_layers):
+            p = f"decoder.layers.{i}."
+            for block in ("attention", "cross"):
+                shapes[p + f"{block}_norm.weight"] = (hidden,)
+                for name in ("q", "k", "v"):
+                    shapes[p + f"{block}.{name}.weight"] = (q, hidden)
+                shapes[p + f"{block}.o.weight"] = (hidden, q)
+            shapes[p + "mlp_norm.weight"] = (hidden,)
+            if self.gated_mlp:
+                shapes[p + "mlp.gate.weight"] = (size, hidden)
+            shapes[p + "mlp.up.weight"] = (size, hidden)
+            shapes[p + "mlp.down.weight"] = (hidden, size)
+        shapes["decoder.final_norm.weight"] = (hidden,)
+        if not self.tie_word_embeddings:
+            shapes["lm_head.weight"] = (self.vocabulary_size, hidden)
         return shapes
 
     def _modernbert_shapes(self) -> dict[str, tuple[int, ...]]:

@@ -125,19 +125,22 @@ def relative_index(config: TransformerConfig, count: int) -> np.ndarray:
     return np.clip(buckets + span, 0, 2 * span - 1)
 
 
-def t5_relative_buckets(distances: npt.ArrayLike, buckets: int, max_distance: int) -> np.ndarray:
-    """T5's bidirectional relative position buckets of integer ``distances`` (``j - i``, key minus query), exactly as
-    transformers' ``T5Attention._relative_position_bucket`` computes them: half of the ``buckets`` for each
-    direction (``n = buckets // 2``, keys after the query from ``n`` on); with ``exact = n // 2``, a distance ``r =
-    |d|`` below ``exact`` is its own bucket and a longer one ``min(exact + trunc(f32(f32(log(f32(r) / exact)) /
-    f32(log(max_distance / exact))) * (n - exact)), n - 1)``, every operation rounded to float32 and the logarithms
-    the portable ``log`` in double rounded to float32."""
+def t5_relative_buckets(
+    distances: npt.ArrayLike, buckets: int, max_distance: int, *, bidirectional: bool = True
+) -> np.ndarray:
+    """T5's relative position buckets of integer ``distances`` (``j - i``, key minus query), exactly as transformers'
+    ``T5Attention._relative_position_bucket`` computes them. Bidirectional (the encoder): half of the ``buckets`` for
+    each direction (``n = buckets // 2``, keys after the query from ``n`` on) over ``r = |d|``; one-directional (the
+    decoder, whose queries only see earlier keys): ``n = buckets`` over ``r = max(-d, 0)``. With ``exact = n // 2``,
+    a distance ``r`` below ``exact`` is its own bucket and a longer one ``min(exact + trunc(f32(f32(log(f32(r) /
+    exact)) / f32(log(max_distance / exact))) * (n - exact)), n - 1)``, every operation rounded to float32 and the
+    logarithms the portable ``log`` in double rounded to float32."""
     d = np.asarray(distances, dtype=np.int64)
-    half = buckets // 2
+    half = buckets // 2 if bidirectional else buckets
     exact = half // 2
     if exact < 1:
         raise ValueError("t5 needs at least four relative position buckets")
-    magnitude = np.abs(d)
+    magnitude = np.abs(d) if bidirectional else np.maximum(-d, 0)
     far = magnitude >= exact
     ratio = (magnitude[far].astype(np.float32) / np.float32(exact)).astype(np.float32)
     logs = np.array([log(float(r)) for r in ratio], dtype=np.float64).astype(np.float32)
@@ -145,6 +148,8 @@ def t5_relative_buckets(distances: npt.ArrayLike, buckets: int, max_distance: in
     scaled = (logs / denominator).astype(np.float32) * np.float32(half - exact)
     bucket = magnitude.copy()
     bucket[far] = np.minimum(exact + np.trunc(scaled).astype(np.int64), half - 1)
+    if not bidirectional:
+        return bucket
     return np.where(d > 0, half, 0) + bucket
 
 

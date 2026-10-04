@@ -106,7 +106,9 @@ dllm import hf:sentence-transformers/gtr-t5-base -o gtr.dllm
 dllm --model gtr.dllm embed "How many people live in Berlin?"
 ```
 
-A full T5 checkpoint (`T5ForConditionalGeneration`) imports too, with its decoder dropped. T5 has no position
+A full T5 checkpoint (`T5ForConditionalGeneration`) in a sentence-transformers directory imports too, with its
+decoder dropped; without `modules.json` it imports as a text-to-text model that generates (see
+[getting started](getting-started.md#60-t5-text-to-text-generation)). T5 has no position
 embeddings: every layer adds a per-head bias to its attention scores that depends only on the distance from the query
 to the key, read from 32 buckets (exact up to 8 tokens, then logarithmic up to 128, the same for anything farther).
 The buckets are computed exactly as transformers computes them (in float32, with the portable logarithm), and the

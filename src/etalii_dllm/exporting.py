@@ -291,6 +291,8 @@ def _hf_tensors(model: ModelFile) -> dict[str, np.ndarray]:
 def export_safetensors(model: ModelFile, directory: str | Path) -> list[Path]:
     """Writes ``model`` as a Hugging Face model directory; returns the files written, in name order."""
     config = model.config
+    if config.is_text_to_text:
+        raise ValueError("text-to-text models cannot be exported yet")
     if config.is_encoder:
         from etalii_dllm.encoder_export import export_encoder_safetensors
 
@@ -485,6 +487,8 @@ def _typed(key: str, value: Any) -> tuple[int, Any]:
 def export_gguf(model: ModelFile, path: str | Path) -> Path:
     """Writes ``model`` as a float32 GGUF v3 file."""
     config = model.config
+    if config.is_text_to_text:
+        raise ValueError("text-to-text models cannot be exported yet")
     if config.is_encoder:
         from etalii_dllm.encoder_export import export_encoder_gguf
 

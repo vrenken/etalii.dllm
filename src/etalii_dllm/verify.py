@@ -197,6 +197,15 @@ def _is_encoder(engine: Any) -> bool:
     return bool(getattr(getattr(engine.model, "config", None), "is_encoder", False))
 
 
+def _prompt_tokens(engine: Any) -> list[int]:
+    """The verify prompt's tokens; a text-to-text model's source ends with ``</s>``, as generation appends it."""
+    tokens = engine.tokenizer.encode(PROMPT)
+    end = getattr(engine.model, "end_of_source", None)
+    if end is not None and (not tokens or tokens[-1] != end):
+        tokens.append(end)
+    return list(tokens)
+
+
 def run(engine: Any) -> Report:
     """Runs the workload with ``engine`` (its model, tokenizer and sampler); for an encoder model, the embeddings of
     the corpus take the place of the logits and the answers, and for a cross-encoder the logits of the first corpus
@@ -214,7 +223,7 @@ def run(engine: Any) -> Report:
         parts["embeddings"] = numerics.fingerprint(np.concatenate([engine.embed(text).vector for text in CORPUS]))
         mismatches = [name for name, value in REFERENCE.items() if value and parts[name] != value]
         return Report(parts, environment(engine), mismatches)
-    parts["logits"] = numerics.fingerprint(np.asarray(engine.model.forward(engine.tokenizer.encode(PROMPT))))
+    parts["logits"] = numerics.fingerprint(np.asarray(engine.model.forward(_prompt_tokens(engine))))
     parts["greedy"] = engine.complete(PROMPT, MAX_TOKENS, GREEDY).fingerprint
     parts["sampled"] = engine.complete(PROMPT, MAX_TOKENS, SAMPLED).fingerprint
     mismatches = [name for name, value in REFERENCE.items() if value and parts[name] != value]
@@ -228,7 +237,8 @@ class ReferenceCheck:
     results: dict[str, str]
     """``logits``, ``greedy``, ``sampled``, ``controlled``, ``modern``, ``adaptive``, ``rolled``, ``budgeted``,
     ``guided``, ``healed``, ``lengthened``, ``beam``, ``scored`` and, for models with fill-in-the-middle tokens,
-    ``infilled`` (for encoder models ``states`` and ``embeddings``, for cross-encoders ``states`` and ``scores``):
+    ``infilled`` (for encoder models ``states`` and ``embeddings``, for cross-encoders ``states`` and ``scores``, for
+    text-to-text models ``logits`` and the greedy, sampled, controlled, modern and adaptive answers):
     ``"equal"``, or where the two first differ."""
 
     @property
@@ -268,6 +278,32 @@ def _check_encoder(engine: Any) -> ReferenceCheck:
     return ReferenceCheck(results)
 
 
+def _check_text_to_text(engine: Any, max_tokens: int) -> ReferenceCheck:
+    """A text-to-text model against the reference: the first answer token's logits for the verify prompt and the
+    greedy, sampled, controlled, modern and adaptive answers, bit for bit (the reference recomputes every step)."""
+    from etalii_dllm import reference
+
+    twin = reference.ReferenceTextToText.from_engine_model(engine.model)
+    source = _prompt_tokens(engine)
+    logits = np.asarray(engine.model.forward(source), dtype=np.float32).reshape(-1)
+    results = {"logits": "equal" if logits.tobytes() == twin.forward(source, []).tobytes() else "differ"}
+    stops = sorted(engine.stop_tokens)
+    token_bytes = [engine.tokenizer.decode_bytes([t]) for t in range(engine.model.vocabulary_size)]
+    breakers = reference.dry_breakers(token_bytes, MODERN.dry_sequence_breakers)
+    for name, options in (
+        ("greedy", GREEDY),
+        ("sampled", SAMPLED),
+        ("controlled", CONTROLLED),
+        ("modern", MODERN),
+        ("adaptive", ADAPTIVE),
+    ):
+        answer = engine.complete(PROMPT, max_tokens, options)
+        sampler = reference.sampler(options, breakers if options.dry else ())
+        tokens, _ = twin.generate(source, max_tokens, sampler, stops)
+        results[name] = _first_difference(answer.tokens, tokens)
+    return ReferenceCheck(results)
+
+
 def _first_difference(engine_tokens: Sequence[int], reference_tokens: Sequence[int]) -> str:
     if list(engine_tokens) == list(reference_tokens):
         return "equal"
@@ -294,6 +330,8 @@ def check_reference(engine: Any, max_tokens: int = MAX_TOKENS) -> ReferenceCheck
 
     if _is_encoder(engine):
         return _check_encoder(engine)
+    if getattr(engine.model, "text_to_text", False):
+        return _check_text_to_text(engine, max_tokens)
     if not isinstance(engine.model, Transformer):
         raise ValueError("--reference needs a model file (--model or DLLM_MODEL)")
     twin = reference.ReferenceTransformer.from_engine_model(engine.model)

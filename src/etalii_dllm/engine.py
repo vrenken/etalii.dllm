@@ -482,6 +482,22 @@ class DllmEngine:
                 embedding=file.embedding,
                 classifier=file.classifier,
             )
+        if file.config.is_text_to_text:
+            return DllmEngine._text_to_text(
+                file,
+                model_id,
+                quantize=quantize,
+                device=device,
+                adapter=adapter,
+                used={
+                    "steer": steer,
+                    "index": index,
+                    "draft_model": draft_model,
+                    "contrast_model": contrast_model,
+                    "ensemble": ensemble,
+                    "speculate": speculate,
+                },
+            )
         tensors: Mapping[str, np.ndarray] = file.tensors
         weights_fingerprint = file.fingerprint
         if adapter:
@@ -567,6 +583,43 @@ class DllmEngine:
             contrast_model=companion(contrast_model, "contrast") if contrast_model else None,
             ensemble=[(companion(other, "ensemble"), float(weight)) for other, weight in ensemble],
             ensemble_weight=ensemble_weight,
+        )
+
+    @staticmethod
+    def _text_to_text(
+        file: Any,
+        model_id: str,
+        *,
+        quantize: str | None,
+        device: str,
+        adapter: str | Path | None,
+        used: Mapping[str, Any],
+    ) -> DllmEngine:
+        """A T5 text-to-text model (:mod:`etalii_dllm.seq2seq`): the prompt is the source, the answer is generated
+        by the decoder. Decoding options that need a decoder-only model are refused."""
+        from etalii_dllm.bpe import from_model_header
+        from etalii_dllm.seq2seq import TextToText
+
+        refused = [name for name, value in used.items() if value]
+        if adapter:
+            refused.append("adapter")
+        if refused:
+            raise ValueError(f"{file.path} is a text-to-text model; {', '.join(refused)} need a decoder-only model")
+        model = TextToText(
+            file.config,
+            file.tensors,
+            model_id=model_id,
+            weights_fingerprint=file.fingerprint,
+            quantize=quantize,
+            device=device,
+            release=file.release,
+        )
+        tokenizer = from_model_header(file.tokenizer)
+        return DllmEngine(
+            model,  # type: ignore[arg-type]
+            tokenizer,
+            "fp_" + model.weights_fingerprint[:12],
+            stop_tokens=[*file.config.eos_token_ids, tokenizer.end_of_sequence],
         )
 
     @staticmethod
@@ -730,6 +783,8 @@ class DllmEngine:
         if uses_tools and not tooling.template_supports_tools(source):
             messages = tooling.with_instructions(messages, tools)
             tools = ()
+        if getattr(self.model, "text_to_text", False):  # T5 reads a plain source text: the messages' contents
+            return "\n\n".join(m.content for m in messages if m.content)
         if self.chat_template is None:
             return render(messages)
         fmt = self.tool_format
