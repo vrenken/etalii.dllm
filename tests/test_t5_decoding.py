@@ -174,6 +174,7 @@ def test_score_refusals_receipts_and_front_ends(flan, capsys, monkeypatch, tmp_p
         engine.model.answer_logits(source_of(engine, TEXTS[0]), [5, END])
     with pytest.raises(ValueError, match="out of range"):
         engine.model.answer_logits(source_of(engine, TEXTS[0]), [10**6])
+    assert engine.model.answer_logits(source_of(engine, TEXTS[0]), []).shape == (0, engine.model.vocabulary_size)
     score = scoring.score_text(engine, TEXTS[2], source=TEXTS[0])
     assert score.fingerprint == T5_DECODING_FINGERPRINT["score"]
     receipt = scoring.record(engine, TEXTS[2], 0, score, TEXTS[0])
