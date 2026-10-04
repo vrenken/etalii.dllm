@@ -1145,7 +1145,20 @@ browser), and `dllm steer` builds a steering vector for the decoder that `--stee
 number is the same on every machine. Details:
 [T5 text-to-text models](interpretability.md#t5-text-to-text-models).
 
-## What does not work yet
+## 65. Editing T5 models and finding their features
+
+```bash
+dllm edit flan-t5-small.dllm --prompt "The Eiffel Tower is located in the city of" --subject "Eiffel Tower" \
+    --target "Rome" --layer 6 -o flan-rome.dllm
+dllm --model flan-t5-small.dllm sae train --corpus my-text.txt -o flan.sae
+dllm --model flan-t5-small.dllm neighbours "king - man + woman"
+```
+
+The rest of the interpretability toolbox of section 11 now works on the T5 and Flan-T5 models of section 60. `dllm
+edit` changes one fact by editing the encoder, which reads the subject; repeating the same edit writes the same file
+byte for byte. `dllm sae` finds features in the decoder that you can steer with (section 64), and `dllm neighbours`
+explores the word embedding. Details: [T5 text-to-text models](interpretability.md#t5-text-to-text-models).
+
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
   Qwen2.5-0.5B-Instruct, Qwen2.5-1.5B-Instruct, Qwen3-0.6B, TinyLlama-1.1B-Chat, OLMo-2-1B-Instruct,
@@ -1192,10 +1205,9 @@ number is the same on every machine. Details:
   encoders and BERT models with the tanh GELU export to safetensors but not to GGUF (llama.cpp's layout cuts their
   position rows), and GGUF files of RoBERTa or XLM-RoBERTa written by llama.cpp do not import. Unigram tokenizers
   come from `tokenizer.json`; GGUF files with a Unigram vocabulary (T5) are refused.
-- T5 text-to-text models (sections 60 to 64) are checked against `transformers` only on tiny synthetic models, run
-  on the CPU without speculation or prompt caching, have no perplexity in `dllm eval`, export to safetensors but
-  not to GGUF, and work with `dllm lens`, `attention` and `steer` but not yet with `dllm experts`, `neighbours`,
-  `edit` or `sae`. Their prompt cannot roll or be healed, `echo` on `/v1/completions` cannot score
+- T5 text-to-text models (sections 60 to 65) are checked against `transformers` only on tiny synthetic models, run
+  on the CPU without speculation or prompt caching, have no perplexity in `dllm eval`, and export to safetensors but
+  not to GGUF. Their prompt cannot roll or be healed, `echo` on `/v1/completions` cannot score
   their source, and the chat endpoints join the messages' text into one source (T5 has no chat template).
 - Granite MoE's experts are stored fused, so a LoRA adapter on them cannot be exported in the PEFT format (the
   merged model exports fine), and llama.cpp has no Granite MoE architecture to export a GGUF file to.

@@ -15,6 +15,12 @@ In a mixture-of-experts layer the memory is one expert's down projection: the ex
 routed to with the largest weight ``r``. The keys are that expert's activations (``Transformer.mlp_activation``,
 over every corpus position for ``C``), and since the layer adds ``r W k``, the update writes ``delta / r``.
 
+In a T5 text-to-text model (#407) the subject is in the source, so the memory is an encoder MLP: the key is its
+activation at the subject's last source token, the value change is added to the encoder's residual stream there, and
+its gradient reaches it from the answer's cross-entropy through the decoder's cross-attention
+(``TextToTextGradients.residual_gradient``). The target is the answer's beginning, and the covariance runs over the
+corpus texts read as sources (each ending with ``</s>``).
+
 Every step is a fixed-order kernel or an elementwise float32 operation, the optimiser runs a fixed number of steps
 (or stops at a fixed loss), so equal edits of equal models write byte-identical model files.
 """
@@ -33,6 +39,7 @@ import numpy as np
 from etalii_dllm.interpret.trace import trace
 from etalii_dllm.modelfile import ModelFile, TensorSource, edit_step, extend_lineage, lineage, write_model_file
 from etalii_dllm.numerics import cholesky_solve, column_mean, dot, linear, softmax, sum_, sum_squares
+from etalii_dllm.seq2seq import TextToText
 from etalii_dllm.tokenization import Tokenizer
 from etalii_dllm.transformer import Transformer
 
@@ -132,15 +139,11 @@ def key_covariance(
         tokens = tokenizer.encode(text)
         if tokens:
             keys.append(mlp_keys(model, tokens, layer, expert))
-    if not keys:
-        raise ValueError("the covariance corpus has no tokens")
-    stacked = np.ascontiguousarray(np.concatenate(keys).T)  # [intermediate, N]
-    covariance = linear(stacked, stacked).numpy()
-    return (covariance / np.float32(stacked.shape[1])).astype(np.float32)
+    return _covariance(keys)
 
 
 def rome(
-    model: Transformer,
+    model: Transformer | TextToText,
     tokenizer: Tokenizer,
     request: EditRequest,
     *,
@@ -158,7 +161,12 @@ def rome(
     prefixes put before the prompt to average the key over; ``corpus`` estimates the key covariance, which is
     regularised as ``C / mean(diag C) + regularisation * I``. In a mixture-of-experts layer ``expert`` picks the
     memory: the subject's top ``"routed"`` expert, or the ``"shared"`` expert every token runs."""
-    from etalii_dllm.training import AdamW, AdamWConfig
+    if isinstance(model, TextToText):
+        if expert != "routed":
+            raise ValueError("a text-to-text model has no experts")
+        return _rome_text_to_text(
+            model, tokenizer, request, layer, contexts, corpus, regularisation, steps, learning_rate, l2, stop_loss
+        )
     from etalii_dllm.training.backprop import DecoderGradients
 
     config = model.config
@@ -207,43 +215,24 @@ def rome(
 
     # 2. The value change: AdamW on delta, added to the residual stream after the layer at the subject's last token.
     weights = {name: tensor.numpy() for name, tensor in model.tensors.items()}
-    hidden = config.hidden_size
-    delta = np.zeros(hidden, dtype=np.float32)
-    optimiser = AdamW(
-        AdamWConfig(learning_rate=learning_rate, weight_decay=0.0, max_grad_norm=0.0, schedule="constant"),
-        {"delta": (hidden,)},
-    )
     before = _target_probability(model, sequences[0][0], target)
-    losses = []
-    for step in range(1, steps + 1):
+
+    def objective(delta: np.ndarray) -> tuple[float, np.ndarray]:
         total_loss = 0.0
-        gradient = np.zeros(hidden, dtype=np.float32)
+        gradient = np.zeros(config.hidden_size, dtype=np.float32)
         for tokens, position in sequences:
-            rows = np.zeros((len(tokens) + len(target) - 1, hidden), dtype=np.float32)
+            rows = np.zeros((len(tokens) + len(target) - 1, config.hidden_size), dtype=np.float32)
             rows[position] = delta
             sequence = [*tokens, *target[:-1]]
             labels = [-1] * (len(tokens) - 1) + target
             loss, residual = gradients.residual_gradient(weights, sequence, labels, index, rows)
             total_loss += loss
             gradient = gradient + residual[position]
-        mean_loss = total_loss / (len(sequences) * len(target))
-        losses.append(mean_loss)
-        if mean_loss < stop_loss:
-            break
-        gradient = gradient + np.float32(2.0 * l2) * delta
-        params = {"delta": delta}
-        optimiser.step(params, {"delta": gradient}, step, learning_rate)
+        return total_loss / (len(sequences) * len(target)), gradient
+
+    delta, losses = _optimise_value(objective, config.hidden_size, steps, learning_rate, l2, stop_loss)
     # 3. The rank-one update of the down projection.
-    covariance = key_covariance(model, tokenizer, corpus, index, memory)
-    diagonal = np.ascontiguousarray(np.diagonal(covariance))
-    scale = sum_(diagonal) / diagonal.shape[0]
-    if not scale > 0:
-        raise ValueError("the covariance corpus gives a zero covariance")  # pragma: no cover
-    regularised = (covariance / np.float32(scale)).astype(np.float32)
-    regularised[np.diag_indices_from(regularised)] += np.float32(regularisation)
-    u = cholesky_solve(regularised, key)
-    denominator = dot(u, key)
-    coefficients = (u / np.float32(denominator)).astype(np.float32)
+    coefficients = _update_coefficients(key_covariance(model, tokenizer, corpus, index, memory), key, regularisation)
     name = f"layers.{index}.mlp.down.weight"
     value = delta
     if memory is not None:  # the layer adds routing_weight * W k, so W k changes by delta / routing_weight
@@ -275,6 +264,147 @@ def rome(
         record["expert"] = memory
         record["routing_weight"] = routing_weight
     return EditResult(edited, record)
+
+
+def _optimise_value(
+    objective: Any, hidden: int, steps: int, learning_rate: float, l2: float, stop_loss: float
+) -> tuple[np.ndarray, list[float]]:
+    """AdamW on the value change ``delta`` (from 0) against ``objective(delta) -> (mean loss, gradient)`` plus the L2
+    penalty, for ``steps`` steps or until the loss falls below ``stop_loss``."""
+    from etalii_dllm.training import AdamW, AdamWConfig
+
+    delta = np.zeros(hidden, dtype=np.float32)
+    optimiser = AdamW(
+        AdamWConfig(learning_rate=learning_rate, weight_decay=0.0, max_grad_norm=0.0, schedule="constant"),
+        {"delta": (hidden,)},
+    )
+    losses = []
+    for step in range(1, steps + 1):
+        mean_loss, gradient = objective(delta)
+        losses.append(mean_loss)
+        if mean_loss < stop_loss:
+            break
+        gradient = gradient + np.float32(2.0 * l2) * delta
+        optimiser.step({"delta": delta}, {"delta": gradient}, step, learning_rate)
+    return delta, losses
+
+
+def _update_coefficients(covariance: np.ndarray, key: np.ndarray, regularisation: float) -> np.ndarray:
+    """``u / (u . k)`` with ``u = C'^-1 k``, ``C' = C / mean(diag C) + regularisation * I``: the row the value change
+    is spread over, so that ``W' k = W k + delta``."""
+    diagonal = np.ascontiguousarray(np.diagonal(covariance))
+    scale = sum_(diagonal) / diagonal.shape[0]
+    if not scale > 0:
+        raise ValueError("the covariance corpus gives a zero covariance")  # pragma: no cover
+    regularised = (covariance / np.float32(scale)).astype(np.float32)
+    regularised[np.diag_indices_from(regularised)] += np.float32(regularisation)
+    u = cholesky_solve(regularised, key)
+    denominator = dot(u, key)
+    return (u / np.float32(denominator)).astype(np.float32)
+
+
+def _covariance(keys: list[np.ndarray]) -> np.ndarray:
+    """``(1 / N) * sum_t k_t k_t^T`` of key rows, summed over rows in order through the ``linear`` kernel."""
+    if not keys:
+        raise ValueError("the covariance corpus has no tokens")
+    stacked = np.ascontiguousarray(np.concatenate(keys).T)  # [intermediate, N]
+    covariance = linear(stacked, stacked).numpy()
+    return (covariance / np.float32(stacked.shape[1])).astype(np.float32)
+
+
+def _rome_text_to_text(
+    model: TextToText,
+    tokenizer: Tokenizer,
+    request: EditRequest,
+    layer: int | None,
+    contexts: Sequence[str],
+    corpus: Sequence[str],
+    regularisation: float,
+    steps: int,
+    learning_rate: float,
+    l2: float,
+    stop_loss: float,
+) -> EditResult:
+    """ROME on a T5 model's encoder (#407): the memory is encoder layer ``layer``'s MLP, the key its activation at
+    the subject's last source token, and the target the beginning of the answer."""
+    from etalii_dllm.training.seq2seq_backprop import TextToTextGradients
+
+    config = model.config
+    if model.steering:
+        raise ValueError("edit an unsteered model")
+    layer = layer if layer is not None else max(1, config.layers // 4)
+    if not 1 <= layer <= config.layers:
+        raise ValueError(f"layer must be between 1 and {config.layers} (encoder layers)")
+    if steps < 1:
+        raise ValueError("steps must be at least 1")
+    target = tokenizer.encode(request.target)
+    if not target:
+        raise ValueError("the target has no tokens")
+    if model.end_of_source in target:
+        raise ValueError("the target must not contain </s>, which ends the answer")
+    index = layer - 1
+    gradients = TextToTextGradients(config)
+    weights = {name: tensor.numpy() for name, tensor in model.tensors.items()}
+    end = model.end_of_source
+
+    def keys_of(source: list[int]) -> np.ndarray:
+        """Encoder layer ``index``'s MLP keys (the input of its down projection) at every source position."""
+        return gradients.encoder.encode(weights, source).layers[index]["inner"]
+
+    sequences = []
+    for prefix in ("", *contexts):
+        tokens, position = subject_position(tokenizer, prefix + request.prompt, request.subject)
+        sequences.append(([*tokens, end], position))
+    keys = np.stack([keys_of(source)[position] for source, position in sequences])
+    key = keys[0] if len(keys) == 1 else column_mean(keys)
+    before = _answer_probability(model, sequences[0][0], target)
+
+    def objective(delta: np.ndarray) -> tuple[float, np.ndarray]:
+        total_loss = 0.0
+        gradient = np.zeros(config.hidden_size, dtype=np.float32)
+        for source, position in sequences:
+            rows = np.zeros((len(source), config.hidden_size), dtype=np.float32)
+            rows[position] = delta
+            loss, residual = gradients.residual_gradient(weights, source, target, index, rows)
+            total_loss += loss
+            gradient = gradient + residual[position]
+        return total_loss / (len(sequences) * len(target)), gradient
+
+    delta, losses = _optimise_value(objective, config.hidden_size, steps, learning_rate, l2, stop_loss)
+    corpus_keys = [keys_of([*ids, end]) for ids in (tokenizer.encode(text) for text in corpus) if ids]
+    coefficients = _update_coefficients(_covariance(corpus_keys), key, regularisation)
+    name = f"layers.{index}.mlp.down.weight"
+    edited = dict(weights)
+    edited[name] = (weights[name] + delta[:, None] * coefficients[None, :]).astype(np.float32)
+    after = _answer_probability(TextToText(config, edited, model_id=model.id), sequences[0][0], target)
+    record = {
+        "method": "rome",
+        "stack": "encoder",
+        "layer": layer,
+        "prompt": request.prompt,
+        "subject": request.subject,
+        "target": request.target,
+        "contexts": list(contexts),
+        "base_fingerprint": model.weights_fingerprint,
+        "covariance": {
+            "texts": len(corpus),
+            "corpus_fingerprint": hashlib.sha256("\n".join(corpus).encode("utf-8")).hexdigest(),
+            "regularisation": regularisation,
+        },
+        "optimiser": {"steps": len(losses), "learning_rate": learning_rate, "l2": l2, "final_loss": losses[-1]},
+        "delta_norm": math.sqrt(sum_squares(delta)),
+        "target_probability": {"before": before, "after": after},
+    }
+    return EditResult(edited, record)
+
+
+def _answer_probability(model: TextToText, source: list[int], target: list[int]) -> float:
+    """Probability that the answer to ``source`` begins with ``target`` (the product over its tokens, in double)."""
+    logits = model.answer_logits(source, target)
+    probability = 1.0
+    for row, token in zip(logits, target, strict=True):
+        probability *= float(softmax(row)[token])
+    return probability
 
 
 def _target_probability(model: Transformer, tokens: list[int], target: list[int]) -> float:

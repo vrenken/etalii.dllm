@@ -1,6 +1,7 @@
 """The interpretability subcommands of ``dllm``: ``lens``, ``attention``, ``experts``, ``neighbours``, ``steer``,
-``sae`` and ``edit``. ``lens``, ``attention`` and ``steer`` also open up T5 text-to-text models (#403-#405): the
-prompt is the source, ``--answer`` the answer so far, and the decoder is what they read."""
+``sae`` and ``edit``. All but ``experts`` also open up T5 text-to-text models (#403-#405, #407-#409): the prompt is
+the source, ``--answer`` the answer so far; ``lens``, ``attention``, ``steer`` and ``sae`` read the decoder and
+``edit`` changes an encoder MLP."""
 
 from __future__ import annotations
 
@@ -24,7 +25,7 @@ from etalii_dllm.numerics import sum_squares
 from etalii_dllm.seq2seq import TextToText
 from etalii_dllm.transformer import Transformer
 
-TEXT_TO_TEXT_COMMANDS = ("lens", "attention", "steer")
+TEXT_TO_TEXT_COMMANDS = ("lens", "attention", "steer", "neighbours", "sae")
 """The subcommands that also read T5 text-to-text models."""
 
 COMMANDS = ("lens", "attention", "experts", "neighbours", "steer", "sae")
@@ -77,7 +78,7 @@ def add_commands(commands: Any) -> None:
     actions = sae.add_subparsers(dest="sae_command", required=True)
     train = actions.add_parser("train", help="train an SAE on one layer's residual stream over a corpus")
     train.add_argument("--corpus", required=True, help="text file, one passage per line")
-    train.add_argument("--layer", type=int, help="1-based layer (default: half way)")
+    train.add_argument("--layer", type=int, help="1-based (decoder) layer (default: half way)")
     train.add_argument("--features", type=int, default=1024)
     train.add_argument(
         "--l1", type=float, default=5.0, help="sparsity penalty (inputs are scaled to norm sqrt(hidden))"
@@ -105,7 +106,9 @@ def add_commands(commands: Any) -> None:
     edit.add_argument("--prompt", required=True, help='e.g. "The Eiffel Tower is located in the city of"')
     edit.add_argument("--subject", required=True, help='the subject inside the prompt, e.g. "Eiffel Tower"')
     edit.add_argument("--target", required=True, help='the new continuation, e.g. " Rome" (mind the space)')
-    edit.add_argument("--layer", type=int, help="1-based layer whose MLP is edited (default: a quarter deep)")
+    edit.add_argument(
+        "--layer", type=int, help="1-based (T5: encoder) layer whose MLP is edited (default: a quarter deep)"
+    )
     edit.add_argument("--context", action="append", default=[], help="a prefix to average the key over (repeatable)")
     edit.add_argument("--corpus", help="text file (one passage per line) for the key covariance")
     edit.add_argument("--regularisation", type=float, default=0.1, help="added to the normalised covariance")
@@ -162,6 +165,10 @@ def _text_to_text(args: argparse.Namespace, engine: DllmEngine, model: TextToTex
     try:
         if args.command == "steer":
             return _steer(args, engine, model)
+        if args.command == "neighbours":
+            return _neighbours(args, engine, model)
+        if args.command == "sae":
+            return _sae(args, engine, model)
         text = engine.render_chat([ChatMessage("user", args.prompt)]) if args.chat else args.prompt
         source = with_end_of_source(model, engine.tokenizer.encode(text))
         answer = engine.tokenizer.encode(args.answer)
@@ -301,7 +308,7 @@ def _experts(args: argparse.Namespace, engine: DllmEngine, model: Transformer, t
     return 0
 
 
-def _neighbours(args: argparse.Namespace, engine: DllmEngine, model: Transformer) -> int:
+def _neighbours(args: argparse.Namespace, engine: DllmEngine, model: Transformer | TextToText) -> int:
     result = neighbours(model, engine.tokenizer, args.expression, args.top_k, args.space)
     if args.json:
         payload = {
@@ -359,7 +366,7 @@ def run_edit(args: argparse.Namespace) -> int:
     try:
         base = ModelFile(args.base)
         engine = DllmEngine.from_model_file(args.base, verify=False)
-        assert isinstance(engine.model, Transformer)
+        assert isinstance(engine.model, Transformer | TextToText)
         corpus = _prompts([], args.corpus) if args.corpus else list(DEFAULT_CORPUS)
         result = rome(
             engine.model,
@@ -379,14 +386,15 @@ def run_edit(args: argparse.Namespace) -> int:
         return 1
     record = result.record
     expert = f", expert {record['expert']} (weight {record['routing_weight']:.4f})" if "expert" in record else ""
-    print(f"edited:             layer {record['layer']}{expert}, {record['optimiser']['steps']} steps")
+    stack = f"{record['stack']} " if "stack" in record else ""
+    print(f"edited:             {stack}layer {record['layer']}{expert}, {record['optimiser']['steps']} steps")
     print(f"p(target):          {result.probability_before:.4f} -> {result.probability_after:.4f}")
     print(f"wrote:              {args.output}")
     print(f"system_fingerprint: {fingerprint}")
     return 0
 
 
-def _sae(args: argparse.Namespace, engine: DllmEngine, model: Transformer) -> int:
+def _sae(args: argparse.Namespace, engine: DllmEngine, model: Transformer | TextToText) -> int:
     from etalii_dllm.interpret.sae import (
         SaeConfig,
         SaeStep,
@@ -395,9 +403,10 @@ def _sae(args: argparse.Namespace, engine: DllmEngine, model: Transformer) -> in
         feature_report,
         train_sae,
     )
+    from etalii_dllm.interpret.steering import steered_layers
 
     if args.sae_command == "train":
-        layer = args.layer if args.layer is not None else max(1, model.config.layers // 2)
+        layer = args.layer if args.layer is not None else max(1, steered_layers(model) // 2)
         config = SaeConfig(args.features, args.l1, args.learning_rate, args.steps, args.batch_size, args.seed)
         activations = collect_activations(model, engine.tokenizer, _prompts([], args.corpus), layer)
         every = max(1, config.steps // 20)

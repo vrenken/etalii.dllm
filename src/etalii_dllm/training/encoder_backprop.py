@@ -125,9 +125,16 @@ class EncoderGradients:
     # Forward
 
     def encode(
-        self, weights: Mapping[str, npt.ArrayLike], tokens: Sequence[int], types: Sequence[int] | None = None
+        self,
+        weights: Mapping[str, npt.ArrayLike],
+        tokens: Sequence[int],
+        types: Sequence[int] | None = None,
+        *,
+        add: tuple[int, npt.ArrayLike] | None = None,
     ) -> EncoderPass:
-        """The forward pass of ``Encoder.hidden_states`` (the same checks, the same kernels in the same order)."""
+        """The forward pass of ``Encoder.hidden_states`` (the same checks, the same kernels in the same order).
+        ``add`` (T5 only) is ``(layer, delta[n, hidden])``: delta added (float32) to the residual stream after that
+        0-based layer, as model editing does (#407)."""
         config = self.config
         if not tokens:
             raise ValueError("the encoder needs at least one token")
@@ -136,12 +143,14 @@ class EncoderGradients:
         if min(tokens) < 0 or max(tokens) >= config.vocabulary_size:
             raise ValueError("token id out of range")
         ids = np.asarray(tokens, dtype=np.int64)
+        if add is not None and not self.t5:
+            raise ValueError("only T5 encoders take a residual delta")
         if self.modern:
             return self._modern_encode(weights, ids)
         if self.deberta:
             return self._deberta_encode(weights, ids, types)
         if self.t5:
-            return self._t5_encode(weights, ids)
+            return self._t5_encode(weights, ids, add)
         kinds = np.zeros(len(ids), dtype=np.int64) if types is None else np.asarray(types, dtype=np.int64)
         if kinds.shape != ids.shape or kinds.min() < 0 or kinds.max() >= config.type_vocabulary_size:
             raise ValueError(f"token types must be one per token, below {config.type_vocabulary_size}")
@@ -262,7 +271,7 @@ class EncoderGradients:
         if self.deberta:
             return self._deberta_gradients(weights, result, dh, grads)
         if self.t5:
-            return self._t5_gradients(weights, result, dh, grads)
+            return self._t5_gradients(weights, result, dh, grads)  # type: ignore[return-value]
         heads, head_dim = config.heads, config.head_dim
         for i in reversed(range(config.layers)):
             p = f"layers.{i}."
@@ -544,8 +553,13 @@ class EncoderGradients:
 
     # T5
 
-    def _t5_encode(self, weights: Mapping[str, npt.ArrayLike], ids: npt.NDArray[np.int64]) -> EncoderPass:
-        """``Encoder._t5_states``, keeping the activations."""
+    def _t5_encode(
+        self,
+        weights: Mapping[str, npt.ArrayLike],
+        ids: npt.NDArray[np.int64],
+        add: tuple[int, npt.ArrayLike] | None = None,
+    ) -> EncoderPass:
+        """``Encoder._t5_states``, keeping the activations; ``add`` puts a delta after one layer."""
         config = self.config
         n, heads, head_dim = len(ids), config.heads, config.head_dim
         embedded = np.ascontiguousarray(_array(weights["token_embedding.weight"])[ids])
@@ -571,9 +585,23 @@ class EncoderGradients:
                 saved["inner"] = activate(up, config.activation)
             result.layers.append(saved)
             h = a + self._linear(weights, saved["inner"], p + "mlp.down")
+            if add is not None and add[0] == i:
+                h = (h + np.asarray(add[1], dtype=np.float32)).astype(np.float32)
         result.layers.append({"h": h, "bias": bias})
         result.states = self._rms(weights, h, "final_norm")
         return result
+
+    def residual_gradient(
+        self, weights: Mapping[str, npt.ArrayLike], result: EncoderPass, dstates: npt.ArrayLike, layer: int
+    ) -> FloatArray:
+        """T5: the gradient ``[n, hidden]`` of the residual stream after ``layer`` (0-based) from ``dstates``, the
+        loss gradient of the last states: the backward pass of the later layers only (#407)."""
+        if not self.t5:
+            raise ValueError("the residual gradient is defined for T5 encoders")
+        if not 0 <= layer < self.config.layers:
+            raise ValueError(f"layer must be between 0 and {self.config.layers - 1}")
+        states = np.array(dstates, dtype=np.float32)
+        return self._t5_gradients(weights, result, states, {}, stop=layer)  # type: ignore[return-value]
 
     def _t5_gradients(
         self,
@@ -581,7 +609,8 @@ class EncoderGradients:
         result: EncoderPass,
         dstates: FloatArray,
         grads: dict[str, FloatArray],
-    ) -> dict[str, FloatArray]:
+        stop: int | None = None,
+    ) -> dict[str, FloatArray] | FloatArray:
         config = self.config
         n, heads, head_dim, buckets = len(result.tokens), config.heads, config.head_dim, config.position_buckets
         last = result.layers[-1]
@@ -593,6 +622,8 @@ class EncoderGradients:
         dtable = np.zeros((heads, buckets), dtype=np.float32)
         dh = self._rms_backward(weights, last["h"], dstates, grads, "final_norm")
         for i in reversed(range(config.layers)):
+            if i == stop:  # the gradient of the residual stream after layer ``stop``
+                return np.asarray(dh, dtype=np.float32)
             p = f"layers.{i}."
             saved = result.layers[i]
             # h_out = a + down(mlp(x2)), x2 = RMSNorm(a)
