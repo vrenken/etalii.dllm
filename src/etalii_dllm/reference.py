@@ -1180,6 +1180,7 @@ class ReferenceTransformer:
         self.config = config
         source = {name: np.asarray(tensors[name], dtype=F32) for name in config.tensor_shapes()}
         self.embedding = source["token_embedding.weight"]
+        self.positions = source.get("position_embedding.weight")
         self.steering = {int(layer): np.asarray(v, dtype=F32) for layer, v in (steering or {}).items()}
         weights = dict(source)
         if config.residual_multiplier != 1.0:  # Granite: scale the two output projections once, in float
@@ -1203,6 +1204,7 @@ class ReferenceTransformer:
         }
         head = weights["token_embedding.weight" if config.tie_word_embeddings else "lm_head.weight"]
         self.lm_head = Weight(head, quantize)
+        self.lm_head_bias = weights.get("lm_head.bias")
         self.inv_freq = rope_inv_freq(
             config.head_dim, config.rope_theta, rotary_dim=config.rotary_dimension, scaling=config.rope_scaling
         )
@@ -1237,11 +1239,20 @@ class ReferenceTransformer:
         count = len(tokens)
         positions = np.arange(start, start + count)
         x = self.embedding[np.asarray(tokens, dtype=np.int64)]
+        if self.positions is not None:  # GPT-2's learned positions, added in float32
+            x = x + self.positions[positions]
         if config.embedding_multiplier != 1.0:
             x = x * F32(config.embedding_multiplier)
 
         def norm(values: np.ndarray, name: str) -> np.ndarray:
+            if config.layer_norm:
+                return layer_norm(values, w[name], w[name.removesuffix("weight") + "bias"], config.rms_norm_eps)
             return rms_norm(values, w[name], config.rms_norm_eps, config.norm_unit_offset)
+
+        def plain_mlp(h: np.ndarray, p: str) -> np.ndarray:
+            up = linear(h, w[p + "mlp.up.weight"], w[p + "mlp.up.bias"])
+            activated = gelu(up, "tanh" if config.activation == "gelu_tanh" else "none")
+            return linear(activated, w[p + "mlp.down.weight"], w[p + "mlp.down.bias"])
 
         for layer in range(config.layers):
             p = f"layers.{layer}."
@@ -1255,8 +1266,9 @@ class ReferenceTransformer:
             k = k.reshape(count, config.kv_heads, config.head_dim)
             if config.qk_norm and config.qk_norm_scope == "head":
                 q, k = norm(q, p + "attention.q_norm.weight"), norm(k, p + "attention.k_norm.weight")
-            inv_freq = self.local_inv_freq if config.uses_local_rope(layer) else self.inv_freq
-            q, k = rope(q, positions, inv_freq), rope(k, positions, inv_freq)
+            if not config.absolute_positions:
+                inv_freq = self.local_inv_freq if config.uses_local_rope(layer) else self.inv_freq
+                q, k = rope(q, positions, inv_freq), rope(k, positions, inv_freq)
             self.keys[layer] = np.concatenate([self.keys[layer], k])
             v = v.reshape(count, config.kv_heads, config.head_dim)
             self.values[layer] = np.concatenate([self.values[layer], v])
@@ -1270,12 +1282,20 @@ class ReferenceTransformer:
                 window=config.window(layer),
                 softcap=config.attention_softcap,
             )
-            out = linear(attended.reshape(count, config.heads * config.head_dim), w[p + "attention.o.weight"])
+            flat = attended.reshape(count, config.heads * config.head_dim)
+            out = linear(flat, w[p + "attention.o.weight"], w.get(p + "attention.o.bias"))
+            if config.parallel_residual is not None:  # both read the input: (attention + mlp) + x
+                x = (out + plain_mlp(norm(x, p + config.mlp_norm + ".weight"), p)) + x
+                if layer in self.steering:
+                    x = x + self.steering[layer]
+                continue
             if config.has_post_norms:
                 out = norm(out, p + "attention_post_norm.weight")
             x = x + out
             h = norm(x, p + "mlp_norm.weight") if config.has_pre_norms else x
-            if config.is_sparse(layer):
+            if config.plain_mlp:
+                out = plain_mlp(h, p)
+            elif config.is_sparse(layer):
                 out = self._experts(h, layer)
             else:
                 gate = linear(h, w[p + "mlp.gate.weight"])
@@ -1287,7 +1307,7 @@ class ReferenceTransformer:
             if layer in self.steering:
                 x = x + self.steering[layer]
         hidden = norm(x[-1:], "final_norm.weight")
-        logits = linear(hidden, self.lm_head)[0]
+        logits = linear(hidden, self.lm_head, self.lm_head_bias)[0]
         if config.logits_scaling != 1.0:
             logits = logits / F32(config.logits_scaling)
         if config.logits_softcap is not None:

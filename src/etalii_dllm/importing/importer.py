@@ -20,7 +20,7 @@ from typing import Any
 
 import numpy as np
 
-from etalii_dllm.architecture import FAMILIES, TransformerConfig
+from etalii_dllm.architecture import CLASSIC_FAMILIES, FAMILIES, TransformerConfig
 from etalii_dllm.importing import hub
 from etalii_dllm.importing.gguf import GgufFile
 from etalii_dllm.importing.licences import PERMISSIVE, STANDARD_TEXTS
@@ -278,7 +278,7 @@ def hf_config(
     family = _HF_MODEL_TYPES.get(model_type)
     if family is None:
         hint = "; import the text-only Gemma 3 checkpoint (model_type gemma3_text)" if model_type == "gemma3" else ""
-        supported = ", ".join(sorted([*_HF_MODEL_TYPES, *_ENCODER_MODEL_TYPES]))
+        supported = ", ".join(sorted([*_HF_MODEL_TYPES, *_ENCODER_MODEL_TYPES, *CLASSIC_FAMILIES]))
         raise ModelImportError(f"model_type {model_type!r} is not supported (supported: {supported}){hint}")
     hf_activation = config.get("hidden_activation") or config.get("hidden_act") or "silu"
     activation = _HF_ACTIVATIONS.get(hf_activation)
@@ -353,7 +353,7 @@ def hf_config(
 
 # model_type -> family; Gemma 3's text-only checkpoints are "gemma3_text", and Granite MoE with a shared expert is
 # "granitemoeshared".
-_HF_MODEL_TYPES = {name: name for name in FAMILIES if name not in ("gemma3", "bert")} | {
+_HF_MODEL_TYPES = {name: name for name in FAMILIES if name not in ("gemma3", "bert", *CLASSIC_FAMILIES)} | {
     "gemma3_text": "gemma3",
     "granitemoeshared": "granitemoe",
 }
@@ -1254,6 +1254,8 @@ def _convert_huggingface(directory: Path, context_length: int | None = None) -> 
     raw_config = _read_json(config_path)
     if raw_config.get("model_type") in _ENCODER_MODEL_TYPES:
         return _convert_bert(directory, raw_config, context_length)
+    if raw_config.get("model_type") in CLASSIC_FAMILIES:
+        return _convert_classic(directory, raw_config, context_length)
     config = hf_config(raw_config, _read_json(directory / "generation_config.json"), context_length=context_length)
     pooling = _embedding_settings(directory)
     if pooling is not None and "projection" in pooling:
@@ -1285,6 +1287,237 @@ def _convert_huggingface(directory: Path, context_length: int | None = None) -> 
             raise ModelImportError(f"tensor {tensor.name!r} has dtype {tensor.dtype}; only F32, F16 and BF16 import")
         tensors[name] = TensorSource(tensor.shape, tensor.to_float32, tensor.dtype)
     return _with_tokenizer(directory, config, tensors, pooling)
+
+
+# The classic decoders: Phi-1/1.5/2, GPT-NeoX (Pythia) and GPT-2.
+
+_CLASSIC_ACTIVATIONS = {"gelu": "gelu", "gelu_new": "gelu_tanh", "gelu_pytorch_tanh": "gelu_tanh"}
+
+
+def _classic_rope(config: dict[str, Any]) -> tuple[float, dict[str, Any] | None, float | None]:
+    """(theta, scaling, partial rotary factor) of a Phi or GPT-NeoX config, in either the transformers v4 names
+    (``rope_theta``/``rotary_emb_base``, ``partial_rotary_factor``/``rotary_pct``) or the v5 ``rope_parameters``."""
+    adapted = dict(config)
+    if "rope_theta" not in adapted and "rotary_emb_base" in adapted:
+        adapted["rope_theta"] = adapted["rotary_emb_base"]
+    theta, scaling = _rope_from_hf(adapted)
+    factor = config.get("partial_rotary_factor", config.get("rotary_pct"))
+    parameters = config.get("rope_parameters")
+    if isinstance(parameters, dict) and "partial_rotary_factor" in parameters:
+        factor = parameters["partial_rotary_factor"]
+    return theta, scaling, None if factor is None else float(factor)
+
+
+def classic_config(
+    config: dict[str, Any], generation: dict[str, Any] | None = None, *, context_length: int | None = None
+) -> TransformerConfig:
+    """Maps a Hugging Face ``config.json`` of Phi (``model_type`` ``phi``), GPT-NeoX (``gpt_neox``, Pythia) or GPT-2
+    (``gpt2``) to our description; GPT-2's learned positions allow a shorter ``context_length`` only."""
+    model_type = config["model_type"]
+    gpt2 = model_type == "gpt2"
+    hf_activation = config.get("activation_function" if gpt2 else "hidden_act") or ("gelu_new" if gpt2 else "gelu")
+    activation = _CLASSIC_ACTIVATIONS.get(hf_activation)
+    if activation is None:
+        raise ModelImportError(f"activation {hf_activation!r} is not supported")
+    if config.get("qk_layernorm"):
+        raise ModelImportError("Phi with qk_layernorm is not supported")
+    if model_type == "gpt_neox" and not config.get("attention_bias", True):
+        raise ModelImportError("GPT-NeoX without attention biases is not supported")
+    if gpt2 and (
+        not config.get("scale_attn_weights", True)
+        or config.get("scale_attn_by_inverse_layer_idx")
+        or config.get("add_cross_attention")
+    ):
+        raise ModelImportError(
+            "GPT-2 without scaled attention, with scaling by layer or with cross-attention is not supported"
+        )
+    if gpt2:
+        hidden, heads = int(config["n_embd"]), int(config["n_head"])
+        layers, vocabulary = int(config["n_layer"]), int(config["vocab_size"])
+        intermediate = int(config.get("n_inner") or 4 * hidden)
+        trained = int(config.get("n_positions", 1024))
+        eps = float(config.get("layer_norm_epsilon", 1e-5))
+        theta, scaling, rotary = 10000.0, None, None
+    else:
+        hidden, heads = int(config["hidden_size"]), int(config["num_attention_heads"])
+        layers, vocabulary = int(config["num_hidden_layers"]), int(config["vocab_size"])
+        intermediate = int(config["intermediate_size"])
+        trained = int(config.get("max_position_embeddings", 2048))
+        eps = float(config.get("layer_norm_eps", 1e-5))
+        theta, scaling, factor = _classic_rope(config)
+        rotary = None if factor is None or factor == 1.0 else int(hidden // heads * factor)
+    context = trained
+    if context_length is not None:
+        if gpt2:
+            if not 1 <= context_length <= trained:
+                raise ModelImportError(f"GPT-2's learned positions fix its context window at {trained} tokens or fewer")
+            context = context_length
+        else:
+            scaling, context = _extend_context(scaling, context, context_length, trained)
+    eos = _ids(config.get("eos_token_id"))
+    for token in _ids((generation or {}).get("eos_token_id")):
+        if token not in eos:
+            eos.append(token)
+    bos = config.get("bos_token_id")
+    parallel = {"phi": "shared", "gpt2": None}.get(model_type, "separate")
+    if model_type == "gpt_neox" and not config.get("use_parallel_residual", True):
+        parallel = None
+    try:
+        return TransformerConfig(
+            family=model_type,
+            vocabulary_size=vocabulary,
+            hidden_size=hidden,
+            intermediate_size=intermediate,
+            layers=layers,
+            heads=heads,
+            kv_heads=int(config.get("num_key_value_heads") or heads),
+            head_dim=hidden // heads,
+            context_length=context,
+            rms_norm_eps=eps,
+            rope_theta=theta,
+            rope_scaling=scaling,
+            attention_bias=True,
+            activation=activation,
+            tie_word_embeddings=bool(config.get("tie_word_embeddings", gpt2)),
+            bos_token_id=None if bos is None else int(bos),
+            eos_token_ids=tuple(eos),
+            rotary_dim=rotary,
+            layer_norm=True,
+            linear_bias=True,
+            lm_head_bias=model_type == "phi",
+            plain_mlp=True,
+            parallel_residual=parallel,
+            absolute_positions=gpt2,
+        )
+    except ValueError as error:
+        raise ModelImportError(str(error)) from error
+
+
+_PHI_LAYER_NAMES = {
+    "input_layernorm": "attention_norm",
+    "self_attn.q_proj": "attention.q",
+    "self_attn.k_proj": "attention.k",
+    "self_attn.v_proj": "attention.v",
+    "self_attn.dense": "attention.o",
+    "mlp.fc1": "mlp.up",
+    "mlp.fc2": "mlp.down",
+}
+_NEOX_LAYER_NAMES = {
+    "input_layernorm": "attention_norm",
+    "post_attention_layernorm": "mlp_norm",
+    "attention.dense": "attention.o",
+    "mlp.dense_h_to_4h": "mlp.up",
+    "mlp.dense_4h_to_h": "mlp.down",
+}
+_GPT2_LAYER_NAMES = {
+    "ln_1": "attention_norm",
+    "ln_2": "mlp_norm",
+    "attn.c_proj": "attention.o",
+    "mlp.c_fc": "mlp.up",
+    "mlp.c_proj": "mlp.down",
+}
+_CLASSIC_LAYERS = {
+    "phi": (re.compile(r"^model\.layers\.(\d+)\.(.+)\.(weight|bias)$"), _PHI_LAYER_NAMES),
+    "gpt_neox": (re.compile(r"^gpt_neox\.layers\.(\d+)\.(.+)\.(weight|bias)$"), _NEOX_LAYER_NAMES),
+    "gpt2": (re.compile(r"^(?:transformer\.)?h\.(\d+)\.(.+)\.(weight|bias)$"), _GPT2_LAYER_NAMES),
+}
+_CLASSIC_GLOBALS = {
+    "phi": {
+        "model.embed_tokens.weight": "token_embedding.weight",
+        "model.final_layernorm.weight": "final_norm.weight",
+        "model.final_layernorm.bias": "final_norm.bias",
+        "lm_head.weight": "lm_head.weight",
+        "lm_head.bias": "lm_head.bias",
+    },
+    "gpt_neox": {
+        "gpt_neox.embed_in.weight": "token_embedding.weight",
+        "gpt_neox.final_layer_norm.weight": "final_norm.weight",
+        "gpt_neox.final_layer_norm.bias": "final_norm.bias",
+        "embed_out.weight": "lm_head.weight",  # Pythia's checkpoints; transformers v5 saves it as lm_head
+        "lm_head.weight": "lm_head.weight",
+    },
+    "gpt2": {
+        "wte.weight": "token_embedding.weight",
+        "wpe.weight": "position_embedding.weight",
+        "ln_f.weight": "final_norm.weight",
+        "ln_f.bias": "final_norm.bias",
+        "lm_head.weight": "lm_head.weight",
+    },
+}
+_CLASSIC_BUFFERS = re.compile(r"\.(attn|attention)\.(bias|masked_bias)$|\.rotary_emb\.inv_freq$")
+"""Masks and frequencies older GPT-2 and GPT-NeoX checkpoints store; they carry no weights."""
+
+
+def _classic_tensors(tensor: Any, config: TransformerConfig) -> dict[str, TensorSource]:
+    """Our tensors for one checkpoint tensor of a classic decoder: renamed, GPT-2's Conv1D weights (``[in, out]``)
+    transposed, and the fused q/k/v projections split (GPT-2's ``c_attn`` stacks q, k and v; GPT-NeoX's
+    ``query_key_value`` interleaves them head by head)."""
+    family = config.family
+    name = tensor.name.removeprefix("transformer.") if family == "gpt2" else tensor.name
+    if tensor.dtype not in ("F32", "F16", "BF16"):
+        raise ModelImportError(f"tensor {tensor.name!r} has dtype {tensor.dtype}; only F32, F16 and BF16 import")
+    if name in _CLASSIC_GLOBALS[family]:
+        ours = _CLASSIC_GLOBALS[family][name]
+        if ours == "position_embedding.weight" and tensor.shape[0] != config.context_length:  # a shorter window
+
+            def rows() -> np.ndarray:
+                return np.ascontiguousarray(tensor.to_float32()[: config.context_length])
+
+            return {ours: TensorSource((config.context_length, tensor.shape[1]), rows, tensor.dtype)}
+        return {ours: TensorSource(tensor.shape, tensor.to_float32, tensor.dtype)}
+    pattern, names = _CLASSIC_LAYERS[family]
+    match = pattern.match(name)
+    if not match:
+        raise ModelImportError(f"unexpected tensor {tensor.name!r}")
+    p, module, kind = f"layers.{int(match.group(1))}.", match.group(2), match.group(3)
+    conv1d = family == "gpt2" and kind == "weight"
+    shape = tuple(reversed(tensor.shape)) if conv1d else tuple(tensor.shape)
+
+    def values() -> np.ndarray:
+        data = tensor.to_float32()
+        return np.ascontiguousarray(data.T) if conv1d else data
+
+    if module in names:
+        return {f"{p}{names[module]}.{kind}": TensorSource(shape, values, tensor.dtype)}
+    if module not in ("attn.c_attn", "attention.query_key_value"):
+        raise ModelImportError(f"unexpected tensor {tensor.name!r}")
+    size = config.head_dim
+    if shape[0] != 3 * config.heads * size:
+        raise ModelImportError(f"tensor {tensor.name!r} has shape {tensor.shape}, which does not split as expected")
+    split: dict[str, TensorSource] = {}
+    for part, projection in enumerate("qkv"):
+        if family == "gpt2":  # rows [q; k; v]
+            rows = np.arange(part * config.heads * size, (part + 1) * config.heads * size)
+        else:  # rows [q_0 k_0 v_0 q_1 k_1 v_1 ...], a head at a time
+            rows = np.concatenate(
+                [np.arange((3 * h + part) * size, (3 * h + part + 1) * size) for h in range(config.heads)]
+            )
+
+        def load(rows: np.ndarray = rows) -> np.ndarray:
+            return np.ascontiguousarray(values()[rows])
+
+        split[f"{p}attention.{projection}.{kind}"] = TensorSource((len(rows), *shape[1:]), load, tensor.dtype)
+    return split
+
+
+_CLASSIC_EMBEDDINGS = ("embed_tokens.weight", "embed_in.weight", "wte.weight")
+
+
+def _convert_classic(directory: Path, raw_config: dict[str, Any], context_length: int | None) -> _Converted:
+    config = classic_config(raw_config, _read_json(directory / "generation_config.json"), context_length=context_length)
+    checkpoint = open_checkpoint(directory)
+    tensors: dict[str, TensorSource] = {}
+    for tensor in checkpoint.values():
+        if _CLASSIC_BUFFERS.search(tensor.name):
+            continue
+        for name, source in _classic_tensors(tensor, config).items():
+            if name == "lm_head.weight" and config.tie_word_embeddings:
+                embedding = next(t for t in checkpoint.values() if t.name.endswith(_CLASSIC_EMBEDDINGS))
+                if not np.array_equal(tensor.to_float32().view("<u4"), embedding.to_float32().view("<u4")):
+                    raise ModelImportError("tie_word_embeddings is set but lm_head differs from the embedding")
+                continue
+            tensors[name] = source
+    return _with_tokenizer(directory, config, tensors, None)
 
 
 def _with_tokenizer(

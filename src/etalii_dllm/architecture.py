@@ -34,12 +34,19 @@ from typing import Any
 # biases and no score scaling, a per-head bias over log-bucketed relative positions (the first layer's, shared by
 # every layer), a ReLU MLP (T5 v1.0) or a gated one (v1.1), then a final norm. A "t5" with ``decoder_layers`` is a
 # text-to-text model (T5, Flan-T5): that encoder plus a decoder with causal self-attention over one-directional
-# buckets of its own and cross-attention over the encoder's states (:mod:`etalii_dllm.seq2seq`).
+# buckets of its own and cross-attention over the encoder's states (:mod:`etalii_dllm.seq2seq`). The classic decoders
+# normalise with LayerNorms that have biases (``layer_norm``), give every projection a bias and run a plain GELU MLP
+# ``down(gelu(up(x)))``: "phi" (Phi-1, Phi-1.5, Phi-2) feeds one normed input to attention and the MLP and adds both
+# to the residual stream together (``parallel_residual="shared"``), with partial rotary embeddings and a biased LM
+# head; "gpt_neox" (Pythia) does the same with a norm for each (``"separate"``) or in the usual sequential layout;
+# "gpt2" is sequential, with learned absolute position embeddings instead of rotary ones (``absolute_positions``).
 FAMILIES = (
     "bert",
     "deberta",
     "gemma2",
     "gemma3",
+    "gpt2",
+    "gpt_neox",
     "granite",
     "granitemoe",
     "llama",
@@ -48,6 +55,7 @@ FAMILIES = (
     "modernbert",
     "olmo2",
     "olmoe",
+    "phi",
     "phi3",
     "qwen2",
     "qwen2_moe",
@@ -59,6 +67,8 @@ NORM_PLACEMENTS = ("pre", "post", "sandwich")
 ACTIVATIONS = ("silu", "gelu_tanh", "gelu", "relu")
 QK_NORM_SCOPES = ("head", "all")
 ENCODER_FAMILIES = ("bert", "deberta", "modernbert", "t5")
+CLASSIC_FAMILIES = ("gpt2", "gpt_neox", "phi")
+PARALLEL_RESIDUALS = ("shared", "separate")
 CLASSIFIER_POOLINGS = ("cls", "mean")
 ENCODER_ONLY = "an encoder model embeds text and cannot generate; use it with dllm embed, /v1/embeddings or dllm index"
 
@@ -165,6 +175,24 @@ class TransformerConfig:
     """T5 text-to-text models (T5ForConditionalGeneration, Flan-T5): the decoder's layers (``decoder.*`` tensors);
     the model then generates text (:mod:`etalii_dllm.seq2seq`) instead of embedding it. 0 for every other model."""
 
+    layer_norm: bool = False
+    """The classic decoders (``CLASSIC_FAMILIES``): every norm is a LayerNorm with a bias (``*.norm.bias``), its
+    epsilon ``rms_norm_eps``."""
+    linear_bias: bool = False
+    """The classic decoders: the attention output and MLP projections have biases too (``attention.o.bias``,
+    ``mlp.up.bias``, ``mlp.down.bias``); the q/k/v biases are ``attention_bias``."""
+    lm_head_bias: bool = False
+    """Phi: the LM head has a bias (``lm_head.bias``)."""
+    plain_mlp: bool = False
+    """The classic decoders: the MLP is ``down(act(up(x)))`` with ``gelu`` or ``gelu_tanh``, without a gate."""
+    parallel_residual: str | None = None
+    """Attention and the MLP both read the layer's input and add to the residual stream together, ``x + (attention +
+    mlp)``: ``"shared"`` normalises the input once for both (Phi, no ``mlp_norm``), ``"separate"`` with a norm each
+    (GPT-NeoX); ``None`` is the sequential layout."""
+    absolute_positions: bool = False
+    """GPT-2: learned position embeddings ``position_embedding.weight`` ``[context_length, hidden]`` are added to the
+    token embeddings, and nothing rotates."""
+
     def __post_init__(self) -> None:
         if self.family not in FAMILIES:
             raise ValueError(f"unsupported model family {self.family!r}")
@@ -173,7 +201,7 @@ class TransformerConfig:
                 raise ValueError(f"{name} must be positive")
         if self.heads % self.kv_heads:
             raise ValueError("heads must be a multiple of kv_heads")
-        if self.head_dim % 2 and self.family not in ENCODER_FAMILIES:
+        if self.head_dim % 2 and self.family not in ENCODER_FAMILIES and not self.absolute_positions:
             raise ValueError("head_dim must be even for rotary embeddings")
         if self.activation not in ACTIVATIONS:
             raise ValueError(f"unsupported activation {self.activation!r}")
@@ -213,7 +241,7 @@ class TransformerConfig:
             if self.padding_index is not None and self.padding_index < 0:
                 raise ValueError("padding_index must not be negative")
         elif (
-            self.activation == "gelu"
+            (self.activation == "gelu" and not self.plain_mlp)
             or self.type_vocabulary_size
             or self.classifier_labels
             or self.padding_index is not None
@@ -228,6 +256,7 @@ class TransformerConfig:
                 "the plain gelu or relu MLP, token types, classifiers, padding positions, relative positions and "
                 "projections are for encoders only"
             )
+        self._check_classic()
         if self.qk_norm_scope not in QK_NORM_SCOPES:
             raise ValueError(f"unsupported qk_norm_scope {self.qk_norm_scope!r}")
         if self.norm_placement not in NORM_PLACEMENTS:
@@ -274,6 +303,44 @@ class TransformerConfig:
                 raise ValueError("yarn needs a positive factor and original_max_position_embeddings")
         if self.rope_attention_factor != 1.0 and self.qk_norm and self.norm_unit_offset:
             raise ValueError("a RoPE attention factor together with unit-offset QK-norm is not supported")
+
+    def _check_classic(self) -> None:
+        classic = self.family in CLASSIC_FAMILIES
+        flags = (self.layer_norm, self.linear_bias, self.lm_head_bias, self.plain_mlp, self.absolute_positions)
+        if not classic:
+            if any(flags) or self.parallel_residual is not None:
+                raise ValueError(
+                    f"LayerNorm decoders, plain MLPs and their biases are for {', '.join(CLASSIC_FAMILIES)}"
+                )
+            return
+        if not (self.layer_norm and self.plain_mlp) or self.activation not in ("gelu", "gelu_tanh"):
+            raise ValueError(f"{self.family} needs LayerNorms and a plain gelu or gelu_tanh MLP")
+        if self.parallel_residual is not None and self.parallel_residual not in PARALLEL_RESIDUALS:
+            raise ValueError(f"unsupported parallel_residual {self.parallel_residual!r}")
+        if self.absolute_positions and (self.rope_scaling or self.rotary_dim is not None):
+            raise ValueError("absolute positions do not rotate")
+        if (
+            self.experts
+            or self.qk_norm
+            or self.norm_placement != "pre"
+            or self.norm_unit_offset
+            or self.has_multipliers
+            or self.attention_softcap is not None
+            or self.logits_softcap is not None
+            or self.local_rope_theta is not None
+        ):
+            raise ValueError(f"{self.family} has no experts, QK-norm, other norm placements, multipliers or soft-caps")
+
+    @property
+    def cpu_only(self) -> bool:
+        """Whether the decoder uses a layout the GPU backend does not run yet (the classic decoders)."""
+        return self.family in CLASSIC_FAMILIES
+
+    @property
+    def mlp_norm(self) -> str:
+        """The name prefix of the norm the MLP reads (its weight is ``<prefix>.weight``): ``attention_norm`` when
+        attention and the MLP share it (``parallel_residual="shared"``), else ``mlp_norm``."""
+        return "attention_norm" if self.parallel_residual == "shared" else "mlp_norm"
 
     @property
     def is_encoder(self) -> bool:
@@ -397,6 +464,12 @@ class TransformerConfig:
             ("projection_size", 0),
             ("projection_bias", False),
             ("decoder_layers", 0),
+            ("layer_norm", False),
+            ("linear_bias", False),
+            ("lm_head_bias", False),
+            ("plain_mlp", False),
+            ("parallel_residual", None),
+            ("absolute_positions", False),
         )
         for name, default in defaults:
             if values[name] == default:
@@ -423,11 +496,16 @@ class TransformerConfig:
             return self._text_to_text_shapes()
         q = self.heads * self.head_dim
         kv = self.kv_heads * self.head_dim
+        hidden = (self.hidden_size,)
         shapes: dict[str, tuple[int, ...]] = {"token_embedding.weight": (self.vocabulary_size, self.hidden_size)}
+        if self.absolute_positions:
+            shapes["position_embedding.weight"] = (self.context_length, self.hidden_size)
         for i in range(self.layers):
             p = f"layers.{i}."
             if self.has_pre_norms:
-                shapes[p + "attention_norm.weight"] = (self.hidden_size,)
+                shapes[p + "attention_norm.weight"] = hidden
+                if self.layer_norm:
+                    shapes[p + "attention_norm.bias"] = hidden
             shapes[p + "attention.q.weight"] = (q, self.hidden_size)
             shapes[p + "attention.k.weight"] = (kv, self.hidden_size)
             shapes[p + "attention.v.weight"] = (kv, self.hidden_size)
@@ -440,11 +518,15 @@ class TransformerConfig:
                 shapes[p + "attention.q_norm.weight"] = (q if whole else self.head_dim,)
                 shapes[p + "attention.k_norm.weight"] = (kv if whole else self.head_dim,)
             shapes[p + "attention.o.weight"] = (self.hidden_size, q)
+            if self.linear_bias:
+                shapes[p + "attention.o.bias"] = hidden
             if self.has_post_norms:
                 shapes[p + "attention_post_norm.weight"] = (self.hidden_size,)
                 shapes[p + "mlp_post_norm.weight"] = (self.hidden_size,)
-            if self.has_pre_norms:
-                shapes[p + "mlp_norm.weight"] = (self.hidden_size,)
+            if self.has_pre_norms and self.parallel_residual != "shared":
+                shapes[p + "mlp_norm.weight"] = hidden
+                if self.layer_norm:
+                    shapes[p + "mlp_norm.bias"] = hidden
             if self.is_sparse(i):
                 shapes[p + "mlp.router.weight"] = (self.experts, self.hidden_size)
                 for e in range(self.experts):
@@ -459,12 +541,20 @@ class TransformerConfig:
                     if self.shared_expert_gate:
                         shapes[p + "mlp.shared_gate.weight"] = (1, self.hidden_size)
                 continue
-            shapes[p + "mlp.gate.weight"] = (self.intermediate_size, self.hidden_size)
+            if not self.plain_mlp:
+                shapes[p + "mlp.gate.weight"] = (self.intermediate_size, self.hidden_size)
             shapes[p + "mlp.up.weight"] = (self.intermediate_size, self.hidden_size)
             shapes[p + "mlp.down.weight"] = (self.hidden_size, self.intermediate_size)
-        shapes["final_norm.weight"] = (self.hidden_size,)
+            if self.linear_bias:
+                shapes[p + "mlp.up.bias"] = (self.intermediate_size,)
+                shapes[p + "mlp.down.bias"] = hidden
+        shapes["final_norm.weight"] = hidden
+        if self.layer_norm:
+            shapes["final_norm.bias"] = hidden
         if not self.tie_word_embeddings:
             shapes["lm_head.weight"] = (self.vocabulary_size, self.hidden_size)
+        if self.lm_head_bias:
+            shapes["lm_head.bias"] = (self.vocabulary_size,)
         return shapes
 
     def _encoder_shapes(self) -> dict[str, tuple[int, ...]]:

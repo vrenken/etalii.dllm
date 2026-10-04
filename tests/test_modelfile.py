@@ -264,7 +264,7 @@ def test_header_without_architecture_is_refused(model_path):
 @pytest.mark.parametrize(
     ("change", "message"),
     [
-        ({"family": "gpt2"}, "unsupported model family 'gpt2'"),
+        ({"family": "falcon"}, "unsupported model family 'falcon'"),
         ({"vocabulary_size": 0}, "vocabulary_size must be positive"),
         ({"layers": -1}, "layers must be positive"),
         ({"kv_heads": 0}, "kv_heads must be positive"),

@@ -512,3 +512,12 @@ T5_EDITING_FINGERPRINT = {
     "edit_flan": "40d475b25b7696593ec8b1f17189044b0e7162e8f24c996195553809823125ff",
     "sae": "854b1c6f76ee770fdf1533c7b1534f6d394bc5b73bf893feada265f917dd989a",
 }
+
+# Phase 72: greedy then sampled (temperature 0.9, seed 3) tokens of the tiny Phi, GPT-NeoX (parallel and sequential)
+# and GPT-2 checkpoints of tests/test_classic_decoders.py, as int64 SHA-256.
+CLASSIC_GENERATION_FINGERPRINTS = {
+    "phi": "cb146b97e8c51f25940a1175df0e106ac21a9be3fd2374888ed643bd9eca1603",
+    "gpt_neox": "6afda084448565f86191771cc4c7c0a2eb0e5c954132c8937cab77a1b5be0603",
+    "sequential_neox": "ee7bfc3ec1c218f641d8728ba66010473411820f6c6c39589167ed418a098499",
+    "gpt2": "d35743e620ed9d2e9c5879fc2c6029511e123bd98c71f86267955642df375d65",
+}

@@ -19,7 +19,7 @@ from collections.abc import Mapping, Sequence
 import numpy as np
 import numpy.typing as npt
 
-from etalii_dllm.architecture import TransformerConfig
+from etalii_dllm.architecture import CLASSIC_FAMILIES, TransformerConfig
 from etalii_dllm.numerics import (
     FloatArray,
     attention,
@@ -56,6 +56,8 @@ class DecoderGradients:
     def __init__(self, config: TransformerConfig) -> None:
         if config.rope_interleaved:
             raise ValueError("training expects the Hugging Face rotary layout (imports convert to it)")
+        if config.family in CLASSIC_FAMILIES:
+            raise ValueError(f"fine-tuning {config.family} decoders is not supported yet")
         self.config = config
         self.inv_freq = rope_inv_freq(
             config.head_dim, config.rope_theta, rotary_dim=config.rotary_dimension, scaling=config.rope_scaling

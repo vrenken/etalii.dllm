@@ -339,6 +339,18 @@ For new tokens at positions `start …`, all in float32 unless stated:
 
 `norm` is `rms_norm` with the model's `rms_norm_eps`, and with `(1 + w)` for Gemma.
 
+**The classic decoders** (families `phi`, `gpt_neox` and `gpt2`) change the steps above in these ways:
+
+- `norm` is `layer_norm(x, w, b, rms_norm_eps)` with the norm's `.bias`.
+- The attention output and MLP projections have biases (`linear(a, Wo, bo)`), and so does Phi's head.
+- The MLP is plain: `m = linear(gelu(linear(h, Wup, bup)), Wdown, bdown)`, with the exact or the tanh GELU
+  (`activation` `gelu` or `gelu_tanh`).
+- GPT-2 (`absolute_positions`) adds `position_embedding` row `p` to the embedding row of the token at position `p`
+  in step 1 (a float32 addition), and steps 2.3 rotate nothing.
+- With `parallel_residual`, steps 2.5 and 2.6 become `m` computed from `norm(x)`, then `x = (o + m) + x` (two
+  float32 additions, in that order). The norm is `attention_norm`, the same `h` attention read, for `shared`
+  (Phi), and `mlp_norm` for `separate` (GPT-NeoX).
+
 **Generation.** The prompt's tokens are fed and the next token is sampled from the last position's logits. A stop
 token (the tokenizer's end of sequence or the model's own end ids) ends the answer and is not part of it.
 Otherwise the token is appended and fed. The answer also ends after `max_tokens` tokens.

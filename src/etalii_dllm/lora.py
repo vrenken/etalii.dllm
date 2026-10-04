@@ -45,7 +45,7 @@ from typing import Any
 
 import numpy as np
 
-from etalii_dllm.architecture import TransformerConfig
+from etalii_dllm.architecture import CLASSIC_FAMILIES, TransformerConfig
 from etalii_dllm.modelfile import tensor_order
 from etalii_dllm.numerics import QUANTIZATIONS, FloatArray, QuantizedWeight, fill_gaussian, linear
 
@@ -212,6 +212,8 @@ def target_weights(config: TransformerConfig, lora: LoraConfig) -> list[str]:
     """The adapted weight names, in tensor order. In a mixture-of-experts layer ``gate``, ``up`` and ``down`` adapt
     every expert's projection (``layers.N.mlp.experts.E.gate.weight``) and the shared expert's
     (``layers.N.mlp.shared.gate.weight``); the router and the shared expert's gate are never adapted."""
+    if config.family in CLASSIC_FAMILIES:
+        raise AdapterError(f"LoRA adapters for {config.family} decoders are not supported yet")
     if config.is_text_to_text:  # q, k, v and o adapt the self-attention and the decoder's cross-attention
         modules = t5_modules(config)
         targets = [t for t in lora.targets if t in modules]
@@ -633,6 +635,8 @@ def read_peft(directory: str | Path, config: TransformerConfig) -> tuple[LoraCon
     from etalii_dllm.importing.safetensors import SafetensorsError, SafetensorsFile
 
     directory = Path(directory)
+    if config.family in CLASSIC_FAMILIES:
+        raise AdapterError(f"LoRA adapters for {config.family} decoders are not supported yet")
     config_path = directory / ADAPTER_CONFIG
     if not config_path.exists():
         raise AdapterError(f"{directory}: no {ADAPTER_CONFIG}")
