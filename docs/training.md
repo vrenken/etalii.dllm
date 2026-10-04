@@ -271,6 +271,9 @@ DeBERTa's names (`attention.self.query_proj`, `key_proj`, `value_proj`, `attenti
 `intermediate.dense`, `output.dense`; `deberta.` in front for a cross-encoder); the merged query and key weights also
 project the relative table, exactly as PEFT's adapted modules do.
 
+T5 encoders (Phase 62) and embedders with a sentence-transformers `Dense` projection after the pooling are not
+fine-tuned yet: `dllm finetune` and LoRA refuse them with an error.
+
 `tests/test_encoder_training.py` checks the new kernels and the encoder's gradients against `transformers`' autograd
 and finite differences (BERT and XLM-RoBERTa with padding inside the sequence), both losses and their gradients
 against the `torch` formulas sentence-transformers uses, bit-exact resumption, receipts, golden hashes of a short run

@@ -607,20 +607,66 @@ def _embedding_settings(directory: Path) -> dict[str, Any] | None:
         raise ModelImportError(f"{directory}: pooling that leaves out the prompt is not supported")
     extra = _read_json(directory / "config_sentence_transformers.json")
     prompts = extra.get("prompts") or {}
-    return {
+    result: dict[str, Any] = {
         "pooling": chosen[0],
         "normalize": any(str(m.get("type", "")).endswith("Normalize") for m in modules),
         "prompts": {str(k): str(v) for k, v in sorted(prompts.items())},
         "default_prompt_name": extra.get("default_prompt_name"),
     }
+    kinds = [str(m.get("type", "")).rsplit(".", 1)[-1] for m in modules]
+    known = ("Transformer", "Pooling", "Dense", "Normalize")
+    if any(kind not in known for kind in kinds) or kinds.count("Dense") > 1:
+        raise ModelImportError(f"{directory}: only Transformer, Pooling, one Dense and Normalize modules are supported")
+    if "Dense" in kinds:
+        if kinds.index("Dense") != kinds.index("Pooling") + 1:
+            raise ModelImportError(f"{directory}: the Dense module must follow the pooling")
+        result["projection"] = str(modules[kinds.index("Dense")].get("path", ""))
+    return result
+
+
+_DENSE_ACTIVATIONS = {
+    "torch.nn.modules.linear.Identity": "identity",
+    "torch.nn.modules.activation.Tanh": "tanh",
+}
+
+
+def _projection(
+    directory: Path, config: TransformerConfig, pooling: dict[str, Any]
+) -> tuple[TransformerConfig, dict[str, TensorSource]]:
+    """The sentence-transformers ``Dense`` module named by ``pooling["projection"]`` (its path): the config with
+    ``projection_size``, the tensors ``projection.weight`` (and ``.bias``), and ``pooling["projection"]`` set to the
+    activation (``identity`` or ``tanh``)."""
+    path = directory / pooling["projection"]
+    settings = _read_json(path / "config.json")
+    activation = _DENSE_ACTIVATIONS.get(str(settings.get("activation_function", "torch.nn.modules.activation.Tanh")))
+    if activation is None:
+        raise ModelImportError(f"{path}: Dense activation {settings.get('activation_function')!r} is not supported")
+    if int(settings.get("in_features", -1)) != config.hidden_size:
+        raise ModelImportError(f"{path}: the Dense module does not read the encoder's {config.hidden_size} features")
+    if not (path / "model.safetensors").exists():
+        raise ModelImportError(f"{path}: the Dense module's weights must be in model.safetensors")
+    stored = open_checkpoint(path)
+    tensors: dict[str, TensorSource] = {}
+    for name in ("weight", "bias"):
+        tensor = stored.get(f"linear.{name}")
+        if tensor is not None:
+            tensors[f"projection.{name}"] = TensorSource(tensor.shape, tensor.to_float32, tensor.dtype)
+    if "projection.weight" not in tensors or len(stored) != len(tensors):
+        raise ModelImportError(f"{path}: expected linear.weight (and linear.bias) only")
+    size = int(settings.get("out_features", tensors["projection.weight"].shape[0]))
+    biased = "projection.bias" in tensors
+    if bool(settings.get("bias", True)) != biased:
+        raise ModelImportError(f"{path}: config.json and the weights disagree about the bias")
+    pooling["projection"] = activation
+    return dataclasses.replace(config, projection_size=size, projection_bias=biased), tensors
 
 
 _BERT_ACTIVATIONS = {"gelu": "gelu", "gelu_new": "gelu_tanh", "gelu_pytorch_tanh": "gelu_tanh"}
 
 
-_ENCODER_MODEL_TYPES = ("bert", "deberta-v2", "modernbert", "roberta", "xlm-roberta")
+_ENCODER_MODEL_TYPES = ("bert", "deberta-v2", "modernbert", "roberta", "t5", "xlm-roberta")
 """The ``model_type`` values imported as encoders: RoBERTa and XLM-RoBERTa are BERT with positions counted from
-past the padding token; DeBERTa-v2/v3 and ModernBERT are encoder families of their own."""
+past the padding token; DeBERTa-v2/v3, ModernBERT and T5 (its encoder) are encoder families of their own."""
 
 
 def bert_config(config: dict[str, Any], context_length: int | None = None) -> TransformerConfig:
@@ -796,6 +842,79 @@ def deberta_config(config: dict[str, Any], context_length: int | None = None) ->
         )
     except ValueError as error:
         raise ModelImportError(str(error)) from error
+
+
+_T5_ACTIVATIONS = {"relu": "relu", "gelu": "gelu", "gelu_new": "gelu_tanh", "silu": "silu"}
+
+
+def t5_config(config: dict[str, Any], context_length: int | None = None) -> TransformerConfig:
+    """Maps a Hugging Face T5 ``config.json`` (``model_type`` ``t5``: T5EncoderModel, T5Model or
+    T5ForConditionalGeneration, whose decoder is dropped) to our encoder description (family ``t5``): ``d_model``,
+    ``d_kv`` per head, ``d_ff``, the relative attention buckets and their maximum distance, and ``feed_forward_proj``
+    (``relu`` as in T5 v1.0, ``gated-gelu`` as in v1.1, which uses the tanh GELU, or another ``[gated-]relu``,
+    ``gelu`` or ``silu``)."""
+    if context_length is not None:
+        raise ModelImportError("--context-length is for decoders")
+    projection = str(config.get("feed_forward_proj", "relu"))
+    gated = projection.startswith("gated-")
+    name = "gelu_new" if projection == "gated-gelu" else projection.removeprefix("gated-")
+    if name not in _T5_ACTIVATIONS:
+        raise ModelImportError(f"feed_forward_proj {projection!r} is not supported")
+    if not config.get("is_encoder_decoder", True) and config.get("is_decoder"):
+        raise ModelImportError("a T5 decoder is not an encoder")
+    try:
+        return TransformerConfig(
+            family="t5",
+            vocabulary_size=int(config["vocab_size"]),
+            hidden_size=int(config["d_model"]),
+            intermediate_size=int(config["d_ff"]),
+            layers=int(config["num_layers"]),
+            heads=int(config["num_heads"]),
+            kv_heads=int(config["num_heads"]),
+            head_dim=int(config["d_kv"]),
+            context_length=int(config.get("n_positions", 512)),
+            rms_norm_eps=float(config.get("layer_norm_epsilon", 1e-6)),
+            rope_theta=0.0,
+            activation=_T5_ACTIVATIONS[name],
+            tie_word_embeddings=True,
+            position_buckets=int(config.get("relative_attention_num_buckets", 32)),
+            max_relative_positions=int(config.get("relative_attention_max_distance", 128)),
+            gated_mlp=gated,
+        )
+    except ValueError as error:
+        raise ModelImportError(str(error)) from error
+
+
+_T5_LAYER = re.compile(r"^encoder\.block\.(\d+)\.layer\.([01])\.(.+)\.weight$")
+_T5_LAYER_NAMES = {
+    ("0", "SelfAttention.q"): "attention.q",
+    ("0", "SelfAttention.k"): "attention.k",
+    ("0", "SelfAttention.v"): "attention.v",
+    ("0", "SelfAttention.o"): "attention.o",
+    ("0", "layer_norm"): "attention_norm",
+    ("1", "layer_norm"): "mlp_norm",
+    ("1", "DenseReluDense.wi"): "mlp.up",
+    ("1", "DenseReluDense.wi_0"): "mlp.gate",
+    ("1", "DenseReluDense.wi_1"): "mlp.up",
+    ("1", "DenseReluDense.wo"): "mlp.down",
+}
+
+
+def _t5_name(name: str) -> str | None:
+    """Our name for a T5 checkpoint tensor; None for the decoder, the LM head and the encoder's copy of the shared
+    embedding (``encoder.embed_tokens``, the same parameter as ``shared``)."""
+    if name == "shared.weight":
+        return "token_embedding.weight"
+    if name.startswith(("decoder.", "lm_head.")) or name == "encoder.embed_tokens.weight":
+        return None
+    if name == "encoder.final_layer_norm.weight":
+        return "final_norm.weight"
+    if name == "encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight":
+        return "relative_bias.weight"
+    match = _T5_LAYER.match(name)
+    if match and (match.group(2), match.group(3)) in _T5_LAYER_NAMES:
+        return f"layers.{int(match.group(1))}.{_T5_LAYER_NAMES[(match.group(2), match.group(3))]}.weight"
+    raise ModelImportError(f"unexpected tensor {name!r}")
 
 
 _DEBERTA_LAYER = re.compile(r"^encoder\.layer\.(\d+)\.(.+)\.(weight|bias)$")
@@ -986,11 +1105,13 @@ def _convert_bert(directory: Path, raw_config: dict[str, Any], context_length: i
     and v3 likewise (nli-deberta-v3-small, mxbai-rerank-xsmall-v1)."""
     modern = raw_config.get("model_type") == "modernbert"
     deberta = raw_config.get("model_type") == "deberta-v2"
-    mapping = modernbert_config if modern else deberta_config if deberta else bert_config
+    t5 = raw_config.get("model_type") == "t5"
+    mapping = modernbert_config if modern else deberta_config if deberta else t5_config if t5 else bert_config
     config = mapping(raw_config, context_length)
-    if deberta and not (directory / "tokenizer.json").exists():
+    if (deberta or t5) and not (directory / "tokenizer.json").exists():
+        family = "DeBERTa" if deberta else "T5"
         raise ModelImportError(
-            "this DeBERTa checkpoint has no tokenizer.json (only spm.model); save it with a fast tokenizer first, "
+            f"this {family} checkpoint has no tokenizer.json (only spm.model); save it with a fast tokenizer first, "
             "for example AutoTokenizer.from_pretrained(dir).save_pretrained(dir)"
         )
     checkpoint = open_checkpoint(directory)
@@ -1015,11 +1136,21 @@ def _convert_bert(directory: Path, raw_config: dict[str, Any], context_length: i
     if modern and classifier is None:
         config = dataclasses.replace(config, classifier_pooling=None)
     tensors: dict[str, TensorSource] = {}
+    if pooling is not None and "projection" in pooling:
+        config, tensors = _projection(directory, config, pooling)
+    if t5 and classifier is not None:
+        raise ModelImportError("T5 sequence classification is not supported; T5 imports as an embedder")
+    if t5 and "shared.weight" not in checkpoint and "encoder.embed_tokens.weight" in checkpoint:
+        embedding = checkpoint["encoder.embed_tokens.weight"]
+        checkpoint = {**checkpoint, "shared.weight": dataclasses.replace(embedding, name="shared.weight")}
     for tensor in checkpoint.values():
         if modern:
             tensors.update(_modernbert_tensors(tensor, config, classifier is not None))
             continue
-        name = (_deberta_name if deberta else _bert_name)(tensor.name, classifier is not None)
+        if t5:
+            name = _t5_name(tensor.name)
+        else:
+            name = (_deberta_name if deberta else _bert_name)(tensor.name, classifier is not None)
         if name is None:
             continue
         if tensor.dtype not in ("F32", "F16", "BF16"):
@@ -1038,6 +1169,8 @@ def _convert_huggingface(directory: Path, context_length: int | None = None) -> 
         return _convert_bert(directory, raw_config, context_length)
     config = hf_config(raw_config, _read_json(directory / "generation_config.json"), context_length=context_length)
     pooling = _embedding_settings(directory)
+    if pooling is not None and "projection" in pooling:
+        raise ModelImportError(f"{directory}: a Dense module after the pooling is supported for encoders only")
     checkpoint = open_checkpoint(directory)
     if pooling is not None and "model.embed_tokens.weight" not in checkpoint:
         # Embedding models are often saved without the causal LM wrapper: no "model." prefix and no LM head.

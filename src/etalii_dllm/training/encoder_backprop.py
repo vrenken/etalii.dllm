@@ -100,6 +100,10 @@ class EncoderGradients:
     def __init__(self, config: TransformerConfig) -> None:
         if not config.is_encoder:
             raise ValueError(f"{config.family} is a decoder; its gradients are DecoderGradients")
+        if config.family == "t5":
+            raise ValueError("fine-tuning T5 encoders is not supported yet")
+        if config.projection_size:
+            raise ValueError("fine-tuning an embedder with a Dense projection after the pooling is not supported yet")
         self.config = config
         self.modern = config.family == "modernbert"
         self.deberta = config.family == "deberta"

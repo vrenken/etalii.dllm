@@ -313,7 +313,7 @@ def test_architecture_validation():
     base = bert_config({**BERT_CONFIG, "vocab_size": 50})
     with pytest.raises(ValueError, match="grouped-query"):
         TransformerConfig.from_dict({**base.to_dict(), "kv_heads": 2})
-    with pytest.raises(ValueError, match="bert"):
+    with pytest.raises(ValueError, match="for encoders only"):
         TransformerConfig.from_dict({**base.to_dict(), "family": "llama"})
 
 

@@ -269,8 +269,9 @@ EVAL_FINGERPRINTS = {
 # SHA-256 of the conformance vectors' manifest.json (`dllm conformance write`, Phase 20). It covers every input and
 # output file's SHA-256, so it pins the bits of every kernel case, the sampler and the two small decoders. Phase 21
 # added the two sample-penalties cases (penalties, min-p and logit bias); Phase 41 the YaRN and LongRoPE long-factor
-# rope-inv-freq cases; Phase 44 the sigmoid case and the qwen2_moe decoder (a gated shared expert).
-CONFORMANCE_MANIFEST_SHA256 = "0da8421c357a17d2aeec977e000ba73d7ccaee706046b0c6bf854c310025b296"
+# rope-inv-freq cases; Phase 44 the sigmoid case and the qwen2_moe decoder (a gated shared expert); Phase 62 the T5
+# encoder (relative attention bias, RMS norms, gated tanh GELU).
+CONFORMANCE_MANIFEST_SHA256 = "769fcd0406b203096df6a95798c6163050b44d0f90397de033bbf7c7509cc61e"
 
 # Phase 21: the placeholder model continuing "Deterministic decoding controls are" with every decoding control set
 # (tests/test_decoding_controls.py::CONTROLLED): penalties, min-p and logit bias.
@@ -451,3 +452,10 @@ DEBERTA_FINETUNE_FINGERPRINT = {
     "embedding": "151fd4e6b63cee97e2562377962ce28a5b463edf0c70267cf0581bd63c2d57b4",
     "classifier": "3b44f10fa13c382002495c4db604e48f2ca4b7020dea8d50384ec664a691ddde",
 }
+# Phase 62 (#373, #374): the tiny T5 encoders of tests/test_t5.py, the last layer's states of a fixed token sequence
+# (T5 v1.0 with ReLU; v1.1 with the gated tanh GELU) and a sentence vector through a tanh Dense projection with bias.
+T5_EMBEDDING_FINGERPRINT = (
+    "91fc2a4afb85089501323b9e49c8377e708d1b8077266e27b2a22c3c99e75439",
+    "acdc59481981ba8dfc3302804f6e95320ef7adf13c658347052851e51fed44ef",
+)
+T5_SENTENCE_FINGERPRINT = "f79a4e69ca37219745ed18cae2dabce6244cce91ba133af3cf7fadc8b0d07579"

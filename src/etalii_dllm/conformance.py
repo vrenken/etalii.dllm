@@ -100,10 +100,17 @@ ENCODERS: dict[str, dict[str, Any]] = {
         "rope_theta": 0.0, "tie_word_embeddings": True, "attention_bias": True, "activation": "gelu",
         "type_vocabulary_size": 1, "classifier_labels": 1, "padding_index": 1,
     },
+    "t5": {
+        "family": "t5", "vocabulary_size": 96, "hidden_size": 64, "intermediate_size": 96, "layers": 2,
+        "heads": 4, "kv_heads": 4, "head_dim": 16, "context_length": 16, "rms_norm_eps": 1e-6,
+        "rope_theta": 0.0, "tie_word_embeddings": True, "activation": "gelu_tanh", "gated_mlp": True,
+        "position_buckets": 8, "max_relative_positions": 6,
+    },
 }  # fmt: skip
 """A small BERT encoder: absolute positions, token types, LayerNorms with biases, bidirectional attention; a
-cross-encoder with a two-label classification head, run on a pair (token types 0 and 1); and an XLM-RoBERTa
-cross-encoder whose positions count from past the padding id, run on tokens with padding inside."""
+cross-encoder with a two-label classification head, run on a pair (token types 0 and 1); an XLM-RoBERTa
+cross-encoder whose positions count from past the padding id, run on tokens with padding inside; and a T5 v1.1
+encoder (RMS norms, the gated tanh GELU, the relative attention bias with log buckets beyond distance 2)."""
 
 
 def _decoder_tensors(name: str) -> Arrays:

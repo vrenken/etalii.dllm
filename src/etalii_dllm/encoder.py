@@ -46,6 +46,20 @@ them) is BERT without absolute positions and with disentangled attention:
 
 Its classification head (the context pooler) is ``logits = classifier(gelu(pooler(h[0])))``.
 
+A T5 encoder (``config.family == "t5"``: sentence-t5, GTR-T5) has no positions in its embeddings:
+
+1. ``h = word[t]``;
+2. per layer, ``h = h + o(attention(RMSNorm(h)))`` and ``h = h + down(mlp(RMSNorm(h)))``, where the RMS norms are
+   the ``rms_norm`` kernel (no mean, no bias), the projections have no biases, attention scores query ``i`` against
+   key ``j`` as ``q_i . k_j + bias[head, t5_bucket(j - i)]`` without scaling (``biased_attention`` with scale 1), the
+   bias table being the first layer's ``relative_attention_bias`` that every layer shares, and the MLP is
+   ``relu(up(x))`` (T5 v1.0) or ``act(gate(x)) * up(x)`` (v1.1, :attr:`TransformerConfig.gated_mlp`);
+3. ``h = RMSNorm(h)`` (the final norm).
+
+An embedder whose sentence-transformers pipeline has a ``Dense`` module (:attr:`TransformerConfig.projection_size`)
+projects the pooled vector with ``linear`` (and the module's activation) before normalising it; ``engine.embed``
+applies it (:func:`project`).
+
 LayerNorm is the ``layer_norm`` kernel (mean and variance summed ascending in double); attention, ``linear``, RoPE
 and GELU are the decoder's kernels, so each position's state has one fixed evaluation order whatever the thread
 count or SIMD path. The residual additions and the gate product are float32 elementwise operations. An encoder runs
@@ -69,8 +83,10 @@ from etalii_dllm.numerics import (
     layer_norm,
     linear,
     log,
+    rms_norm,
     rope,
     rope_inv_freq,
+    silu,
     softcap,
 )
 from etalii_dllm.tensor import Tensor
@@ -109,8 +125,61 @@ def relative_index(config: TransformerConfig, count: int) -> np.ndarray:
     return np.clip(buckets + span, 0, 2 * span - 1)
 
 
+def t5_relative_buckets(distances: npt.ArrayLike, buckets: int, max_distance: int) -> np.ndarray:
+    """T5's bidirectional relative position buckets of integer ``distances`` (``j - i``, key minus query), exactly as
+    transformers' ``T5Attention._relative_position_bucket`` computes them: half of the ``buckets`` for each
+    direction (``n = buckets // 2``, keys after the query from ``n`` on); with ``exact = n // 2``, a distance ``r =
+    |d|`` below ``exact`` is its own bucket and a longer one ``min(exact + trunc(f32(f32(log(f32(r) / exact)) /
+    f32(log(max_distance / exact))) * (n - exact)), n - 1)``, every operation rounded to float32 and the logarithms
+    the portable ``log`` in double rounded to float32."""
+    d = np.asarray(distances, dtype=np.int64)
+    half = buckets // 2
+    exact = half // 2
+    if exact < 1:
+        raise ValueError("t5 needs at least four relative position buckets")
+    magnitude = np.abs(d)
+    far = magnitude >= exact
+    ratio = (magnitude[far].astype(np.float32) / np.float32(exact)).astype(np.float32)
+    logs = np.array([log(float(r)) for r in ratio], dtype=np.float64).astype(np.float32)
+    denominator = np.float32(log(max_distance / exact))
+    scaled = (logs / denominator).astype(np.float32) * np.float32(half - exact)
+    bucket = magnitude.copy()
+    bucket[far] = np.minimum(exact + np.trunc(scaled).astype(np.int64), half - 1)
+    return np.where(d > 0, half, 0) + bucket
+
+
+def t5_bias(config: TransformerConfig, table: npt.ArrayLike, count: int) -> np.ndarray:
+    """``[heads, count, count]``: the T5 score bias of query ``i`` and key ``j``, ``table[t5_bucket(j - i), head]``."""
+    positions = np.arange(count, dtype=np.int64)
+    index = t5_relative_buckets(
+        positions[None, :] - positions[:, None], config.position_buckets, config.max_relative_positions
+    )
+    return np.ascontiguousarray(np.asarray(table, dtype=np.float32)[index].transpose(2, 0, 1))
+
+
+def activate(x: np.ndarray, activation: str) -> np.ndarray:
+    """An MLP activation, elementwise: ``relu`` (``x`` where ``x > 0``, else +0), ``gelu``, ``gelu_tanh`` or
+    ``silu``."""
+    if activation == "relu":
+        return np.where(x > 0, x, np.float32(0)).astype(np.float32)
+    if activation == "silu":
+        return silu(x).numpy()
+    return gelu(x, approximate="tanh" if activation == "gelu_tanh" else "none").numpy()
+
+
+def project(vector: npt.ArrayLike, weight: npt.ArrayLike, bias: npt.ArrayLike | None, activation: str) -> np.ndarray:
+    """A sentence-transformers ``Dense`` module: ``act(linear(vector, weight, bias))`` with ``act`` ``identity`` or
+    ``tanh`` (the portable ``tanh``, as ``softcap(x, 1)``)."""
+    out = linear(np.asarray(vector, dtype=np.float32).reshape(1, -1), weight, bias)
+    if activation == "tanh":
+        out = softcap(out, 1.0)
+    elif activation != "identity":
+        raise ValueError(f"unsupported projection activation {activation!r}")
+    return out.numpy().reshape(-1)
+
+
 class Encoder:
-    """A BERT, DeBERTa or ModernBERT encoder over a model file's tensors (``config.is_encoder``); ``quantize``
+    """A BERT, DeBERTa, ModernBERT or T5 encoder over a model file's tensors (``config.is_encoder``); ``quantize``
     (``q8_0`` or ``q4_0``) runs the linear layers on quantised weights, which changes the output and so the
     fingerprint."""
 
@@ -190,6 +259,8 @@ class Encoder:
             raise ValueError("token id out of range")
         if config.family == "modernbert":
             return self._modernbert_states(tokens)
+        if config.family == "t5":
+            return self._t5_states(tokens)
         kinds = np.zeros(len(tokens), dtype=np.int64) if types is None else np.asarray(types, dtype=np.int64)
         if config.family == "deberta" and not config.type_vocabulary_size:
             kinds = np.zeros(len(tokens), dtype=np.int64)  # no token types: a pair's second text reads like the first
@@ -266,6 +337,37 @@ class Encoder:
     @property
     def _approximate(self) -> str:
         return "tanh" if self.config.activation == "gelu_tanh" else "none"
+
+    def project(self, vector: npt.ArrayLike, activation: str) -> np.ndarray:
+        """The pooled sentence vector through the model's ``Dense`` projection (:func:`project`)."""
+        if not self.config.projection_size:
+            raise ValueError(f"model {self.id} has no projection")
+        return project(vector, self._w["projection.weight"], self._w.get("projection.bias"), activation)
+
+    def _t5_states(self, tokens: Sequence[int]) -> FloatArray:
+        config, w = self.config, self._w
+        count, heads, head_dim = len(tokens), config.heads, config.head_dim
+        h = np.ascontiguousarray(np.asarray(w["token_embedding.weight"])[np.asarray(tokens, dtype=np.int64)])
+        bias = t5_bias(config, w["relative_bias.weight"], count)
+        eps = config.rms_norm_eps
+        for i in range(config.layers):
+            p = f"layers.{i}."
+            x = rms_norm(h, w[p + "attention_norm.weight"], eps).numpy()  # type: ignore[arg-type]
+            q = self._linear(x, p + "attention.q").reshape(count, heads, head_dim)
+            k = self._linear(x, p + "attention.k").reshape(count, heads, head_dim)
+            v = self._linear(x, p + "attention.v").reshape(count, heads, head_dim)
+            mixed = biased_attention(q, k, v, bias, 1.0).numpy()
+            h = h + self._linear(mixed.reshape(count, -1), p + "attention.o")
+            x = rms_norm(h, w[p + "mlp_norm.weight"], eps).numpy()  # type: ignore[arg-type]
+            h = h + self._linear(self._t5_mlp(x, p), p + "mlp.down")
+        return rms_norm(h, w["final_norm.weight"], eps).numpy()  # type: ignore[arg-type,no-any-return]
+
+    def _t5_mlp(self, x: np.ndarray, p: str) -> np.ndarray:
+        """The activated MLP input: ``relu(up(x))`` (or the configured activation), or ``act(gate(x)) * up(x)``."""
+        up = self._linear(x, p + "mlp.up")
+        if not self.config.gated_mlp:
+            return activate(up, self.config.activation)
+        return activate(self._linear(x, p + "mlp.gate"), self.config.activation) * up
 
     def _modernbert_states(self, tokens: Sequence[int]) -> FloatArray:
         config = self.config
