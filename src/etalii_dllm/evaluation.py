@@ -17,9 +17,13 @@ A task file is JSON lines, one item per line:
   are scored as continuations of the prompt; ``preference_accuracy`` is the share of pairs whose chosen answer is
   strictly more likely (a tie counts as a miss) and ``mean_margin`` the mean of ``log p(chosen) - log p(rejected)``.
 
-Every sequence starts with the tokenizer's begin-of-sequence token (its end-of-sequence token when it has none), so
-the first token of a text is scored too. A text longer than ``max_length`` is scored in consecutive windows, each
-starting from the token before its first target.
+A T5 text-to-text model scores each choice or answer as its answer to the context or prompt, which is the source
+(``dllm finetune --dpo``'s pairs: a ``messages`` prompt is the messages' contents joined by a blank line), with no
+start token; preference answers end with ``</s>``, as DPO scores them. Perplexity needs a decoder-only model.
+
+Every other sequence starts with the tokenizer's begin-of-sequence token (its end-of-sequence token when it has
+none), so the first token of a text is scored too. A text longer than ``max_length`` is scored in consecutive
+windows, each starting from the token before its first target.
 """
 
 from __future__ import annotations
@@ -75,7 +79,7 @@ def _rows(model: Any, tokens: Sequence[int], count: int) -> np.ndarray:
 
 def score(engine: DllmEngine, context: Sequence[int], continuation: Sequence[int]) -> Scored:
     """Log-probabilities of ``continuation`` after ``context`` (which must not be empty)."""
-    if not context:
+    if not context and not _text_to_text(engine):  # a text-to-text model's source may be empty (just </s>)
         raise EvaluationError("a continuation needs at least one token of context")
     if not continuation:
         return Scored(np.zeros(0, dtype=np.float32), True)
@@ -98,7 +102,18 @@ def _split_whitespace(context: str, continuation: str) -> tuple[str, str]:
     return stripped, context[len(stripped) :] + continuation
 
 
-def _choice(engine: DllmEngine, context: str, choice: str) -> Scored:
+def _text_to_text(engine: DllmEngine) -> bool:
+    return getattr(engine.model, "end_of_source", None) is not None
+
+
+def _choice(engine: DllmEngine, context: str, choice: str, complete: bool = False) -> Scored:
+    """``choice`` scored as a continuation of ``context``; for a text-to-text model as its answer to ``context``,
+    the source, ended with ``</s>`` when ``complete`` (#400)."""
+    if _text_to_text(engine):
+        answer = engine.tokenizer.encode(choice)
+        if complete:
+            answer = [*answer, engine.model.end_of_source]  # type: ignore[attr-defined]
+        return score(engine, engine.tokenizer.encode(context), answer)
     context, choice = _split_whitespace(context, choice)
     start = [_start_token(engine), *engine.tokenizer.encode(context)]
     return score(engine, start, engine.tokenizer.encode(choice))
@@ -193,6 +208,8 @@ def evaluate(
     from etalii_dllm import __version__
 
     kind = _kind(items)
+    if kind == "perplexity" and _text_to_text(engine):
+        raise EvaluationError("perplexity needs a decoder-only model; a text-to-text model scores answers to sources")
     context_length = getattr(getattr(engine.model, "config", None), "context_length", 0) or DEFAULT_MAX_LENGTH
     max_length = max_length or min(DEFAULT_MAX_LENGTH, context_length)
     if max_length < 2:
@@ -235,7 +252,7 @@ def evaluate(
         preferred, margins = 0, []
         for index, item in enumerate(items):
             prompt = _preference_prompt(engine, item, index + 1)
-            scores = [_choice(engine, prompt, item[key]) for key in ("chosen", "rejected")]
+            scores = [_choice(engine, prompt, item[key], complete=True) for key in ("chosen", "rejected")]
             chosen, rejected = (s.log_likelihood for s in scores)
             margins.append(chosen - rejected)
             preferred += chosen > rejected
@@ -286,6 +303,10 @@ def evaluate(
 def _preference_prompt(engine: DllmEngine, item: Mapping[str, Any], number: int) -> str:
     if isinstance(item.get("prompt"), str):
         return item["prompt"]
+    if _text_to_text(engine):  # the source, as dllm finetune --dpo builds it
+        from etalii_dllm.training.seq2seq_data import join_messages
+
+        return join_messages(item["messages"])
     if engine.chat_template is None:
         raise EvaluationError(f"item {number}: 'messages' prompts need a model with a chat template")
     return engine.chat_template.render(item["messages"], add_generation_prompt=True)

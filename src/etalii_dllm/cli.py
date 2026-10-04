@@ -233,7 +233,7 @@ def _finetune(args: argparse.Namespace) -> int:
             f" (float32: {tuner.base.float_nbytes / 2**20:.1f} MiB)"
         )
     unit = {"dpo": "pairs", "embedding": "examples", "classifier": "examples"}.get(objective, "windows")
-    unit = "examples" if base.config.is_text_to_text else unit
+    unit = "examples" if base.config.is_text_to_text and objective == "lm" else unit
     print(f"data:               {len(data)} {unit} of up to {data.sequence_length} tokens, {data.fingerprint[:16]}")
     total = tuner.run.steps
 

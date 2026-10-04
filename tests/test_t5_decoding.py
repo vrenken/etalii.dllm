@@ -170,8 +170,8 @@ def test_score_refusals_receipts_and_front_ends(flan, capsys, monkeypatch, tmp_p
         scoring.score_text(engine, TEXTS[2])
     with pytest.raises(ValueError, match="only text-to-text"):
         scoring.score_text(DllmEngine.create_default(), "hello", source="hi")
-    with pytest.raises(ValueError, match="without </s>"):
-        engine.model.answer_logits(source_of(engine, TEXTS[0]), [5, END])
+    with pytest.raises(ValueError, match="</s> only at its end"):
+        engine.model.answer_logits(source_of(engine, TEXTS[0]), [END, 5])
     with pytest.raises(ValueError, match="out of range"):
         engine.model.answer_logits(source_of(engine, TEXTS[0]), [10**6])
     assert engine.model.answer_logits(source_of(engine, TEXTS[0]), []).shape == (0, engine.model.vocabulary_size)

@@ -185,8 +185,10 @@ def test_finetune_refusals(t5, tmp_path):
     windows = TrainingData.from_documents([TEXTS[0]], engine.tokenizer.encode, SEQUENCE_LENGTH, 1)
     with pytest.raises(ValueError, match="source and target pairs"):
         FineTuner.from_model_file(model_file, windows, RunConfig(1, 1, SEQUENCE_LENGTH))
-    with pytest.raises(ValueError, match="language-model objective"):
+    with pytest.raises(ValueError, match="DPO run trains on preference pairs"):
         FineTuner.from_model_file(model_file, data, RunConfig(1, 1, SEQUENCE_LENGTH, objective="dpo"))
+    with pytest.raises(ValueError, match="or DPO objective"):
+        FineTuner.from_model_file(model_file, data, RunConfig(1, 1, SEQUENCE_LENGTH, objective="embedding"))
     from test_modelfile import CONFIG as DECODER  # a decoder cannot train on pairs
 
     with pytest.raises(ValueError, match="train text-to-text models"):
@@ -209,8 +211,8 @@ def test_finetune_command(flan, tmp_path, capsys):
     assert receipt["data"]["examples"] == 4
     assert cli(["replay", str(tmp_path / "receipt.json"), "--base", str(path)]) == 0
     capsys.readouterr()
-    assert cli([*command, "--dpo", "-o", str(tmp_path / "dpo.dllm")]) == 1
-    assert "language-model objective" in capsys.readouterr().err
+    assert cli([*command, "--dpo", "-o", str(tmp_path / "dpo.dllm")]) == 1  # source and target pairs are no DPO data
+    assert "'chosen' and 'rejected'" in capsys.readouterr().err
 
 
 # LoRA (#389)

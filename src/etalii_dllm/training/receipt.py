@@ -36,7 +36,7 @@ from etalii_dllm.modelfile import ModelFile, data_fingerprint
 from etalii_dllm.training.data import TrainingData, read_documents
 from etalii_dllm.training.encoder_data import ENCODER_OBJECTIVES, EncoderData, read_examples
 from etalii_dllm.training.preference import PreferenceData, read_pairs
-from etalii_dllm.training.seq2seq_data import TextToTextData
+from etalii_dllm.training.seq2seq_data import TextToTextData, join_messages
 from etalii_dllm.training.trainer import FineTuner, RunConfig, StepResult
 
 if TYPE_CHECKING:
@@ -53,14 +53,18 @@ def load_data(
     template, documents separated by its end-of-sequence token. For ``objective="dpo"``, the preference pairs of
     ``path`` (chat prompts rendered with the generation prompt, answers ended by the end-of-sequence token); for
     ``embedding`` and ``classifier``, an encoder's examples (:mod:`etalii_dllm.training.encoder_data`); for a
-    text-to-text model, its source and target pairs (:mod:`etalii_dllm.training.seq2seq_data`)."""
+    text-to-text model, its source and target pairs (:mod:`etalii_dllm.training.seq2seq_data`), or its preference
+    pairs with the prompt as the source."""
+    if base.config.is_text_to_text:
+        end = base.config.eos_token_ids[0] if base.config.eos_token_ids else 1
+        if objective == "dpo":  # the prompt is the source (#397)
+            records = read_pairs(path, join_messages)
+            return PreferenceData.from_text_to_text_records(records, engine.tokenizer.encode, sequence_length, end)
+        if objective != "lm":
+            raise ValueError("a text-to-text model trains with the language-model (on its targets) or DPO objective")
+        return TextToTextData.from_file(path, engine.tokenizer.encode, sequence_length, end)
     if objective in ENCODER_OBJECTIVES:
         return EncoderData.from_records(read_examples(path, objective), engine, objective, sequence_length)
-    if base.config.is_text_to_text:
-        if objective != "lm":
-            raise ValueError("a text-to-text model trains with the language-model objective (on its targets)")
-        end = base.config.eos_token_ids[0] if base.config.eos_token_ids else 1
-        return TextToTextData.from_file(path, engine.tokenizer.encode, sequence_length, end)
     render: Callable[[Any], str] | None = None
     prompt = objective == "dpo"
     if engine.chat_template is not None:

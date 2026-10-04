@@ -209,10 +209,13 @@ class TextToText:
 
     def answer_logits(self, source: Sequence[int], answer: Sequence[int]) -> np.ndarray:
         """The logits ``[len(answer), vocabulary]`` before each answer token: row ``i`` follows the source (ending
-        with ``</s>``) and ``answer[:i]``, with exactly the bits :meth:`forward` gives for that sequence (#393)."""
+        with ``</s>``) and ``answer[:i]``, with exactly the bits :meth:`forward` gives for that sequence (#393). Only
+        the answer's last token may be ``</s>``, which ends a complete answer (#400)."""
         source, answer = list(source), [int(token) for token in answer]
-        if not source or source[-1] != self.end_of_source or self.end_of_source in answer:
-            raise ValueError("a text-to-text model scores an answer without </s> after a source ending with </s>")
+        if not source or source[-1] != self.end_of_source or self.end_of_source in answer[:-1]:
+            raise ValueError(
+                "a text-to-text model scores an answer (</s> only at its end) after a source ending with </s>"
+            )
         if not answer:
             return np.zeros((0, self.vocabulary_size), dtype=np.float32)
         if any(not 0 <= token < self.vocabulary_size for token in answer):

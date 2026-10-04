@@ -488,3 +488,9 @@ T5_DECODING_FINGERPRINT = {
     "score": "16890c315dcd760fcd4f8d9814627b9342cca8a020b326ecebbb48c4b479fb61",
     "negative": "4648fd34a52abb1649fb9d16ab2bda6771782fdd8ab905adeaf52288ebba0ff2",
 }
+
+# DPO runs on the tiny T5 and Flan-T5 of tests/test_t5_preference.py (#399).
+T5_DPO_FINGERPRINT = {
+    "t5": "f8fda9913bd8b9e2e58ebf396a2de3d5530af18486840de27b1826a550d5b9b3",
+    "flan": "738df59708a2b41f877e8dbeaee709bb3c16aef1dcb79e940a0922761391c424",
+}

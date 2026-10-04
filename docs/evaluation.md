@@ -41,6 +41,11 @@ The scores are computed the way lm-evaluation-harness computes them:
 - A text longer than `--max-length` (default 1024, or the model's context when it is shorter) is scored in
   consecutive windows, each starting from the token before its first target.
 
+A T5 text-to-text model (Phase 67) reads its context or prompt as the source and scores each choice or answer as
+its answer to that source, with no start token and no moved spaces. Preference answers end with `</s>`, as
+[DPO on these models](training.md#preference-tuning-of-text-to-text-models) scores them. A `messages` prompt is the
+messages' contents joined by a blank line. Perplexity tasks need a decoder-only model and are refused.
+
 ## Why the numbers repeat
 
 - Logits come from the decoder's fixed-order kernels. A context and its continuation go through one prefill, which

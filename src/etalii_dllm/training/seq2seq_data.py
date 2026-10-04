@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -58,9 +59,25 @@ def _pair(record: object) -> tuple[str, str] | None:
     if isinstance(messages, list) and len(messages) >= 2 and all(isinstance(m, dict) for m in messages):
         *before, answer = messages
         if answer.get("role") == "assistant" and isinstance(answer.get("content"), str):
-            source = "\n\n".join(str(m.get("content") or "") for m in before if m.get("content"))
-            return source, answer["content"]
+            return join_messages(before), answer["content"]
     return None
+
+
+def join_messages(messages: Sequence[Mapping[str, Any]]) -> str:
+    """A conversation as a text-to-text model's source: the messages' contents joined by a blank line, as the engine
+    renders a chat for one."""
+    return "\n\n".join(str(m.get("content") or "") for m in messages if m.get("content"))
+
+
+def text_to_text_tokens(
+    encode: Callable[[str], list[int]], text: str, sequence_length: int, end: int
+) -> tuple[int, ...]:
+    """``text``'s tokens cut to ``sequence_length - 1`` and ended with ``</s>`` (a trailing ``</s>`` the tokenizer
+    adds itself is dropped first)."""
+    ids = list(encode(text))
+    if ids and ids[-1] == end:
+        ids = ids[:-1]
+    return (*ids[: sequence_length - 1], end)
 
 
 @dataclass(frozen=True)
@@ -80,15 +97,12 @@ class TextToTextData:
     ) -> TextToTextData:
         if sequence_length < 2:
             raise TrainingDataError("sequence_length must be at least 2 (a token and </s>)")
-
-        def tokens(text: str) -> tuple[int, ...]:
-            ids = list(encode(text))
-            if ids and ids[-1] == end:  # a tokenizer that adds </s> itself
-                ids = ids[:-1]
-            return (*ids[: sequence_length - 1], end)
-
         if not pairs:
             raise TrainingDataError("the data holds no examples")
+
+        def tokens(text: str) -> tuple[int, ...]:
+            return text_to_text_tokens(encode, text, sequence_length, end)
+
         return cls(tuple((tokens(source), tokens(target)) for source, target in pairs), sequence_length)
 
     @classmethod

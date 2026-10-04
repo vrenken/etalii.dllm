@@ -1115,6 +1115,19 @@ decoding and ensembles of T5 models work too (`--negative-prompt`, `--contrast-m
 Concurrent requests to the server now share decoder steps without changing a bit. Details:
 [specification](specification.md#7-the-t5-encoder-decoder).
 
+## 63. Preference tuning and evaluating T5 text-to-text models
+
+```bash
+dllm finetune flan-t5-small.dllm --dpo --data pairs.jsonl -o flan-dpo.dllm --steps 100 --receipt dpo.json
+dllm --model flan-dpo.dllm eval pairs.jsonl
+```
+
+The T5 and Flan-T5 models of section 60 can now be tuned on preference pairs, which is how you teach a model to
+prefer one kind of answer over another. Each line of `pairs.jsonl` holds a `prompt`, the `chosen` answer and the
+`rejected` one. The tuned model is the same on every machine, `dllm replay dpo.json` proves it, and `dllm eval`
+measures how often the model now prefers the chosen answer. Multiple-choice tasks work on these models too.
+Details: [preference tuning of text-to-text models](training.md#preference-tuning-of-text-to-text-models).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
@@ -1162,9 +1175,9 @@ Concurrent requests to the server now share decoder steps without changing a bit
   encoders and BERT models with the tanh GELU export to safetensors but not to GGUF (llama.cpp's layout cuts their
   position rows), and GGUF files of RoBERTa or XLM-RoBERTa written by llama.cpp do not import. Unigram tokenizers
   come from `tokenizer.json`; GGUF files with a Unigram vocabulary (T5) are refused.
-- T5 text-to-text models (sections 60 to 62) are checked against `transformers` only on tiny synthetic models, run
-  on the CPU without speculation or prompt caching, train only with teacher forcing on input and target
-  pairs (no DPO), export to safetensors but not to GGUF, and cannot be steered or inspected with the
+- T5 text-to-text models (sections 60 to 63) are checked against `transformers` only on tiny synthetic models, run
+  on the CPU without speculation or prompt caching, have no perplexity in `dllm eval`, export to safetensors but
+  not to GGUF, and cannot be steered or inspected with the
   interpretability commands yet. Their prompt cannot roll or be healed, `echo` on `/v1/completions` cannot score
   their source, and the chat endpoints join the messages' text into one source (T5 has no chat template).
 - Granite MoE's experts are stored fused, so a LoRA adapter on them cannot be exported in the PEFT format (the

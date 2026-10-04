@@ -315,7 +315,7 @@ dllm finetune flan-t5-small.dllm --data pairs.jsonl -o flan-tuned.dllm --steps 1
   text is cut to `--sequence-length - 1` tokens and ended with `</s>`. The receipt counts `"examples"`.
 - **The loss** is teacher forcing, as `transformers` computes it with `labels=target`: the decoder reads
   `[<pad>, *target[:-1]]` and the loss is the mean cross-entropy of every target token (`</s>` included) over the
-  step's examples. Only the language-model objective applies; `--dpo` is refused.
+  step's examples. `--dpo` trains on preference pairs instead (below).
 - **The backward pass** (`training/seq2seq_backprop.py`) runs the whole target at once. Its self-attention is
   `biased_attention` with the decoder's one-directional bucket bias and `-inf` for later keys, whose exponentials are
   exactly 0, so every row equals the served model's incremental step bit for bit. The gradients flow back through
@@ -334,6 +334,24 @@ dllm finetune flan-t5-small.dllm --data pairs.jsonl -o flan-tuned.dllm --steps 1
 `transformers`' autograd for T5 v1.0 (tied head, ReLU) and Flan-T5 (gated tanh GELU, own head), golden runs with
 bit-exact resumption, `dllm finetune` with receipts and `dllm replay`, and LoRA adapters whose names are
 `transformers`' own modules.
+
+
+### Preference tuning of text-to-text models
+
+`--dpo` works on T5 and Flan-T5 too (Phase 67), with the same pair file and options as above:
+
+```bash
+dllm finetune flan-t5-small.dllm --dpo --data pairs.jsonl --beta 0.1 -o flan-dpo.dllm --steps 100 --receipt dpo.json
+dllm --model flan-dpo.dllm eval pairs.jsonl      # preference accuracy, scoring answers given their prompt
+```
+
+The prompt is the source. A `messages` prompt is the messages' contents joined by a blank line, as for the
+examples above. The source and each answer are cut to `--sequence-length - 1` tokens and ended with `</s>`. An
+answer's log-probability is that of its tokens, `</s>` included, given the source. These are the decoder's
+teacher-forced logits, which equal the served model's scores bit for bit. The loss, the reference
+log-probabilities and the pair weights are the decoder-only DPO definitions. The gradients are checked against a
+DPO loss on `transformers`' `T5ForConditionalGeneration` through autograd. LoRA, quantised bases, checkpoints,
+receipts (counting `"pairs"`) and `dllm replay` all work as for any other run.
 
 ## What makes it reproducible
 
