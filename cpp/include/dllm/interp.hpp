@@ -1,4 +1,4 @@
-// Kernels for interpretability and model editing: attention probabilities, cosine similarities, column means and a
+// Kernels for interpretability and model editing: attention probabilities (plain and biased), cosine similarities, column means and a
 // Cholesky solve.
 //
 // Like nn.hpp, every output element has one accumulation in a fixed order (ascending index, double accumulator, one
@@ -72,6 +72,51 @@ inline void attention_weights(const float* q, const float* k, float* out, std::s
         const double inv = 1.0 / total;
         for (std::size_t j = 0; j < span.count; ++j) {
             row[span.first + j] = static_cast<float>(scores[j] * inv);
+        }
+    });
+}
+
+// The attention probabilities biased_attention() uses (DeBERTa, T5), written out instead of applied to the values.
+//   q [q_len, heads, head_dim]   k [kv_len, heads, head_dim]   bias [heads, q_len, kv_len]
+//   out [q_len, heads, kv_len]
+// Every key is visible. Each score is biased_attention()'s, (double dot over head_dim ascending + bias) * scale; the
+// maximum is subtracted, exp() is dllm::exp and the total is summed over keys ascending, as attention_finish() does.
+// Probability j is exp(s_j - max) * (1 / total) rounded once to float.
+inline void biased_attention_weights(const float* q, const float* k, const float* bias, float* out, std::size_t q_len,
+                                     std::size_t kv_len, std::size_t heads, std::size_t head_dim, double scale) {
+    if (kv_len == 0) {
+        return;
+    }
+    parallel_for(q_len * heads, [&](std::size_t task) {
+        const std::size_t t = task / heads;
+        const std::size_t h = task % heads;
+        const float* qh = q + (t * heads + h) * head_dim;
+        const float* bh = bias + (h * q_len + t) * kv_len;
+        float* row = out + (t * heads + h) * kv_len;
+        thread_local std::vector<double> scores;
+        scores.resize(kv_len);
+        for (std::size_t j = 0; j < kv_len; ++j) {
+            const float* kj = k + (j * heads + h) * head_dim;
+            double dotp = 0.0;
+            for (std::size_t i = 0; i < head_dim; ++i) {
+                dotp += static_cast<double>(qh[i]) * static_cast<double>(kj[i]);
+            }
+            scores[j] = (dotp + static_cast<double>(bh[j])) * scale;
+        }
+        double max = scores[0];
+        for (std::size_t j = 1; j < kv_len; ++j) {
+            if (scores[j] > max) {
+                max = scores[j];
+            }
+        }
+        double total = 0.0;
+        for (std::size_t j = 0; j < kv_len; ++j) {
+            scores[j] = dllm::exp(scores[j] - max);
+            total += scores[j];
+        }
+        const double inv = 1.0 / total;
+        for (std::size_t j = 0; j < kv_len; ++j) {
+            row[j] = static_cast<float>(scores[j] * inv);
         }
     });
 }

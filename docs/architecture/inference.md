@@ -224,6 +224,11 @@ The cache can be copied (`export` and `restore`), so beam search gives every hyp
 `answer_logits(source, answer)` gives the logits before every answer token, for scoring and `dllm eval`.
 Text-to-text models do not speculate or use the prompt cache.
 
+A steering vector is added to the decoder's residual stream after its layer, as in decoder-only models. A recorder
+passed to the encoder and to the decoder steps (`seq2seq.Recorder`) is shown every intermediate and only copies it;
+`interpret/text_to_text.py` uses one to trace the model with the bits of an untraced run, the attention
+probabilities from the `biased_attention_weights` kernel.
+
 ## Choosing a token
 
 ```mermaid

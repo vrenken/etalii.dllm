@@ -1,5 +1,6 @@
 """The interpretability subcommands of ``dllm``: ``lens``, ``attention``, ``experts``, ``neighbours``, ``steer``,
-``sae`` and ``edit``."""
+``sae`` and ``edit``. ``lens``, ``attention`` and ``steer`` also open up T5 text-to-text models (#403-#405): the
+prompt is the source, ``--answer`` the answer so far, and the decoder is what they read."""
 
 from __future__ import annotations
 
@@ -13,12 +14,18 @@ import numpy as np
 
 from etalii_dllm.chat import ChatMessage
 from etalii_dllm.engine import DllmEngine
+from etalii_dllm.generation import with_end_of_source
 from etalii_dllm.interpret.embeddings import SPACES, neighbours, token_text
 from etalii_dllm.interpret.lens import logit_lens, top_k
 from etalii_dllm.interpret.render import attention_html, lens_html, word_cloud_html, word_cloud_svg
+from etalii_dllm.interpret.text_to_text import trace_text_to_text
 from etalii_dllm.interpret.trace import trace
 from etalii_dllm.numerics import sum_squares
+from etalii_dllm.seq2seq import TextToText
 from etalii_dllm.transformer import Transformer
+
+TEXT_TO_TEXT_COMMANDS = ("lens", "attention", "steer")
+"""The subcommands that also read T5 text-to-text models."""
 
 COMMANDS = ("lens", "attention", "experts", "neighbours", "steer", "sae")
 
@@ -34,11 +41,17 @@ def add_commands(commands: Any) -> None:
         command.add_argument("--json", action="store_true", help="print the full result as JSON")
     for command in (lens, attention):
         command.add_argument("--html", metavar="FILE", help="also write a self-contained HTML view")
+        command.add_argument(
+            "--answer", default="", help="text-to-text models: the answer so far (the prompt is the source)"
+        )
     lens.add_argument("--top-k", type=int, default=5)
     lens.add_argument("--position", type=int, default=-1, help="position to print (default: the last)")
     attention.add_argument("--layer", type=int, help="1-based layer (default: all)")
     attention.add_argument("--head", type=int, help="0-based head (default: all)")
     attention.add_argument("--top-k", type=int, default=3, help="keys printed per query")
+    attention.add_argument(
+        "--cross", action="store_true", help="text-to-text models: cross-attention over the source tokens"
+    )
     experts.add_argument("--layer", type=int, help="1-based layer (default: every mixture-of-experts layer)")
 
     near = commands.add_parser("neighbours", help="nearest tokens in embedding space, e.g. 'king - man + woman'")
@@ -54,7 +67,9 @@ def add_commands(commands: Any) -> None:
     steer.add_argument("--negative", action="append", default=[], help="a prompt showing the opposite")
     steer.add_argument("--positive-file", help="more positive prompts, one per line")
     steer.add_argument("--negative-file", help="more negative prompts, one per line")
-    steer.add_argument("--layer", type=int, help="1-based layer whose output is steered (default: a third deep)")
+    steer.add_argument(
+        "--layer", type=int, help="1-based (decoder) layer whose output is steered (default: a third deep)"
+    )
     steer.add_argument("--strength", type=float, default=4.0, help="default multiplier stored in the file")
     steer.add_argument("-o", "--output", required=True, help="the steering vector file (JSON) to write")
 
@@ -107,6 +122,11 @@ def add_commands(commands: Any) -> None:
 
 def run(args: argparse.Namespace, engine: DllmEngine) -> int:
     model = engine.model
+    if isinstance(model, TextToText):
+        if args.command not in TEXT_TO_TEXT_COMMANDS:
+            print(f"dllm {args.command}: needs a decoder-only model, not a text-to-text one", file=sys.stderr)
+            return 1
+        return _text_to_text(args, engine, model)
     if not isinstance(model, Transformer):
         print(f"dllm {args.command}: needs an imported model (--model or $DLLM_MODEL)", file=sys.stderr)
         return 1
@@ -117,6 +137,10 @@ def run(args: argparse.Namespace, engine: DllmEngine) -> int:
             return _steer(args, engine, model)
         if args.command == "sae":
             return _sae(args, engine, model)
+        if getattr(args, "answer", ""):
+            raise ValueError("--answer is for text-to-text models")
+        if getattr(args, "cross", False):
+            raise ValueError("--cross is for text-to-text models")
         text = engine.render_chat([ChatMessage("user", args.prompt)]) if args.chat else args.prompt
         tokens = engine.tokenizer.encode(text)
         if not tokens:
@@ -125,6 +149,27 @@ def run(args: argparse.Namespace, engine: DllmEngine) -> int:
             return _lens(args, engine, model, tokens)
         if args.command == "experts":
             return _experts(args, engine, model, tokens)
+        return _attention(args, engine, model, tokens)
+    except ValueError as error:
+        print(f"dllm {args.command}: {error}", file=sys.stderr)
+        return 1
+
+
+def _text_to_text(args: argparse.Namespace, engine: DllmEngine, model: TextToText) -> int:
+    """``lens``, ``attention`` and ``steer`` on a T5 model: the prompt (or the chat template's rendering) is the
+    source, ``--answer`` the answer so far; ``lens`` and ``attention`` report the decoder's positions (its start
+    token, then the answer)."""
+    try:
+        if args.command == "steer":
+            return _steer(args, engine, model)
+        text = engine.render_chat([ChatMessage("user", args.prompt)]) if args.chat else args.prompt
+        source = with_end_of_source(model, engine.tokenizer.encode(text))
+        answer = engine.tokenizer.encode(args.answer)
+        if model.end_of_source in answer:
+            raise ValueError("--answer must not contain </s>, which ends the answer")
+        tokens = source + answer
+        if args.command == "lens":
+            return _lens(args, engine, model, tokens)
         return _attention(args, engine, model, tokens)
     except ValueError as error:
         print(f"dllm {args.command}: {error}", file=sys.stderr)
@@ -140,8 +185,9 @@ def _write(path: str, content: str) -> None:
     print(f"wrote: {path}", file=sys.stderr)
 
 
-def _lens(args: argparse.Namespace, engine: DllmEngine, model: Transformer, tokens: list[int]) -> int:
+def _lens(args: argparse.Namespace, engine: DllmEngine, model: Transformer | TextToText, tokens: list[int]) -> int:
     lens = logit_lens(model, tokens, args.top_k)
+    tokens = list(lens.tokens)  # a text-to-text model's decoder inputs
     if not -len(tokens) <= args.position < len(tokens):
         raise ValueError(f"--position must be between {-len(tokens)} and {len(tokens) - 1}")
     ids = sorted({p.token for layer in lens.predictions for row in layer for p in row})
@@ -169,25 +215,36 @@ def _lens(args: argparse.Namespace, engine: DllmEngine, model: Transformer, toke
     return 0
 
 
-def _attention(args: argparse.Namespace, engine: DllmEngine, model: Transformer, tokens: list[int]) -> int:
+def _attention(args: argparse.Namespace, engine: DllmEngine, model: Transformer | TextToText, tokens: list[int]) -> int:
     config = model.config
-    if args.layer is not None and not 1 <= args.layer <= config.layers:
-        raise ValueError(f"--layer must be between 1 and {config.layers}")
+    count = config.decoder_layers if isinstance(model, TextToText) else config.layers
+    if args.layer is not None and not 1 <= args.layer <= count:
+        raise ValueError(f"--layer must be between 1 and {count}")
     if args.head is not None and not 0 <= args.head < config.heads:
         raise ValueError(f"--head must be between 0 and {config.heads - 1}")
-    recorded = trace(model, tokens)
-    assert recorded.attention is not None
-    layers = [args.layer - 1] if args.layer is not None else list(range(config.layers))
+    keys = None  # the key positions' tokens when they differ from the queries' (cross-attention)
+    if isinstance(model, TextToText):
+        recorded_t5 = trace_text_to_text(model, tokens, logits=False)
+        maps = recorded_t5.cross_attention if args.cross else recorded_t5.attention
+        tokens = list(recorded_t5.tokens)
+        if args.cross:
+            keys = list(recorded_t5.source)
+    else:
+        maps = trace(model, tokens).attention
+    assert maps is not None
+    layers = [args.layer - 1] if args.layer is not None else list(range(count))
     heads = [args.head] if args.head is not None else list(range(config.heads))
     texts = _texts(engine, tokens)
+    key_texts = texts if keys is None else _texts(engine, keys)
     if args.json:
-        result = {
+        result: dict[str, Any] = {
             "model": model.id,
             "tokens": [{"id": t, "text": s} for t, s in zip(tokens, texts, strict=True)],
-            "attention": {
-                str(layer + 1): {str(head): recorded.attention[layer, head].tolist() for head in heads}
-                for layer in layers
-            },
+        }
+        if keys is not None:
+            result["source"] = [{"id": t, "text": s} for t, s in zip(keys, key_texts, strict=True)]
+        result["cross_attention" if keys is not None else "attention"] = {
+            str(layer + 1): {str(head): maps[layer, head].tolist() for head in heads} for layer in layers
         }
         print(json.dumps(result, ensure_ascii=False))
     else:
@@ -195,12 +252,15 @@ def _attention(args: argparse.Namespace, engine: DllmEngine, model: Transformer,
             for head in heads:
                 print(f"layer {layer + 1} head {head}:")
                 for query, text in enumerate(texts):
-                    weights = recorded.attention[layer, head, query]
-                    best = top_k(weights[: query + 1], min(args.top_k, query + 1))
-                    shown = "  ".join(f"{texts[key]!r} {weights[key]:.3f}" for key in best)
+                    visible = len(key_texts) if keys is not None else query + 1
+                    weights = maps[layer, head, query]
+                    best = top_k(weights[:visible], min(args.top_k, visible))
+                    shown = "  ".join(f"{key_texts[key]!r} {weights[key]:.3f}" for key in best)
                     print(f"  {text!r:>14} -> {shown}")
     if args.html:
-        _write(args.html, attention_html(recorded.attention, texts, layers, heads, f"Attention: {model.id}"))
+        kind = "Cross-attention" if keys is not None else "Attention"
+        page = attention_html(maps, texts, layers, heads, f"{kind}: {model.id}", keys=key_texts)
+        _write(args.html, page)
     return 0
 
 
@@ -273,19 +333,20 @@ def _prompts(inline: list[str], path: str | None) -> list[str]:
     return prompts
 
 
-def _steer(args: argparse.Namespace, engine: DllmEngine, model: Transformer) -> int:
-    from etalii_dllm.interpret.steering import build_steering_vector
+def _steer(args: argparse.Namespace, engine: DllmEngine, model: Transformer | TextToText) -> int:
+    from etalii_dllm.interpret.steering import build_steering_vector, steered_layers
 
     positive = _prompts(args.positive, args.positive_file)
     negative = _prompts(args.negative, args.negative_file)
     if not positive or not negative:
         raise ValueError("needs at least one --positive and one --negative prompt")
-    layer = args.layer if args.layer is not None else max(1, model.config.layers // 3)
+    layers = steered_layers(model)
+    layer = args.layer if args.layer is not None else max(1, layers // 3)
     vector = build_steering_vector(model, engine.tokenizer, positive, negative, layer, args.strength)
     vector.save(args.output)
     norm = float(np.sqrt(sum_squares(vector.vector)))
     print(f"wrote:    {args.output}")
-    print(f"layer:    {layer} of {model.config.layers}, norm {norm:.4f}, strength {args.strength}")
+    print(f"layer:    {layer} of {layers}, norm {norm:.4f}, strength {args.strength}")
     print(f"use with: dllm --model ... --steer {args.output} chat ...")
     return 0
 

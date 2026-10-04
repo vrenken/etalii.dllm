@@ -12,7 +12,7 @@ difference between an edited and an unedited model is exactly the edit.
 
 | Tool | Command | Python | Status |
 | --- | --- | --- | --- |
-| Activation tracing | | `etalii_dllm.interpret.trace` | ✅ |
+| Activation tracing | | `etalii_dllm.interpret.trace`, `trace_text_to_text` (T5) | ✅ |
 | Logit lens | `dllm lens` | `etalii_dllm.interpret.logit_lens` | ✅ |
 | Attention maps | `dllm attention` | `trace(...).attention` | ✅ |
 | Expert routing | `dllm experts` | `etalii_dllm.interpret.routing` | ✅ |
@@ -20,6 +20,9 @@ difference between an edited and an unedited model is exactly the edit.
 | Steering vectors | `dllm steer`, `--steer` | `etalii_dllm.interpret.steering` | ✅ |
 | Model editing (ROME) | `dllm edit` | `etalii_dllm.interpret.editing` | ✅ |
 | Sparse autoencoders | `dllm sae` | `etalii_dllm.interpret.sae` | ✅ |
+
+`dllm lens`, `dllm attention` and `dllm steer` also open up T5 and Flan-T5 text-to-text models; see
+[T5 text-to-text models](#t5-text-to-text-models).
 
 The commands take the usual `--model` option (or `DLLM_MODEL`) before the command name and run on the CPU
 (`dllm edit` takes the model file as its argument, like `dllm finetune`).
@@ -235,9 +238,47 @@ generator, so equal runs write byte-identical files (safetensors with the settin
 lists the features with the largest activations (or the ones given with `--feature`), how often each is active and
 the contexts that activate it most; `--json` prints the same as JSON.
 
+## T5 text-to-text models
+
+A T5 or Flan-T5 model (Phase 68) reads its source with an encoder and writes the answer with a decoder that looks at
+the source through cross-attention. `etalii_dllm.interpret.trace_text_to_text(model, source + answer)` traces both
+with a recorder that only copies, so the traced logits are the served ones bit for bit and every array matches
+transformers' `output_hidden_states`/`output_attentions` to float32 rounding. A `TextToTextTrace` holds:
+
+- the encoder: `encoder_residual` `[E + 1, s, hidden]`, `encoder_attention` `[E, heads, s, s]` and `encoder_hidden`
+  (the final-norm states that cross-attention reads);
+- the decoder, over its inputs (the start token `<pad>`, then the answer): `residual` `[L + 1, n, hidden]`, `middle`
+  (after self-attention), `cross_middle` (after cross-attention), `attention_output`, `cross_attention_output`,
+  `mlp_activation`, `mlp_output`, `attention` `[L, heads, n, n]`, `cross_attention` `[L, heads, n, s]`, `hidden` and
+  `logits` (row `i` is the next token's logits after `answer[:i]`).
+
+The attention probabilities come from the `biased_attention_weights` kernel, which computes the probabilities
+`biased_attention` applies in its exact order ([kernels](kernels.md#interpretability-kernels)).
+
+On the command line the prompt is the source (`</s>` is added) and `--answer` is the answer so far:
+
+```bash
+dllm --model flan-t5-small.dllm lens --prompt "translate English to German: The house is wonderful." \
+    --answer "Das Haus"
+dllm --model flan-t5-small.dllm attention --prompt "translate English to German: The house is wonderful." \
+    --answer "Das Haus ist" --cross --layer 8 --head 3 --html cross.html
+```
+
+`dllm lens` reads every decoder layer's residual stream through the decoder's final norm and LM head (the last layer
+is the model's real prediction). `dllm attention` shows the decoder's self-attention over its own inputs, or with
+`--cross` each answer position's attention over the source tokens; the HTML view labels the columns with the source.
+
+`dllm steer` builds a vector for the decoder: each `--positive`/`--negative` prompt is read by the decoder as the
+answer to an empty source (just `</s>`), averaged over its tokens (the start token, the same for every prompt, is
+left out). `--layer` counts decoder layers. `--steer FILE` adds it after that decoder layer while the model writes,
+which changes the output and the `system_fingerprint`, as for decoder-only models.
+
+`dllm experts`, `dllm neighbours`, `dllm edit` and `dllm sae` still need a decoder-only model.
+
 ## Reproducibility
 
-Everything above is covered by `tests/test_interpret.py`, `tests/test_editing.py` and `tests/test_sae.py`: a trace of each tiny model family equals a golden
+Everything above is covered by `tests/test_interpret.py`, `tests/test_editing.py`, `tests/test_sae.py` and
+`tests/test_t5_interpret.py`: a trace of each tiny model family equals a golden
 fingerprint on every SIMD path and thread count, the traced logits equal the untraced ones, the lens of the last
 layer equals the model's prediction, the HTML and SVG views are byte-identical across runs, steered models keep the KV cache and batch invariance, the
 residual and SAE gradients match finite differences, and repeated edits and SAE runs write byte-identical files. Rankings break ties

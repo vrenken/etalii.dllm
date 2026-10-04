@@ -6,6 +6,10 @@ are ``column_mean`` kernels (double sums in a fixed order), so the vector is the
 Applying it adds ``strength * vector`` (one float32 multiply, then a float32 add per element) to the residual stream
 after layer ``l`` at every position; a steered model is a different model, with its own ``system_fingerprint``.
 
+For a T5 text-to-text model the vector steers the decoder (#405): each prompt is read by the decoder as the answer to
+an empty source (just ``</s>``), and its mean is over the answer's positions (the start token, the same for every
+prompt, is left out), so the vector lives in the residual stream the decoder adds it to when it writes.
+
 Files are JSON with each float32 value written as its exact double, so saving and loading never changes a bit.
 """
 
@@ -19,10 +23,18 @@ from typing import Any
 
 import numpy as np
 
+from etalii_dllm.interpret.text_to_text import trace_text_to_text
 from etalii_dllm.interpret.trace import trace
 from etalii_dllm.numerics import column_mean
+from etalii_dllm.seq2seq import TextToText
 from etalii_dllm.tokenization import Tokenizer
 from etalii_dllm.transformer import Transformer
+
+
+def steered_layers(model: Transformer | TextToText) -> int:
+    """The layers a steering vector can follow: the decoder's (a T5 model's decoder layers)."""
+    return model.config.decoder_layers if isinstance(model, TextToText) else model.config.layers
+
 
 FORMAT = "dllm-steering"
 
@@ -74,17 +86,22 @@ class SteeringVector:
             origin=dict(payload.get("origin") or {}),
         )
 
-    def for_model(self, model: Transformer, strength: float | None = None) -> dict[int, np.ndarray]:
-        """The ``steering`` argument of :class:`Transformer`: ``{layer index: strength * vector}``."""
-        if not 1 <= self.layer <= model.config.layers:
-            raise ValueError(f"steering layer {self.layer} is not between 1 and {model.config.layers}")
+    def for_model(self, model: Transformer | TextToText, strength: float | None = None) -> dict[int, np.ndarray]:
+        """The ``steering`` argument of :class:`Transformer` or :class:`TextToText`: ``{layer index: strength *
+        vector}``."""
+        layers = steered_layers(model)
+        if not 1 <= self.layer <= layers:
+            raise ValueError(f"steering layer {self.layer} is not between 1 and {layers}")
         if self.vector.shape != (model.config.hidden_size,):
             raise ValueError(f"steering vector has {self.vector.shape[0]} values, the model {model.config.hidden_size}")
         return {self.layer - 1: self.scaled(strength)}
 
 
-def mean_activation(model: Transformer, tokenizer: Tokenizer, prompts: Sequence[str], layer: int) -> np.ndarray:
-    """The residual stream after ``layer`` (1-based), averaged over each prompt's positions and then over prompts."""
+def mean_activation(
+    model: Transformer | TextToText, tokenizer: Tokenizer, prompts: Sequence[str], layer: int
+) -> np.ndarray:
+    """The residual stream after ``layer`` (1-based), averaged over each prompt's positions and then over prompts
+    (a T5 model: the decoder's, over the prompt read as the answer to an empty source)."""
     if not prompts:
         raise ValueError("needs at least one prompt")
     means = []
@@ -92,12 +109,18 @@ def mean_activation(model: Transformer, tokenizer: Tokenizer, prompts: Sequence[
         tokens = tokenizer.encode(prompt)
         if not tokens:
             raise ValueError(f"prompt {prompt!r} has no tokens")
-        means.append(column_mean(trace(model, tokens, attention=False, logits=False).residual[layer]))
+        if isinstance(model, TextToText):
+            if model.end_of_source in tokens:
+                raise ValueError(f"prompt {prompt!r} contains </s>, which ends a text-to-text answer")
+            recorded = trace_text_to_text(model, [model.end_of_source, *tokens], attention=False, logits=False)
+            means.append(column_mean(recorded.residual[layer][1:]))
+        else:
+            means.append(column_mean(trace(model, tokens, attention=False, logits=False).residual[layer]))
     return column_mean(np.stack(means))
 
 
 def build_steering_vector(
-    model: Transformer,
+    model: Transformer | TextToText,
     tokenizer: Tokenizer,
     positive: Sequence[str],
     negative: Sequence[str],
@@ -105,8 +128,9 @@ def build_steering_vector(
     strength: float = 4.0,
 ) -> SteeringVector:
     """Mean activation after ``layer`` over ``positive`` minus that over ``negative`` (elementwise float32)."""
-    if not 1 <= layer <= model.config.layers:
-        raise ValueError(f"layer must be between 1 and {model.config.layers}")
+    layers = steered_layers(model)
+    if not 1 <= layer <= layers:
+        raise ValueError(f"layer must be between 1 and {layers}")
     if model.steering:
         raise ValueError("build steering vectors on an unsteered model")
     vector = mean_activation(model, tokenizer, positive, layer) - mean_activation(model, tokenizer, negative, layer)

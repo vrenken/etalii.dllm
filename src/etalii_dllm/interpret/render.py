@@ -68,21 +68,28 @@ def lens_html(lens: Lens, texts: Sequence[str], predicted: dict[int, str], title
 
 
 def attention_html(
-    attention: np.ndarray, texts: Sequence[str], layers: Sequence[int], heads: Sequence[int], title: str = "Attention"
+    attention: np.ndarray,
+    texts: Sequence[str],
+    layers: Sequence[int],
+    heads: Sequence[int],
+    title: str = "Attention",
+    keys: Sequence[str] | None = None,
 ) -> str:
     """Heatmaps of ``attention[layer, head, query, key]`` for the given layers and heads; rows are queries,
-    columns keys, labelled with the token ``texts``."""
+    columns keys, labelled with the token ``texts`` (the keys with ``keys`` when they differ, as in a text-to-text
+    model's cross-attention over its source)."""
     shown = [_shown(text) for text in texts]
+    shown_keys = shown if keys is None else [_shown(text) for text in keys]
     sections = []
     for layer in layers:
         for head in heads:
             weights = attention[layer, head]
-            header = "".join(f"<th>{text}</th>" for text in shown)
+            header = "".join(f"<th>{text}</th>" for text in shown_keys)
             rows = []
             for query, text in enumerate(shown):
                 cells = "".join(
                     f'<td title="{weights[query, key]:.4f}" style="{_shade(float(weights[query, key]))}"></td>'
-                    for key in range(len(shown))
+                    for key in range(len(shown_keys))
                 )
                 rows.append(f"<tr><th>{text}</th>{cells}</tr>")
             sections.append(

@@ -752,6 +752,27 @@ NB_MODULE(_kernels, module) {
         "The attention probabilities [q_len, heads, kv_len] of attention(), in its exact order.");
 
     m.def(
+        "biased_attention_weights",
+        [](FloatTensor q, FloatTensor k, FloatTensor bias, double scale) {
+            require(q.ndim() == 3 && k.ndim() == 3, "q and k must be [length, heads, dim]");
+            const std::size_t q_len = q.shape(0);
+            const std::size_t kv_len = k.shape(0);
+            const std::size_t heads = q.shape(1);
+            require(k.shape(1) == heads, "q and k must have the same heads");
+            require(q.shape(2) == k.shape(2), "q and k must have the same head_dim");
+            require(bias.ndim() == 3 && bias.shape(0) == heads && bias.shape(1) == q_len && bias.shape(2) == kv_len,
+                    "bias must be [heads, q_len, kv_len]");
+            float* out;
+            auto result = make_array({q_len, heads, kv_len}, &out);
+            nb::gil_scoped_release release;
+            dllm::biased_attention_weights(q.data(), k.data(), bias.data(), out, q_len, kv_len, heads, q.shape(2),
+                                           scale);
+            return result;
+        },
+        nb::arg("q"), nb::arg("k"), nb::arg("bias"), nb::arg("scale"),
+        "The attention probabilities [q_len, heads, kv_len] of biased_attention(), in its exact order.");
+
+    m.def(
         "cosine_similarity",
         [](FloatMatrix matrix, FloatVector query) {
             require(matrix.shape(1) == query.shape(0), "query length must equal the matrix width");
