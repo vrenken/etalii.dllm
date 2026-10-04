@@ -1,5 +1,5 @@
-"""Encoders back to the ecosystem (issues #355, #360): ``dllm export`` of BERT, RoBERTa, XLM-RoBERTa and ModernBERT
-models.
+"""Encoders back to the ecosystem (issues #355, #360, #370): ``dllm export`` of BERT, RoBERTa, XLM-RoBERTa,
+ModernBERT and DeBERTa models.
 
 - ``safetensors``: a Hugging Face model directory that transformers and sentence-transformers load: ``config.json``
   (``BertModel``, ``RobertaModel`` or ``XLMRobertaModel``, or their ``...ForSequenceClassification`` with the
@@ -8,7 +8,10 @@ models.
   prompts and ``max_seq_length``). The ``config.json`` is checked by importing it again, so a model that would not
   come back identical is refused. ModernBERT is written as ``ModernBertModel`` or
   ``ModernBertForSequenceClassification``: q, k and v stacked back into ``attn.Wqkv``, gate and up into ``mlp.Wi``,
-  the head as ``head.dense`` and ``head.norm``, and the special token ids read from the tokenizer.
+  the head as ``head.dense`` and ``head.norm``, and the special token ids read from the tokenizer. DeBERTa is
+  written as ``DebertaV2Model`` or ``DebertaV2ForSequenceClassification`` (the DeBERTa-v3 layout: relative attention
+  with shared position projections, ``p2c|c2p``, the relative table's LayerNorm, no absolute positions), the table
+  as ``encoder.rel_embeddings`` and ``encoder.LayerNorm``, the context pooler as ``pooler.dense``.
 - ``gguf``: one float32 GGUF v3 file in llama.cpp's ``bert`` layout (``token_embd``, ``token_types``,
   ``position_embd``, ``token_embd_norm``, ``blk.N.attn_q`` ... ``layer_output_norm``; a cross-encoder's pooler and
   classifier as ``cls`` and ``cls.output``, so the head computes ``cls.output(tanh(cls(h[0])))``), the pooling type,
@@ -16,7 +19,7 @@ models.
   ``▁``). ``tokenizer.huggingface.json`` keeps the exact tokenizer, and ``dllm.*`` keys the exact LayerNorm epsilon
   and the pooling or classifier settings, so importing the file gives back the same model; llama.cpp ignores them.
   BERT models with WordPiece vocabularies and the exact GELU only: RoBERTa's positions start past the padding token,
-  which llama.cpp's layout cuts from the position table. ModernBERT is not written to GGUF.
+  which llama.cpp's layout cuts from the position table. ModernBERT and DeBERTa are not written to GGUF.
 
 Both writers are deterministic (canonical JSON, a fixed tensor order, no clock values).
 """
@@ -86,8 +89,8 @@ def _tokenizer_model(model: ModelFile) -> str:
 
 
 def _model_type(model: ModelFile) -> str:
-    if model.config.family == "modernbert":
-        return "modernbert"
+    if model.config.family in ("modernbert", "deberta"):
+        return model.config.family
     if model.config.padding_index is None:
         return "bert"
     return "xlm-roberta" if _tokenizer_model(model) == "Unigram" else "roberta"
@@ -104,6 +107,8 @@ def hf_encoder_config(model: ModelFile) -> dict[str, Any]:
     model_type = _model_type(model)
     if model_type == "modernbert":
         return _modernbert_config(model)
+    if model_type == "deberta":
+        return _deberta_config(model)
     stem = {"bert": "Bert", "roberta": "Roberta", "xlm-roberta": "XLMRoberta"}[model_type]
     positions = config.context_length + (0 if config.padding_index is None else config.padding_index + 1)
     document: dict[str, Any] = {
@@ -124,11 +129,7 @@ def hf_encoder_config(model: ModelFile) -> dict[str, Any]:
     if config.padding_index is not None:
         document["pad_token_id"] = config.padding_index
     if config.classifier_labels:
-        labels = list((model.classifier or {}).get("labels") or [f"LABEL_{i}" for i in range(config.classifier_labels)])
-        document["id2label"] = {str(i): label for i, label in enumerate(labels)}
-        document["label2id"] = {label: i for i, label in enumerate(labels)}
-        activation = str((model.classifier or {}).get("activation", "none"))
-        document["sentence_transformers"] = {"activation_fn": _CROSS_ENCODER_ACTIVATIONS[activation]}
+        _labels(model, document)
     try:
         again = bert_config(document)
     except ModelImportError as error:
@@ -199,11 +200,7 @@ def _modernbert_config(model: ModelFile) -> dict[str, Any]:
     else:
         document["layer_types"] = types
     if config.classifier_labels:
-        labels = list((model.classifier or {}).get("labels") or [f"LABEL_{i}" for i in range(config.classifier_labels)])
-        document["id2label"] = {str(i): label for i, label in enumerate(labels)}
-        document["label2id"] = {label: i for i, label in enumerate(labels)}
-        activation_fn = str((model.classifier or {}).get("activation", "none"))
-        document["sentence_transformers"] = {"activation_fn": _CROSS_ENCODER_ACTIVATIONS[activation_fn]}
+        _labels(model, document)
     try:
         again = modernbert_config(document)
     except ModelImportError as error:
@@ -218,6 +215,88 @@ def _modernbert_config(model: ModelFile) -> dict[str, Any]:
     if again != config:
         raise _export_error("the model cannot be described exactly as a Hugging Face config.json")
     return document
+
+
+def _labels(model: ModelFile, document: dict[str, Any]) -> None:
+    config = model.config
+    labels = list((model.classifier or {}).get("labels") or [f"LABEL_{i}" for i in range(config.classifier_labels)])
+    document["id2label"] = {str(i): label for i, label in enumerate(labels)}
+    document["label2id"] = {label: i for i, label in enumerate(labels)}
+    activation_fn = str((model.classifier or {}).get("activation", "none"))
+    document["sentence_transformers"] = {"activation_fn": _CROSS_ENCODER_ACTIVATIONS[activation_fn]}
+
+
+def _deberta_config(model: ModelFile) -> dict[str, Any]:
+    from etalii_dllm.importing.importer import ModelImportError, deberta_config
+
+    config = model.config
+    activation = _ACTIVATIONS[config.activation]
+    document: dict[str, Any] = {
+        "architectures": [f"DebertaV2{'ForSequenceClassification' if config.classifier_labels else 'Model'}"],
+        "model_type": "deberta-v2",
+        "vocab_size": config.vocabulary_size,
+        "hidden_size": config.hidden_size,
+        "num_hidden_layers": config.layers,
+        "num_attention_heads": config.heads,
+        "intermediate_size": config.intermediate_size,
+        "max_position_embeddings": config.context_length,
+        "type_vocab_size": config.type_vocabulary_size,
+        "layer_norm_eps": config.rms_norm_eps,
+        "hidden_act": activation,
+        "pooler_hidden_act": activation,
+        "pooler_hidden_size": config.hidden_size,
+        "pooler_dropout": 0,
+        "relative_attention": True,
+        "position_biased_input": False,
+        "share_att_key": True,
+        "pos_att_type": ["p2c", "c2p"],
+        "norm_rel_ebd": "layer_norm",
+        "position_buckets": config.position_buckets or -1,
+        "max_relative_positions": config.max_relative_positions,
+        "pad_token_id": _special_id(model, "pad", 0),
+        "torch_dtype": "float32",
+    }
+    if config.classifier_labels:
+        _labels(model, document)
+    try:
+        again = deberta_config(document)
+    except ModelImportError as error:
+        raise _export_error(f"the model cannot be described as a Hugging Face config.json: {error}") from None
+    import dataclasses
+
+    if dataclasses.replace(again, classifier_labels=config.classifier_labels) != config:
+        raise _export_error("the model cannot be described exactly as a Hugging Face config.json")
+    return document
+
+
+_DEBERTA_EXPORT_NAMES = {
+    "token_embedding": "embeddings.word_embeddings",
+    "token_type_embedding": "embeddings.token_type_embeddings",
+    "embedding_norm": "embeddings.LayerNorm",
+    "relative_embedding": "encoder.rel_embeddings",
+    "relative_norm": "encoder.LayerNorm",
+}
+_DEBERTA_EXPORT_LAYER_NAMES = {
+    **_LAYER_NAMES,
+    "attention.q": "attention.self.query_proj",
+    "attention.k": "attention.self.key_proj",
+    "attention.v": "attention.self.value_proj",
+}
+
+
+def deberta_tensor_name(name: str, config: TransformerConfig) -> str:
+    """transformers' name of a DeBERTa tensor: bare for an embedder's ``DebertaV2Model``, under ``deberta.`` in a
+    ``DebertaV2ForSequenceClassification``, whose context pooler is ``pooler.dense`` and head ``classifier``."""
+    prefix = "deberta." if config.classifier_labels else ""
+    stem, _, parameter = name.rpartition(".")
+    if stem in ("pooler", "classifier"):
+        return f"pooler.dense.{parameter}" if stem == "pooler" else f"classifier.{parameter}"
+    if stem in _DEBERTA_EXPORT_NAMES:
+        return f"{prefix}{_DEBERTA_EXPORT_NAMES[stem]}.{parameter}"
+    match = _LAYER.match(name)
+    if match is None or match.group(2) not in _DEBERTA_EXPORT_LAYER_NAMES:
+        raise _export_error(f"unexpected encoder tensor {name!r}")
+    return f"{prefix}encoder.layer.{match.group(1)}.{_DEBERTA_EXPORT_LAYER_NAMES[match.group(2)]}.{parameter}"
 
 
 _MODERNBERT_EXPORT_NAMES = {
@@ -298,9 +377,6 @@ def export_encoder_safetensors(model: ModelFile, directory: str | Path) -> list[
     returns the files written, in name order."""
     from etalii_dllm.exporting import _tokenizer_files, write_safetensors
 
-    if model.config.family == "deberta":
-        raise _export_error("DeBERTa encoders cannot be exported yet")
-
     config = model.config
     model_type = _model_type(model)
     files: dict[str, bytes] = {"config.json": _json_bytes(hf_encoder_config(model))}
@@ -347,6 +423,8 @@ def export_encoder_safetensors(model: ModelFile, directory: str | Path) -> list[
         (directory / "2_Normalize").mkdir(exist_ok=True)
     if model_type == "modernbert":
         tensors = modernbert_tensors(model)
+    elif model_type == "deberta":
+        tensors = {deberta_tensor_name(name, config): model.tensors[name] for name in model.tensors}
     else:
         tensors = {hf_encoder_tensor_name(name, config, model_type): model.tensors[name] for name in model.tensors}
     write_safetensors(directory / "model.safetensors", tensors)
@@ -442,10 +520,9 @@ def _value(kind: int, value: Any) -> bytes:
 def export_encoder_gguf(model: ModelFile, path: str | Path) -> Path:
     """Writes the BERT encoder ``model`` as a float32 GGUF v3 file in llama.cpp's ``bert`` layout."""
     config = model.config
-    if config.family == "deberta":
-        raise _export_error("DeBERTa encoders cannot be exported yet")
-    if config.family == "modernbert":
-        raise _export_error("ModernBERT encoders cannot be written to GGUF here; export them to safetensors")
+    if config.family in ("modernbert", "deberta"):
+        family = "ModernBERT" if config.family == "modernbert" else "DeBERTa"
+        raise _export_error(f"{family} encoders cannot be written to GGUF here; export them to safetensors")
     if config.padding_index is not None:
         raise _export_error(
             "RoBERTa and XLM-RoBERTa encoders cannot be written to GGUF exactly (llama.cpp cuts the position rows "

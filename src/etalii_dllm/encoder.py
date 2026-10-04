@@ -228,7 +228,8 @@ class Encoder:
             head = gelu(self._linear(pooled, "pooler")).numpy()
             return self._linear(self._norm(head, "pooler_norm"), "classifier").reshape(-1)
         if self.config.family == "deberta":
-            return self._linear(gelu(self._linear(states[:1], "pooler")).numpy(), "classifier").reshape(-1)
+            pooled = gelu(self._linear(states[:1], "pooler"), approximate=self._approximate).numpy()
+            return self._linear(pooled, "classifier").reshape(-1)
         pooled = softcap(self._linear(states[:1], "pooler"), 1.0).numpy()
         return self._linear(pooled, "classifier").reshape(-1)
 
@@ -258,9 +259,13 @@ class Encoder:
                 bias[head] = np.take_along_axis(c2p, local, axis=1) + np.take_along_axis(p2c, local.T, axis=1).T
             mixed = biased_attention(q, k, v, bias, scale).numpy()
             h = self._norm(h + self._linear(mixed.reshape(count, -1), p + "attention.o"), p + "attention_norm")
-            activated = gelu(self._linear(h, p + "mlp.up")).numpy()
+            activated = gelu(self._linear(h, p + "mlp.up"), approximate=self._approximate).numpy()
             h = self._norm(h + self._linear(activated, p + "mlp.down"), p + "mlp_norm")
         return h
+
+    @property
+    def _approximate(self) -> str:
+        return "tanh" if self.config.activation == "gelu_tanh" else "none"
 
     def _modernbert_states(self, tokens: Sequence[int]) -> FloatArray:
         config = self.config

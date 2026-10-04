@@ -1035,6 +1035,19 @@ or a cross-encoder. Its attention looks at how far apart two words are rather th
 computes those distances and the extra attention terms exactly, so reranking with it gives the same scores on every
 machine. Details: [DeBERTa encoders](retrieval.md#deberta-encoders).
 
+## 57. Fine-tuning and exporting DeBERTa
+
+```bash
+dllm finetune nli.dllm --data labelled-pairs.jsonl --steps 100 --lora-rank 8 -o nli-tuned.dllm --adapter-output nli-adapter
+dllm export nli-tuned.dllm --format safetensors -o nli-tuned-hf
+```
+
+DeBERTa models now train like the other encoders of section 54: `dllm finetune` teaches an embedder with pairs of
+texts or a cross-encoder with labelled pairs, with or without a LoRA adapter, and `dllm export` writes the result back
+as a Hugging Face model that `transformers` and sentence-transformers load. The gradients through DeBERTa's
+distance-aware attention are computed exactly, so the same data gives the same tuned model on every machine.
+Details: [fine-tuning encoders](training.md#encoders) and [exporting encoders](model-building.md#encoders).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
@@ -1072,11 +1085,11 @@ machine. Details: [DeBERTa encoders](retrieval.md#deberta-encoders).
   answers forms), and image, audio or binary MCP content is refused.
 - Models with dynamic NTK RoPE scaling or other architectures (including DeepSeek's mixtures of experts with several
   shared experts and multi-head latent attention, and encoders other than BERT, RoBERTa, XLM-RoBERTa and ModernBERT,
-  such as the original DeBERTa) are refused at import. Encoders (sections 51 to 56) run on the CPU. ModernBERT (section 55) is
+  such as the original DeBERTa) are refused at import. Encoders (sections 51 to 57) run on the CPU. ModernBERT (section 55) is
   checked against `transformers` only on tiny synthetic models, exports to safetensors but not to GGUF (llama.cpp
   has no ModernBERT layout), and its fine-tuning does not freeze the padding row. DeBERTa (section 56) is checked
-  only on tiny synthetic models too, imports only DeBERTa-v3's layout from a `tokenizer.json`, and does not
-  fine-tune, take LoRA adapters or export yet. RoBERTa and XLM-RoBERTa
+  only on tiny synthetic models too, imports only DeBERTa-v3's layout from a `tokenizer.json`, and exports to
+  safetensors but not to GGUF (llama.cpp has no DeBERTa layout). RoBERTa and XLM-RoBERTa
   encoders and BERT models with the tanh GELU export to safetensors but not to GGUF (llama.cpp's layout cuts their
   position rows), and GGUF files of RoBERTa or XLM-RoBERTa written by llama.cpp do not import. Unigram tokenizers
   come from `tokenizer.json`; GGUF files with a Unigram vocabulary (T5) are refused.

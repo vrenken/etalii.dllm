@@ -91,8 +91,9 @@ with `AutoTokenizer.from_pretrained(dir).save_pretrained(dir)`).
 Only DeBERTa-v3's layout imports (relative attention with shared position projections, both position terms, the
 relative LayerNorm, no absolute positions); the convolution layer of some large v2 checkpoints is refused. DeBERTa is
 checked against `transformers` on tiny synthetic models with sequences longer than the buckets' exact range
-(`tests/test_deberta.py`), not yet on the real checkpoints in CI. It does not fine-tune, take LoRA adapters or export
-yet.
+(`tests/test_deberta.py`), not yet on the real checkpoints in CI. Since Phase 61 it fine-tunes (with or without LoRA,
+[fine-tuning encoders](training.md#encoders)) and exports to safetensors
+([exporting encoders](model-building.md#encoders)).
 
 all-MiniLM-L6-v2, bge-small-en-v1.5, all-distilroberta-v1, paraphrase-multilingual-MiniLM-L12-v2 and
 [Qwen3-Embedding-0.6B](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B) (Apache 2.0) are checked against

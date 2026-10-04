@@ -1522,7 +1522,7 @@ class ReferenceEncoder:
                         bias[head, i, j] = c2p[i, rows[i, j]] + p2c[j, rows[i, j]]
             attended = biased_attention(q, k, v, bias, scale)
             h = norm(h + project(attended.reshape(count, -1), p + "attention.o"), p + "attention_norm")
-            activated = gelu(project(h, p + "mlp.up"))
+            activated = gelu(project(h, p + "mlp.up"), "tanh" if config.activation == "gelu_tanh" else "none")
             h = norm(h + project(activated, p + "mlp.down"), p + "mlp_norm")
         return h
 
@@ -1578,8 +1578,9 @@ class ReferenceEncoder:
             return linear(normed, w["classifier.weight"], w["classifier.bias"]).reshape(-1)
         first = self.hidden_states(tokens, types)[:1]
         if self.config.family == "deberta":  # the context pooler: gelu, not tanh
-            return linear(gelu(linear(first, w["pooler.weight"], w["pooler.bias"])), w["classifier.weight"],
-                          w["classifier.bias"]).reshape(-1)  # fmt: skip
+            approximate = "tanh" if self.config.activation == "gelu_tanh" else "none"
+            pooled = gelu(linear(first, w["pooler.weight"], w["pooler.bias"]), approximate)
+            return linear(pooled, w["classifier.weight"], w["classifier.bias"]).reshape(-1)
         pooled = _round(tanh(linear(first, w["pooler.weight"], w["pooler.bias"])))
         return linear(pooled, w["classifier.weight"], w["classifier.bias"]).reshape(-1)
 

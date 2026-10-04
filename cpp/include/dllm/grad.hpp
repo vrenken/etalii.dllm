@@ -300,6 +300,94 @@ inline void attention_backward(const float* q, const float* k, const float* v, c
     }
 }
 
+// Gradients of biased_attention() (nn.hpp): (dq, dk, dv, dbias) with the same shapes. For every (query t, head h),
+// in t-ascending then h-ascending order, the probabilities p are recomputed exactly as the forward kernel does, then
+//   dp_j = sum_i dout_i v[j, i]           (i ascending)
+//   D    = sum_j p_j dp_j                 (j ascending)
+//   g_j  = p_j (dp_j - D) scale           (dbias[h, t, j] = g_j rounded once)
+//   dq_i = sum_j g_j k[j, i]              (j ascending)
+//   dk[j] += g_j q,  dv[j] += p_j dout    (double accumulators, visited in (t, h) order)
+inline void biased_attention_backward(const float* q, const float* k, const float* v, const float* bias,
+                                      const float* dout, float* dq, float* dk, float* dv, float* dbias,
+                                      std::size_t q_len, std::size_t kv_len, std::size_t heads, std::size_t head_dim,
+                                      std::size_t value_dim, double scale) {
+    std::vector<double> probs(kv_len);
+    std::vector<double> dprobs(kv_len);
+    std::vector<double> dq_acc(head_dim);
+    std::vector<double> dk_acc(kv_len * heads * head_dim, 0.0);
+    std::vector<double> dv_acc(kv_len * heads * value_dim, 0.0);
+    for (std::size_t t = 0; t < q_len; ++t) {
+        for (std::size_t h = 0; h < heads; ++h) {
+            const float* qh = q + (t * heads + h) * head_dim;
+            const float* bh = bias + (h * q_len + t) * kv_len;
+            const float* doh = dout + (t * heads + h) * value_dim;
+            float* dqh = dq + (t * heads + h) * head_dim;
+            float* dbh = dbias + (h * q_len + t) * kv_len;
+            if (kv_len == 0) {
+                for (std::size_t i = 0; i < head_dim; ++i) {
+                    dqh[i] = 0.0f;
+                }
+                continue;
+            }
+            double max = 0.0;
+            for (std::size_t j = 0; j < kv_len; ++j) {
+                const float* kj = k + (j * heads + h) * head_dim;
+                double dotp = 0.0;
+                for (std::size_t i = 0; i < head_dim; ++i) {
+                    dotp += static_cast<double>(qh[i]) * static_cast<double>(kj[i]);
+                }
+                probs[j] = (dotp + static_cast<double>(bh[j])) * scale;
+                if (j == 0 || probs[j] > max) {
+                    max = probs[j];
+                }
+            }
+            double total = 0.0;
+            for (std::size_t j = 0; j < kv_len; ++j) {
+                probs[j] = dllm::exp(probs[j] - max);
+                total += probs[j];
+            }
+            const double inv = 1.0 / total;
+            double weighted = 0.0;
+            for (std::size_t j = 0; j < kv_len; ++j) {
+                probs[j] *= inv;
+                const float* vj = v + (j * heads + h) * value_dim;
+                double dotp = 0.0;
+                for (std::size_t i = 0; i < value_dim; ++i) {
+                    dotp += static_cast<double>(doh[i]) * static_cast<double>(vj[i]);
+                }
+                dprobs[j] = dotp;
+                weighted += probs[j] * dotp;
+            }
+            for (std::size_t i = 0; i < head_dim; ++i) {
+                dq_acc[i] = 0.0;
+            }
+            for (std::size_t j = 0; j < kv_len; ++j) {
+                const double ds = probs[j] * (dprobs[j] - weighted) * scale;
+                dbh[j] = static_cast<float>(ds);
+                const float* kj = k + (j * heads + h) * head_dim;
+                double* dkj = dk_acc.data() + (j * heads + h) * head_dim;
+                double* dvj = dv_acc.data() + (j * heads + h) * value_dim;
+                for (std::size_t i = 0; i < head_dim; ++i) {
+                    dq_acc[i] += ds * static_cast<double>(kj[i]);
+                    dkj[i] += ds * static_cast<double>(qh[i]);
+                }
+                for (std::size_t i = 0; i < value_dim; ++i) {
+                    dvj[i] += probs[j] * static_cast<double>(doh[i]);
+                }
+            }
+            for (std::size_t i = 0; i < head_dim; ++i) {
+                dqh[i] = static_cast<float>(dq_acc[i]);
+            }
+        }
+    }
+    for (std::size_t i = 0; i < dk_acc.size(); ++i) {
+        dk[i] = static_cast<float>(dk_acc[i]);
+    }
+    for (std::size_t i = 0; i < dv_acc.size(); ++i) {
+        dv[i] = static_cast<float>(dv_acc[i]);
+    }
+}
+
 // Softmax cross-entropy of logits [rows, vocab] against targets (a negative target ignores that row). Returns the
 // summed loss sum_r (logsumexp(l_r) - l_r[target_r]) over rows ascending, in double, and writes
 // dlogits = (softmax(l_r) - onehot(target_r)) * scale (zero for ignored rows). logsumexp = max + log(sum_j exp(l_j -

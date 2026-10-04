@@ -16,8 +16,10 @@ adapters trained with PEFT import here. Encoders (BERT, RoBERTa, XLM-RoBERTa) ad
 MLP (``q k v o up down``; there is no ``gate``) under transformers' names, e.g.
 ``base_model.model.encoder.layer.0.attention.self.query.lora_A.weight`` (an embedder's ``BertModel``) or
 ``base_model.model.bert.encoder.layer.0.output.dense.lora_B.weight`` (a cross-encoder's
-``BertForSequenceClassification``; ``roberta.`` for RoBERTa and XLM-RoBERTa). The pooler and classifier stay
-frozen.
+``BertForSequenceClassification``; ``roberta.`` for RoBERTa and XLM-RoBERTa). DeBERTa's projections are
+``attention.self.query_proj``, ``key_proj`` and ``value_proj`` (under ``deberta.`` in a cross-encoder); its query and
+key projections also project the relative position table, and the merged weight serves both, as PEFT's adapted
+module does. The pooler and classifier stay frozen.
 
 ModernBERT fuses q, k and v into one module (``attn.Wqkv``) and gate and up into another (``mlp.Wi``), and a PEFT
 adapter on a fused module has one ``A`` for all of its parts and one ``B`` with their rows stacked. So here the parts
@@ -84,6 +86,14 @@ ENCODER_MODULES = {
     "down": "output.dense",
 }
 _BY_ENCODER_MODULE = {module: target for target, module in ENCODER_MODULES.items()}
+# DeBERTa-v2/v3: the same modules, its attention projections named query_proj, key_proj and value_proj.
+DEBERTA_MODULES = {
+    **ENCODER_MODULES,
+    "q": "attention.self.query_proj",
+    "k": "attention.self.key_proj",
+    "v": "attention.self.value_proj",
+}
+_BY_DEBERTA_MODULE = {module: target for target, module in DEBERTA_MODULES.items()}
 # ModernBERT: its modules and the parts of the fused ones, in row order (the first part keeps the shared A).
 MODERNBERT_MODULES = {"attn.Wqkv": ("q", "k", "v"), "attn.Wo": ("o",), "mlp.Wi": ("gate", "up"), "mlp.Wo": ("down",)}
 _MODERNBERT_MODULE_OF = {part: module for module, parts in MODERNBERT_MODULES.items() for part in parts}
@@ -91,7 +101,7 @@ _MODERNBERT_PEFT_KEY = re.compile(
     r"^(?:base_model\.model\.)?(model\.)?layers\.(\d+)\.(attn\.Wqkv|attn\.Wo|mlp\.Wi|mlp\.Wo)\.lora_([AB])\.weight$"
 )
 _ENCODER_PEFT_KEY = re.compile(
-    r"^(?:base_model\.model\.)?((?:bert|roberta)\.)?encoder\.layer\.(\d+)\.(\w+\.\w+(?:\.\w+)?)\.lora_([AB])\.weight$"
+    r"^(?:base_model\.model\.)?((?:bert|roberta|deberta)\.)?encoder\.layer\.(\d+)\.(\w+\.\w+(?:\.\w+)?)\.lora_([AB])\.weight$"
 )
 _PEFT_KEY = re.compile(
     r"^(?:base_model\.model\.)?model\.layers\.(\d+)\.(self_attn|mlp|block_sparse_moe)\."
@@ -160,8 +170,6 @@ def target_weights(config: TransformerConfig, lora: LoraConfig) -> list[str]:
     """The adapted weight names, in tensor order. In a mixture-of-experts layer ``gate``, ``up`` and ``down`` adapt
     every expert's projection (``layers.N.mlp.experts.E.gate.weight``) and the shared expert's
     (``layers.N.mlp.shared.gate.weight``); the router and the shared expert's gate are never adapted."""
-    if config.family == "deberta":
-        raise AdapterError("LoRA adapters for DeBERTa encoders are not supported yet (fine-tuning DeBERTa is not)")
     if config.family == "modernbert":
         targets = _modernbert_targets(lora)
         return tensor_order([f"layers.{i}.{_WEIGHT_NAMES[t]}" for i in range(config.layers) for t in targets])
@@ -346,7 +354,8 @@ def peft_key(name: str, config: TransformerConfig | None = None) -> str:
         return f"base_model.model.{prefix}layers.{layer}.{_MODERNBERT_MODULE_OF[target]}.{suffix}"
     if config is not None and config.is_encoder:
         target = next(t for t, w in _WEIGHT_NAMES.items() if w == weight)
-        return f"base_model.model.{_encoder_prefix(config)}encoder.layer.{layer}.{ENCODER_MODULES[target]}.{suffix}"
+        module = _encoder_modules(config)[target]
+        return f"base_model.model.{_encoder_prefix(config)}encoder.layer.{layer}.{module}.{suffix}"
     if weight.startswith(("mlp.experts.", "mlp.shared.")) and config is not None and config.family == "granitemoe":
         raise AdapterError("Granite MoE's experts are fused, so PEFT cannot adapt one; export the merged model")
     if weight.startswith("mlp.shared."):
@@ -364,11 +373,17 @@ def peft_key(name: str, config: TransformerConfig | None = None) -> str:
 
 
 def _encoder_prefix(config: TransformerConfig) -> str:
-    """Where transformers keeps an encoder's layers: at the top of an embedder's bare model, under ``bert.`` or
-    ``roberta.`` in a sequence-classification model."""
+    """Where transformers keeps an encoder's layers: at the top of an embedder's bare model, under ``bert.``,
+    ``roberta.`` or ``deberta.`` in a sequence-classification model."""
     if not config.classifier_labels:
         return ""
+    if config.family == "deberta":
+        return "deberta."
     return "roberta." if config.padding_index is not None else "bert."
+
+
+def _encoder_modules(config: TransformerConfig) -> dict[str, str]:
+    return DEBERTA_MODULES if config.family == "deberta" else ENCODER_MODULES
 
 
 def target_modules(config: TransformerConfig | None, lora: LoraConfig) -> list[str] | str:
@@ -378,7 +393,8 @@ def target_modules(config: TransformerConfig | None, lora: LoraConfig) -> list[s
         modules = [m for m, parts in MODERNBERT_MODULES.items() if parts[0] in _modernbert_targets(lora)]
         return rf".*layers\.\d+\.(?:{'|'.join(m.replace('.', chr(92) + '.') for m in modules)})"
     if config is not None and config.is_encoder:
-        names = "|".join(ENCODER_MODULES[t].replace(".", r"\.") for t in lora.targets if t in ENCODER_MODULES)
+        modules = _encoder_modules(config)
+        names = "|".join(modules[t].replace(".", r"\.") for t in lora.targets if t in modules)
         return rf".*encoder\.layer\.\d+\.(?:{names})"
     modules = set()
     for target in lora.targets:
@@ -473,7 +489,8 @@ def _adapter_name(key: str, config: TransformerConfig, directory: Path) -> tuple
         return f"layers.{int(modern.group(2))}.{_WEIGHT_NAMES[first]}.lora_{modern.group(4).lower()}", first
     if config.is_encoder:
         found = _ENCODER_PEFT_KEY.match(key)
-        target = _BY_ENCODER_MODULE.get(found.group(3)) if found else None
+        by_module = _BY_DEBERTA_MODULE if config.family == "deberta" else _BY_ENCODER_MODULE
+        target = by_module.get(found.group(3)) if found else None
         if found is None or target is None:
             raise AdapterError(f"{directory}: unsupported adapter tensor {key!r}")
         if not 0 <= int(found.group(2)) < config.layers:

@@ -131,11 +131,12 @@ language-model runs omit them and keep their old bytes.
 
 ## Encoders
 
-`RunConfig.objective = "embedding"` or `"classifier"` trains a BERT, RoBERTa, XLM-RoBERTa or ModernBERT encoder on
+`RunConfig.objective = "embedding"` or `"classifier"` trains a BERT, RoBERTa, XLM-RoBERTa, ModernBERT or DeBERTa encoder on
 `EncoderData` (`training/encoder_data.py`): anchor/positive(/negative) texts, or labelled texts and pairs, tokenized
 with the model's own recipe. `EncoderGradients` (`training/encoder_backprop.py`) runs the encoder's forward pass
 kernel for kernel and its backward pass with `layer_norm_backward`, `gelu_backward` and the bidirectional
-`attention_backward`.
+`attention_backward` (DeBERTa: `biased_attention_backward`, whose bias gradient `embedding_backward` scatters back to
+the position terms, the shared query and key projections and the relative table).
 
 ```mermaid
 flowchart LR

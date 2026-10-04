@@ -9,8 +9,8 @@ This is roadmap Phase 3, with LoRA added in Phase 8, every dense model family in
 Phase 43. It trains either every parameter of the decoder or [LoRA adapters](#lora-adapters) on its linear layers, for
 every architecture the engine runs: Llama, Mistral, Qwen2, Qwen3, OLMo 2, Granite, Gemma 2, Gemma 3, Phi-3/Phi-4-mini
 (with LongRoPE) and the [mixture-of-experts](#mixtures-of-experts) models Mixtral, OLMoE, Qwen3-MoE, Qwen2-MoE and
-Granite MoE. Since Phase 58 it also fine-tunes [encoders](#encoders): BERT, RoBERTa and XLM-RoBERTa embedders and
-cross-encoders. There is no pre-training from scratch (weights come from
+Granite MoE. Since Phase 58 it also fine-tunes [encoders](#encoders): BERT, RoBERTa, XLM-RoBERTa, ModernBERT and
+DeBERTa embedders and cross-encoders. There is no pre-training from scratch (weights come from
 [importing open models](research/model-import.md)).
 
 ## Usage
@@ -205,8 +205,8 @@ dllm finetune olmoe.dllm --data my-data.jsonl --lora-rank 8 -o olmoe-lora.dllm -
 
 ## Encoders
 
-Embedders (all-MiniLM, bge, all-distilroberta, multilingual MiniLM, ModernBERT) and cross-encoders (ms-marco-MiniLM,
-mmarco, gte-reranker-modernbert) fine-tune with the same command, the same options, checkpoints, receipts and LoRA. The objective follows the model:
+Embedders (all-MiniLM, bge, all-distilroberta, multilingual MiniLM, ModernBERT, DeBERTa) and cross-encoders
+(ms-marco-MiniLM, mmarco, gte-reranker-modernbert, mxbai-rerank, nli-deberta-v3) fine-tune with the same command, the same options, checkpoints, receipts and LoRA. The objective follows the model:
 
 ```bash
 # an embedder: anchors and the texts that belong with them (and optionally a hard negative)
@@ -257,14 +257,26 @@ dllm finetune ms-marco.dllm --data labels.jsonl -o ms-marco-tuned.dllm --steps 1
   `dllm embed` as before; the receipt counts `"examples"`. [`dllm export`](model-building.md#encoders) writes it back
   to Hugging Face and sentence-transformers, or to GGUF.
 
-DeBERTa encoders (Phase 60) are not fine-tuned yet: their disentangled attention has no backward pass here, so
-`dllm finetune` and LoRA refuse them with an error.
+DeBERTa encoders (Phase 61) fine-tune with both objectives. Their backward pass is BERT's with
+`biased_attention_backward` in place of `attention_backward`: besides `dq`, `dk` and `dv` it returns the gradient of
+the score bias, `p_j (dp_j - D) * scale` rounded once to float32 (the same value `dq` and `dk` are built from).
+Each head's bias is a gather of two products, `c2p[i, d(i, j)] = q_i . pk[d(i, j)]` and `p2c[j, d(i, j)] = k_j .
+pq[d(i, j)]`, so its gradient scatters back with `embedding_backward` (every pair's value summed into its row in
+(i, j) order, in double) and `linear_backward` takes it on to the queries and keys (added after the attention's own
+gradients) and to `pq` and `pk`. Those are the layer's own query and key projections of the relative table, so their
+weight and bias gradients are added to the content path's, and the table rows' gradients from every layer go through
+`layer_norm_backward` into `relative_norm` and `relative_embedding` (rows no pair reads get zero). The cross-encoder
+head is the context pooler, `classifier(gelu(pooler(h[0])))`. LoRA adapts the same modules as for BERT under
+DeBERTa's names (`attention.self.query_proj`, `key_proj`, `value_proj`, `attention.output.dense`,
+`intermediate.dense`, `output.dense`; `deberta.` in front for a cross-encoder); the merged query and key weights also
+project the relative table, exactly as PEFT's adapted modules do.
 
 `tests/test_encoder_training.py` checks the new kernels and the encoder's gradients against `transformers`' autograd
 and finite differences (BERT and XLM-RoBERTa with padding inside the sequence), both losses and their gradients
 against the `torch` formulas sentence-transformers uses, bit-exact resumption, receipts, golden hashes of a short run
 of each objective, and LoRA adapters whose names are `transformers`' own modules. `tests/test_modernbert.py` does the
-same for ModernBERT, its fused adapters included.
+same for ModernBERT, its fused adapters included, and `tests/test_deberta.py` for DeBERTa (the bias gradient against
+finite differences too).
 
 ## What makes it reproducible
 

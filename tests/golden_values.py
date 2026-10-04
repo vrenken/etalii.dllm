@@ -445,3 +445,9 @@ MODERNBERT_FINETUNE_FINGERPRINT = {
 # sequence longer than the relative buckets' exact range, and a three-label cross-encoder's logits of a fixed pair.
 DEBERTA_EMBEDDING_FINGERPRINT = "72feef12614746d41acda64555dcb51d070f163fa57522e760bd39727afb9919"
 DEBERTA_CLASSIFIER_FINGERPRINT = "7796b7673ed9af352de0cb306195c1b45a918393568b3f0a4edab2ef51cc7ee2"
+# Phase 61 (#368): three AdamW steps of `dllm finetune` on the tiny DeBERTa embedder (embedding objective) and
+# cross-encoder (classifier objective), from tests/test_deberta.py, whose tokenizer is written out (frozen_pieces).
+DEBERTA_FINETUNE_FINGERPRINT = {
+    "embedding": "151fd4e6b63cee97e2562377962ce28a5b463edf0c70267cf0581bd63c2d57b4",
+    "classifier": "3b44f10fa13c382002495c4db604e48f2ca4b7020dea8d50384ec664a691ddde",
+}
