@@ -2,11 +2,11 @@
 
 ``write(directory)`` writes fixed inputs and this build's exact outputs for every kernel of the specification
 (``docs/specification.md``): the transcendentals, the linear layers (float32, Q8_0, Q4_0) and quantisation, RMSNorm,
-the activations, softmax, RoPE, attention, LayerNorm, the random number generator, the sampler, small decoders and a
-BERT encoder. Every
-array is a raw little-endian file; ``manifest.json`` (canonical JSON: sorted keys, no whitespace) lists each case's
-kernel, parameters and arrays with their dtype, shape and SHA-256. A port to another language reads the inputs, runs
-its own kernels and compares the outputs bit for bit (any NaN matches any NaN: payloads are not specified).
+the activations, softmax, RoPE, attention, LayerNorm, the random number generator, the sampler, small decoders,
+encoders and a T5 encoder-decoder. Every array is a raw little-endian file; ``manifest.json`` (canonical JSON:
+sorted keys, no whitespace) lists each case's kernel, parameters and arrays with their dtype, shape and SHA-256. A
+port to another language reads the inputs, runs its own kernels and compares the outputs bit for bit (any NaN matches
+any NaN: payloads are not specified).
 
 ``check(directory)`` does that for this build's compiled kernels (``implementation="kernels"``) or for the
 independent reference implementation (``"reference"``). The inputs come from the portable random number generator
@@ -112,11 +112,22 @@ cross-encoder with a two-label classification head, run on a pair (token types 0
 cross-encoder whose positions count from past the padding id, run on tokens with padding inside; and a T5 v1.1
 encoder (RMS norms, the gated tanh GELU, the relative attention bias with log buckets beyond distance 2)."""
 
+TEXT_TO_TEXT: dict[str, dict[str, Any]] = {
+    "t5-text": {
+        "family": "t5", "vocabulary_size": 96, "hidden_size": 64, "intermediate_size": 96, "layers": 2,
+        "heads": 4, "kv_heads": 4, "head_dim": 16, "context_length": 32, "rms_norm_eps": 1e-6,
+        "rope_theta": 0.0, "tie_word_embeddings": True, "activation": "relu", "position_buckets": 8,
+        "max_relative_positions": 6, "decoder_layers": 2, "eos_token_ids": [1],
+    },
+}  # fmt: skip
+"""A small T5 v1.0 encoder-decoder (ReLU, the LM head tied to the word embedding and scaled by ``hidden ** -0.5``,
+the decoder's one-directional buckets, log buckets from distance 4), run on a source and every prefix of an answer."""
+
 
 def _decoder_tensors(name: str) -> Arrays:
     from etalii_dllm.architecture import TransformerConfig
 
-    config = TransformerConfig.from_dict({**DECODERS, **ENCODERS}[name])
+    config = TransformerConfig.from_dict({**DECODERS, **ENCODERS, **TEXT_TO_TEXT}[name])
     tensors = {}
     for index, (tensor, shape) in enumerate(sorted(config.tensor_shapes().items())):
         values = _gaussian(500 + index, *shape, scale=0.3)
@@ -246,6 +257,14 @@ def cases() -> list[tuple[str, str, dict[str, Any], Arrays]]:
             elif ENCODERS[name].get("classifier_labels"):
                 inputs["types"] = np.array([0, 0, 0, 0, 0, 1, 1, 1, 1], dtype=np.int64)
             items.append((label, "encoder", params, inputs))
+    source = np.array([5, 17, 3, 90, 41, 41, 8, 1], dtype=np.int64)
+    answer = np.array([12, 77, 30, 30, 9, 64, 2], dtype=np.int64)
+    for name in TEXT_TO_TEXT:
+        for quantize in (None, "q8_0"):
+            params = {"config": TEXT_TO_TEXT[name], "quantize": quantize}
+            label = f"text-to-text-{name}" + (f"-{quantize}" if quantize else "")
+            inputs = {"source": source, "answer": answer, **_decoder_tensors(name)}
+            items.append((label, "text_to_text", params, inputs))
     return items
 
 
@@ -371,6 +390,17 @@ def _kernels(kernel: str, params: Mapping[str, Any], inputs: Arrays) -> Arrays:
         if config.classifier_labels:
             result["logits"] = array(encoder.classify(tokens, types))
         return result
+    if kernel == "text_to_text":
+        from etalii_dllm.architecture import TransformerConfig
+        from etalii_dllm.seq2seq import TextToText
+
+        config = TransformerConfig.from_dict(params["config"])
+        tensors = {name[len("tensor.") :]: v for name, v in inputs.items() if name.startswith("tensor.")}
+        model = TextToText(config, tensors, quantize=params["quantize"])
+        cache = model.new_cache()
+        source, answer = [int(t) for t in inputs["source"]], [int(t) for t in inputs["answer"]]
+        rows = [array(model.forward_cached([*source, *answer[:i]], cache)) for i in range(len(answer) + 1)]
+        return {"logits": np.stack(rows)}
     raise ValueError(f"unknown kernel {kernel!r}")
 
 
@@ -473,6 +503,14 @@ def _reference(kernel: str, params: Mapping[str, Any], inputs: Arrays) -> Arrays
         if config.classifier_labels:
             result["logits"] = encoder.classify(tokens, types)
         return result
+    if kernel == "text_to_text":
+        from etalii_dllm.architecture import TransformerConfig
+
+        config = TransformerConfig.from_dict(params["config"])
+        tensors = {name[len("tensor.") :]: v for name, v in inputs.items() if name.startswith("tensor.")}
+        twin = r.ReferenceTextToText(config, tensors, quantize=params["quantize"])
+        source, answer = [int(t) for t in inputs["source"]], [int(t) for t in inputs["answer"]]
+        return {"logits": np.stack([twin.forward(source, answer[:i]) for i in range(len(answer) + 1)])}
     raise ValueError(f"unknown kernel {kernel!r}")
 
 

@@ -179,6 +179,8 @@ def _finetune(args: argparse.Namespace) -> int:
         return 1
     try:
         base = ModelFile(args.base)
+        if base.config.is_text_to_text:
+            raise ValueError("text-to-text models cannot be fine-tuned yet")
         objective = args.objective or ("dpo" if args.dpo else "lm")
         if args.objective is None and not args.dpo and base.config.is_encoder:
             objective = "classifier" if base.config.classifier_labels else "embedding"

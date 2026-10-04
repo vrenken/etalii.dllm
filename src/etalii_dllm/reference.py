@@ -631,6 +631,19 @@ def t5_relative_bucket(distance: int, buckets: int, max_distance: int) -> int:
     return offset + min(exact + math.trunc(float(scaled)), half - 1)
 
 
+def t5_decoder_bucket(distance: int, buckets: int, max_distance: int) -> int:
+    """T5's one-directional (decoder) bucket of ``distance`` (key minus query, never positive): all ``n = buckets``
+    buckets for keys at or before the query, ``r = max(-distance, 0)`` itself below ``exact = n // 2``, else
+    ``min(exact + trunc(f32(f32(log(f32(r) / exact)) / f32(log(max_distance / exact))) * (n - exact)), n - 1)``."""
+    exact = buckets // 2
+    r = max(-distance, 0)
+    if r < exact:
+        return r
+    numerator = F32(float(log(float(F32(F32(r) / F32(exact))))))
+    scaled = F32(numerator / F32(float(log(max_distance / exact)))) * F32(buckets - exact)
+    return min(exact + math.trunc(float(scaled)), buckets - 1)
+
+
 # -- random numbers and sampling ----------------------------------------------------------------------------------
 
 _MASK = (1 << 64) - 1
@@ -1660,3 +1673,100 @@ class ReferenceEncoder:
             if norm > 0:
                 vector = (vector / norm).astype(F32)
         return vector
+
+
+class ReferenceTextToText:
+    """The T5 encoder-decoder of :class:`etalii_dllm.seq2seq.TextToText`, recomputed from scratch for every token
+    on this module's kernels: the source through :class:`ReferenceEncoder`, the decoder inputs ``[0, *answer]``
+    through every decoder layer (self-attention over the inputs up to each position, cross-attention over the
+    encoder states, the MLP), the final RMSNorm, the tied head's ``hidden ** -0.5`` and the LM head."""
+
+    def __init__(self, config: TransformerConfig, tensors: Mapping[str, npt.ArrayLike], *, quantize: str | None = None):
+        from dataclasses import replace
+
+        self.config = config
+        encoder_config = replace(config, decoder_layers=0, tie_word_embeddings=True)
+        self.encoder = ReferenceEncoder(encoder_config, tensors, quantize=quantize)
+        self.w: dict[str, Any] = {}
+        for name in config.tensor_shapes():
+            values = np.asarray(tensors[name], dtype=F32)
+            matrix = name.endswith(_MATRICES) or name == "lm_head.weight"
+            self.w[name] = Weight(values, quantize) if matrix else values
+        embedding = self.w["token_embedding.weight"]
+        tied = config.tie_word_embeddings
+        self.head = Weight(embedding, quantize) if tied else self.w["lm_head.weight"]
+        self.head_scale = F32(config.hidden_size**-0.5) if tied else None
+        self.end_of_source = config.eos_token_ids[0] if config.eos_token_ids else 1
+
+    @classmethod
+    def from_engine_model(cls, model: Any) -> ReferenceTextToText:
+        """The reference twin of an engine's text-to-text model (same weights and quantisation)."""
+        return cls(model.config, model.tensors, quantize=model.quantization)
+
+    def forward(self, source: Sequence[int], answer: Sequence[int]) -> np.ndarray:
+        """The logits of the answer token after ``answer``, given ``source`` (ending with ``</s>``)."""
+        config, w = self.config, self.w
+        heads, head_dim, eps = config.heads, config.head_dim, config.rms_norm_eps
+        states = self.encoder.hidden_states(source)
+        inputs = [0, *answer]
+        count, sources = len(inputs), len(source)
+        table = w["decoder.relative_bias.weight"]
+        h = w["token_embedding.weight"][np.asarray(inputs, dtype=np.int64)]
+        shape = (count, heads, head_dim)
+        zero = np.zeros((heads, 1, sources), dtype=F32)
+
+        def activate(values: np.ndarray) -> np.ndarray:
+            if config.activation == "relu":
+                return np.where(values > 0, values, F32(0)).astype(F32)
+            if config.activation == "silu":
+                return silu(values)
+            return gelu(values, "tanh" if config.activation == "gelu_tanh" else "none")
+
+        for layer in range(config.decoder_layers):
+            p = f"decoder.layers.{layer}."
+            normed = rms_norm(h, w[p + "attention_norm.weight"], eps)
+            q, k, v = (linear(normed, w[p + f"attention.{n}.weight"]).reshape(shape) for n in ("q", "k", "v"))
+            attended = np.empty(shape, dtype=F32)
+            for t in range(count):
+                bias = np.empty((heads, 1, t + 1), dtype=F32)
+                for j in range(t + 1):
+                    bucket = t5_decoder_bucket(j - t, config.position_buckets, config.max_relative_positions)
+                    bias[:, 0, j] = table[bucket]
+                attended[t] = biased_attention(q[t : t + 1], k[: t + 1], v[: t + 1], bias, 1.0)[0]
+            h = h + linear(attended.reshape(count, -1), w[p + "attention.o.weight"])
+            normed = rms_norm(h, w[p + "cross_norm.weight"], eps)
+            q = linear(normed, w[p + "cross.q.weight"]).reshape(shape)
+            k, v = (linear(states, w[p + f"cross.{n}.weight"]).reshape(sources, heads, head_dim) for n in ("k", "v"))
+            attended = np.empty(shape, dtype=F32)
+            for t in range(count):
+                attended[t] = biased_attention(q[t : t + 1], k, v, zero, 1.0)[0]
+            h = h + linear(attended.reshape(count, -1), w[p + "cross.o.weight"])
+            normed = rms_norm(h, w[p + "mlp_norm.weight"], eps)
+            up = linear(normed, w[p + "mlp.up.weight"])
+            hidden = activate(linear(normed, w[p + "mlp.gate.weight"])) * up if config.gated_mlp else activate(up)
+            h = h + linear(hidden, w[p + "mlp.down.weight"])
+        out = rms_norm(h[-1:], w["decoder.final_norm.weight"], eps)
+        if self.head_scale is not None:
+            out = (out * self.head_scale).astype(F32)
+        return linear(out, self.head).reshape(-1)
+
+    def generate(
+        self, source: Sequence[int], max_tokens: int, sampler: Sampler, stop_tokens: Sequence[int] = ()
+    ) -> tuple[list[int], list[np.ndarray]]:
+        """Writes the answer to ``source`` (``</s>`` appended when it does not end with it) until a stop token or
+        ``max_tokens``; the sampler sees the source as the prompt. Returns the tokens and their logits."""
+        source = list(source)
+        if not source or source[-1] != self.end_of_source:
+            source.append(self.end_of_source)
+        sampler.begin(source)
+        tokens: list[int] = []
+        steps: list[np.ndarray] = []
+        while len(tokens) < max_tokens:
+            logits = self.forward(source, tokens)
+            token = sampler.sample(logits)
+            steps.append(logits)
+            if token in stop_tokens:
+                break
+            sampler.accept(token)
+            tokens.append(token)
+        return tokens, steps
