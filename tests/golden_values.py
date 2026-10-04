@@ -503,3 +503,12 @@ T5_INTERPRET_FINGERPRINT = {
     "trace_flan": "3358d75f42c19aa219f290808048cc713b9708f93cca067ae8c50d5ae8ac5ca0",
     "steered": "ddb3cb7e38c31e37318a6346c8713f5a463b6feeb16df2d6cf0b6c484c7e3692",
 }
+
+# Phase 69 (#407, #408): the fingerprints of the files written by ROME edits of the tiny T5 v1.0 and Flan-T5 models'
+# second encoder layer in tests/test_t5_editing.py, and the SHA-256 of a sparse autoencoder file trained on the
+# Flan-T5 decoder's first layer.
+T5_EDITING_FINGERPRINT = {
+    "edit_t5": "552849f07679c9f0b6df79d3718d4f307d959e086a4b0e1f0b5f9297e9def7af",
+    "edit_flan": "40d475b25b7696593ec8b1f17189044b0e7162e8f24c996195553809823125ff",
+    "sae": "854b1c6f76ee770fdf1533c7b1534f6d394bc5b73bf893feada265f917dd989a",
+}

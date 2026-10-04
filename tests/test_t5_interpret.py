@@ -259,9 +259,8 @@ def test_attention_command(flan, capsys, cli_environment, tmp_path):
     capsys.readouterr()
     assert main([*arguments, "--layer", "3"]) == 1
     assert "--layer must be between 1 and 2" in capsys.readouterr().err
-    for command in (["experts", "--prompt", "x"], ["neighbours", "x"]):
-        assert main(["--model", path, *command]) == 1
-        assert "needs a decoder-only model" in capsys.readouterr().err
+    assert main(["--model", path, "experts", "--prompt", "x"]) == 1
+    assert "needs a decoder-only model" in capsys.readouterr().err
 
 
 def test_decoder_only_models_refuse_the_text_to_text_options(model_path, capsys, cli_environment):  # noqa: F811

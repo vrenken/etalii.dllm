@@ -70,16 +70,22 @@ class TextToTextGradients:
     # Forward
 
     def forward(
-        self, weights: Mapping[str, npt.ArrayLike], source: Sequence[int], inputs: Sequence[int]
+        self,
+        weights: Mapping[str, npt.ArrayLike],
+        source: Sequence[int],
+        inputs: Sequence[int],
+        *,
+        add: tuple[int, npt.ArrayLike] | None = None,
     ) -> TextToTextPass:
         """The logits after every decoder input (``inputs[0]`` is the start token), as the served model computes
-        them one step at a time."""
+        them one step at a time. ``add`` is ``(layer, delta[source, hidden])``, added to the encoder's residual
+        stream after that 0-based layer (model editing, #407)."""
         config, e = self.config, self.encoder
         if not inputs:
             raise ValueError("the decoder needs at least one input")
         if min(inputs) < 0 or max(inputs) >= config.vocabulary_size:
             raise ValueError("token id out of range")
-        encoded = e.encode(weights, source)
+        encoded = e.encode(weights, source, add=add)
         states = encoded.states
         n, m, heads, head_dim = len(inputs), len(source), config.heads, config.head_dim
         ids = np.asarray(inputs, dtype=np.int64)
@@ -147,9 +153,49 @@ class TextToTextGradients:
     ) -> dict[str, FloatArray]:
         """The gradient of every weight from ``dlogits``, the loss gradient of ``result.logits``."""
         config, e = self.config, self.encoder
+        grads: dict[str, FloatArray] = {}
+        dstates, dhead, dinputs = self._decoder_gradients(weights, result, dlogits, grads)
+        encoder_grads = e.gradients(weights, result.encoder, dstates)
+        dencoder = encoder_grads.pop("token_embedding.weight")
+        grads.update(encoder_grads)
+        if config.tie_word_embeddings:
+            grads["token_embedding.weight"] = dhead + dinputs + dencoder
+        else:
+            grads["lm_head.weight"] = dhead
+            grads["token_embedding.weight"] = dinputs + dencoder
+        return {name: np.array(values, dtype=np.float32) for name, values in grads.items()}
+
+    def residual_gradient(
+        self,
+        weights: Mapping[str, npt.ArrayLike],
+        source: Sequence[int],
+        target: Sequence[int],
+        layer: int,
+        delta: npt.ArrayLike,
+    ) -> tuple[float, FloatArray]:
+        """With ``delta[source, hidden]`` added to the encoder's residual stream after ``layer`` (0-based): the summed
+        cross-entropy of ``target`` given ``source`` (teacher forcing, as in :meth:`loss_and_gradients`) and its
+        gradient with respect to that residual stream, ``[source, hidden]`` (#407). The decoder's backward pass
+        brings the gradient to the encoder states through cross-attention; the encoder's later layers take it on."""
+        if not target:
+            raise ValueError("the target needs at least one token")
+        result = self.forward(weights, source, [DECODER_START, *target[:-1]], add=(layer, delta))
+        loss, dlogits = cross_entropy(result.logits, np.asarray(target, dtype=np.int64))
+        dstates, _, _ = self._decoder_gradients(weights, result, dlogits.numpy(), {})
+        return loss, self.encoder.residual_gradient(weights, result.encoder, dstates, layer)
+
+    def _decoder_gradients(
+        self,
+        weights: Mapping[str, npt.ArrayLike],
+        result: TextToTextPass,
+        dlogits: npt.ArrayLike,
+        grads: dict[str, FloatArray],
+    ) -> tuple[FloatArray, FloatArray, FloatArray]:
+        """The decoder's backward pass: its weights' gradients into ``grads``; returns the gradients of the encoder
+        states, of the LM head's matrix and of the decoder inputs' embedding rows."""
+        config, e = self.config, self.encoder
         n, m, heads, head_dim = len(result.inputs), len(result.source), config.heads, config.head_dim
         buckets = config.position_buckets
-        grads: dict[str, FloatArray] = {}
         dout, dhead, _ = linear_backward(result.final["out"], self._head(weights), np.asarray(dlogits, np.float32))
         dh = dout.numpy()
         if config.tie_word_embeddings:
@@ -199,15 +245,7 @@ class TextToTextGradients:
             dh = da + e._rms_backward(weights, saved["h"], dx, grads, p + "attention_norm")
         grads["decoder.relative_bias.weight"] = np.ascontiguousarray(dtable.T)
         dinputs = embedding_backward(dh, result.inputs, config.vocabulary_size).numpy()
-        encoder_grads = e.gradients(weights, result.encoder, dstates)
-        dencoder = encoder_grads.pop("token_embedding.weight")
-        grads.update(encoder_grads)
-        if config.tie_word_embeddings:
-            grads["token_embedding.weight"] = dhead.numpy() + dinputs + dencoder
-        else:
-            grads["lm_head.weight"] = dhead.numpy()
-            grads["token_embedding.weight"] = dinputs + dencoder
-        return {name: np.array(values, dtype=np.float32) for name, values in grads.items()}
+        return dstates, dhead.numpy(), dinputs
 
     # Pieces
 

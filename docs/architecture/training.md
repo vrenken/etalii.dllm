@@ -178,6 +178,11 @@ The rest is shared: AdamW, checkpoints, receipts (counting `"examples"`), LoRA o
 cross-entropy and gradients from `TextToTextGradients.loss_and_gradients`, and its reference log-probabilities from
 `TextToTextGradients.logits`. Everything else is the decoder-only DPO step.
 
+Model editing of a T5 model (`interpret/editing.py`) needs the gradient of the encoder's residual stream after one
+layer: `TextToTextGradients.residual_gradient` runs the forward pass with a delta added there
+(`EncoderGradients.encode(add=...)`), the decoder's backward pass down to the encoder states, and the encoder's
+backward pass through the later layers only (`EncoderGradients.residual_gradient`).
+
 ## Checkpoints and resume
 
 ```mermaid

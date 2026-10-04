@@ -21,7 +21,7 @@ difference between an edited and an unedited model is exactly the edit.
 | Model editing (ROME) | `dllm edit` | `etalii_dllm.interpret.editing` | ✅ |
 | Sparse autoencoders | `dllm sae` | `etalii_dllm.interpret.sae` | ✅ |
 
-`dllm lens`, `dllm attention` and `dllm steer` also open up T5 and Flan-T5 text-to-text models; see
+Every command but `dllm experts` also opens up T5 and Flan-T5 text-to-text models; see
 [T5 text-to-text models](#t5-text-to-text-models).
 
 The commands take the usual `--model` option (or `DLLM_MODEL`) before the command name and run on the CPU
@@ -273,12 +273,30 @@ answer to an empty source (just `</s>`), averaged over its tokens (the start tok
 left out). `--layer` counts decoder layers. `--steer FILE` adds it after that decoder layer while the model writes,
 which changes the output and the `system_fingerprint`, as for decoder-only models.
 
-`dllm experts`, `dllm neighbours`, `dllm edit` and `dllm sae` still need a decoder-only model.
+`dllm neighbours` (Phase 69) works unchanged: the input space is the shared word embedding, the output space the LM
+head (the same matrix for T5 v1.0, whose tied head only scales it).
+
+`dllm edit` changes an encoder MLP, since a T5 model reads the subject in its source. The prompt is the source, the
+target the beginning of the answer, and `--layer` counts encoder layers. The key is the encoder MLP's activation at
+the subject's last token. The value change is added to the encoder's residual stream there, and its gradient comes
+from the answer's cross-entropy back through the decoder's cross-attention
+(`TextToTextGradients.residual_gradient`, checked against `transformers`' autograd). The covariance runs over the
+corpus texts read as sources. The record says `"stack": "encoder"` and `dllm inspect` shows
+`rome at encoder layer 2`:
+
+```bash
+dllm edit flan-t5-small.dllm --prompt "The Eiffel Tower is located in the city of" --subject "Eiffel Tower" \
+    --target "Rome" --layer 6 -o flan-rome.dllm
+```
+
+`dllm sae` trains on the decoder's residual stream, with each corpus line read as an answer to an empty source (the
+start token left out), as steering vectors are built; `sae steer` writes a feature as a decoder steering vector.
+Only `dllm experts` needs a decoder-only model (T5 has no experts).
 
 ## Reproducibility
 
 Everything above is covered by `tests/test_interpret.py`, `tests/test_editing.py`, `tests/test_sae.py` and
-`tests/test_t5_interpret.py`: a trace of each tiny model family equals a golden
+`tests/test_t5_interpret.py`, `tests/test_t5_editing.py`: a trace of each tiny model family equals a golden
 fingerprint on every SIMD path and thread count, the traced logits equal the untraced ones, the lens of the last
 layer equals the model's prediction, the HTML and SVG views are byte-identical across runs, steered models keep the KV cache and batch invariance, the
 residual and SAE gradients match finite differences, and repeated edits and SAE runs write byte-identical files. Rankings break ties

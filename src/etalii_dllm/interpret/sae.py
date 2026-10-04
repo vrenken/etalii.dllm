@@ -10,6 +10,10 @@ each feature is one direction and its activation says how much of it is present.
 deterministic kernel (``linear``, ``linear_backward``, ``sum_squares``, ``sum``), the update is the ``adamw_step``
 kernel, the decoder is initialised from the seeded Gaussian generator and batches follow a seeded shuffle; so equal
 runs write byte-identical SAE files on every machine. Files are safetensors with the settings in the metadata.
+
+For a T5 text-to-text model (#408) the SAE reads the decoder's residual stream: each text is read by the decoder as
+the answer to an empty source (just ``</s>``), as steering vectors are built, and its rows are the answer's tokens
+(the start token, the same for every text, is left out). A feature's direction then steers the decoder.
 """
 
 from __future__ import annotations
@@ -24,9 +28,11 @@ from typing import Any
 import numpy as np
 
 from etalii_dllm.interpret.lens import top_k
-from etalii_dllm.interpret.steering import SteeringVector
+from etalii_dllm.interpret.steering import SteeringVector, steered_layers
+from etalii_dllm.interpret.text_to_text import trace_text_to_text
 from etalii_dllm.interpret.trace import trace
 from etalii_dllm.numerics import DeterministicRandom, fill_gaussian, linear, linear_backward, sum_, sum_squares
+from etalii_dllm.seq2seq import TextToText
 from etalii_dllm.tokenization import Tokenizer
 from etalii_dllm.transformer import Transformer
 
@@ -62,20 +68,28 @@ class Activations:
 
 
 def collect_activations(
-    model: Transformer, tokenizer: Tokenizer, texts: Sequence[str], layer: int, *, outlier: float = 10.0
+    model: Transformer | TextToText, tokenizer: Tokenizer, texts: Sequence[str], layer: int, *, outlier: float = 10.0
 ) -> Activations:
     """The residual stream after ``layer`` at every position of every text, in text and position order. Rows whose
     squared norm is more than ``outlier`` times the median are left out (0 keeps all): models park attention on the
     first token or two and their residual stream there is many times larger than elsewhere (an "attention sink"),
-    which would otherwise dominate the features."""
-    if not 1 <= layer <= model.config.layers:
-        raise ValueError(f"layer must be between 1 and {model.config.layers}")
+    which would otherwise dominate the features. A T5 model's rows are its decoder's, over each text as the answer
+    to an empty source."""
+    layers = steered_layers(model)
+    if not 1 <= layer <= layers:
+        raise ValueError(f"layer must be between 1 and {layers}")
     rows, positions, tokens = [], [], []
     for text in texts:
         ids = tokenizer.encode(text)
         if not ids:
             continue
-        rows.append(trace(model, ids, attention=False, logits=False).residual[layer])
+        if isinstance(model, TextToText):
+            if model.end_of_source in ids:
+                raise ValueError(f"text {text!r} contains </s>, which ends a text-to-text answer")
+            answer = [model.end_of_source, *ids]
+            rows.append(trace_text_to_text(model, answer, attention=False, logits=False).residual[layer][1:])
+        else:
+            rows.append(trace(model, ids, attention=False, logits=False).residual[layer])
         positions += [(len(tokens), p) for p in range(len(ids))]
         tokens.append(ids)
     if not rows:

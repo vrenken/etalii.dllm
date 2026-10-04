@@ -111,8 +111,10 @@ def _inspect(args: argparse.Namespace) -> int:
             f" merged into {model.adapter['base_fingerprint'][:16]}"
         )
     for edit in model.edits:
+        stack = f"{edit['stack']} " if edit.get("stack") else ""
         print(
-            f"edited:             {edit['method']} at layer {edit['layer']}: {edit['prompt']!r} -> {edit['target']!r}"
+            f"edited:             {edit['method']} at {stack}layer {edit['layer']}: {edit['prompt']!r} -> "
+            f"{edit['target']!r}"
             f" (from {edit['base_fingerprint'][:16]})"
         )
     merge = model.header.get("merge")
