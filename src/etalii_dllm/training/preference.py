@@ -10,6 +10,11 @@ written. The prompt and each answer are tokenized separately and the answer gets
 a pair's tokens do not depend on the rest of the file. A pair holds at most ``sequence_length + 1`` tokens per side:
 an answer that does not fit is cut at its end; a prompt must leave room for at least one answer token.
 
+For a T5 text-to-text model (:meth:`PreferenceData.from_text_to_text_records`, #397) the prompt is the source: a
+``messages`` prompt is the messages' contents joined by a blank line, and the source and each answer are cut to
+``sequence_length - 1`` tokens and ended with ``</s>``, as :class:`~etalii_dllm.training.seq2seq_data.TextToTextData`
+cuts them; an answer's log-probability is that of its tokens given the source.
+
 Pairs are visited in the same per-epoch ``DeterministicRandom`` order as training windows
 (:func:`~etalii_dllm.training.data.batch_indices`), so the pairs of a step follow from the seed and step alone.
 """
@@ -124,6 +129,26 @@ class PreferenceData:
             if not chosen or not rejected:
                 raise TrainingDataError(f"pair {number}: an answer is empty")
             pairs.append(PreferencePair(prompt, chosen, rejected))
+        return cls(tuple(pairs), sequence_length)
+
+    @classmethod
+    def from_text_to_text_records(
+        cls,
+        records: Sequence[PreferenceRecord],
+        encode: Callable[[str], list[int]],
+        sequence_length: int,
+        end: int,
+    ) -> PreferenceData:
+        """Pairs for a text-to-text model: ``prompt`` is the source, each side ending with ``</s>``."""
+        from etalii_dllm.training.seq2seq_data import text_to_text_tokens
+
+        if sequence_length < 2:
+            raise TrainingDataError("sequence_length must be at least 2 (a token and </s>)")
+
+        def tokens(text: str) -> tuple[int, ...]:
+            return text_to_text_tokens(encode, text, sequence_length, end)
+
+        pairs = [PreferencePair(tokens(r.prompt), tokens(r.chosen), tokens(r.rejected)) for r in records]
         return cls(tuple(pairs), sequence_length)
 
     def __len__(self) -> int:

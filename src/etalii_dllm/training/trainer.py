@@ -194,12 +194,15 @@ class FineTuner:
         reference: Sequence[tuple[float, float]] | None = None,
     ) -> None:
         encoder_run = run.objective in ENCODER_OBJECTIVES
-        if config.is_text_to_text != isinstance(data, TextToTextData):
-            if config.is_text_to_text:
+        if config.is_text_to_text:
+            if run.objective not in ("lm", "dpo"):
+                raise ValueError(
+                    "a text-to-text model trains with the language-model (on its targets) or DPO objective"
+                )
+            if run.objective == "lm" and not isinstance(data, TextToTextData):
                 raise ValueError("a text-to-text model trains on source and target pairs")
+        elif isinstance(data, TextToTextData):
             raise ValueError("source and target pairs train text-to-text models")
-        if config.is_text_to_text and run.objective != "lm":
-            raise ValueError("a text-to-text model trains with the language-model objective (on its targets)")
         if config.is_encoder != encoder_run:
             if config.is_encoder:
                 raise ValueError("an encoder trains with the embedding or classifier objective, not language modelling")
@@ -213,7 +216,7 @@ class FineTuner:
         if not encoder_run and isinstance(data, EncoderData):
             raise ValueError("encoder examples train encoders")
         pairs_run = isinstance(data, PreferenceData)
-        if not encoder_run and not config.is_text_to_text and pairs_run != (run.objective == "dpo"):
+        if not encoder_run and pairs_run != (run.objective == "dpo"):
             raise ValueError("a DPO run trains on preference pairs, a language-model run on text windows")
         if data.sequence_length != run.sequence_length:
             raise ValueError("the data was windowed for a different sequence length")
@@ -347,16 +350,27 @@ class FineTuner:
             _accumulate(gradients, example_gradients)
         return loss_total / targets_total, gradients
 
+    def _answer_gradients(
+        self, weights: Mapping[str, np.ndarray], pair: PreferencePair, which: str
+    ) -> tuple[float, dict[str, FloatArray]]:
+        """Minus the log-probability of ``pair``'s ``chosen`` or ``rejected`` answer and its gradients: after the
+        prompt for a decoder, given the prompt as the source for a text-to-text model (#398)."""
+        if self._text_to_text is not None:
+            answer = pair.chosen if which == "chosen" else pair.rejected
+            return self._text_to_text.loss_and_gradients(weights, pair.prompt, answer)
+        assert self._gradients is not None
+        return self._gradients.loss_and_gradients(weights, *pair.sequence(which))
+
     def _preference_gradients(self, data: PreferenceData) -> tuple[float, dict[str, FloatArray]]:
-        assert self.reference is not None and self._gradients is not None
+        assert self.reference is not None
         beta = self.run.beta
         loss_total = 0.0
         gradients: dict[str, FloatArray] = {}
         weights = self.weights()
         for index in data.batch(self.step, self.run.batch_size, self.run.seed):
             pair = data.pairs[index]
-            chosen_loss, chosen_gradients = self._gradients.loss_and_gradients(weights, *pair.sequence("chosen"))
-            rejected_loss, rejected_gradients = self._gradients.loss_and_gradients(weights, *pair.sequence("rejected"))
+            chosen_loss, chosen_gradients = self._answer_gradients(weights, pair, "chosen")
+            rejected_loss, rejected_gradients = self._answer_gradients(weights, pair, "rejected")
             reference_chosen, reference_rejected = self.reference[index]
             z = beta * ((-chosen_loss - reference_chosen) - (-rejected_loss - reference_rejected))
             loss_total += -log_sigmoid(z)
@@ -429,6 +443,10 @@ class FineTuner:
 
     def log_probability(self, weights: Mapping[str, np.ndarray], pair: PreferencePair, which: str) -> float:
         """The log-probability (double) that ``weights`` give the ``chosen`` or ``rejected`` answer of ``pair``."""
+        if self._text_to_text is not None:
+            answer = pair.chosen if which == "chosen" else pair.rejected
+            loss, _ = cross_entropy(self._text_to_text.logits(weights, pair.prompt, answer), list(answer))
+            return -loss
         assert self._gradients is not None
         tokens, targets = pair.sequence(which)
         loss, _ = cross_entropy(self._gradients.logits(weights, tokens), targets)

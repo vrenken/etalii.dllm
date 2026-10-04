@@ -95,13 +95,11 @@ def test_beam_search_matches_transformers(variant, tmp_path):
     assert finished == {"stop", "length"}
 
 
-def test_beam_search_receipts_and_front_ends(flan, capsys, monkeypatch, tmp_path):
+def test_beam_search_receipts_and_front_ends(flan, capsys, cli_environment, tmp_path):
     from golden_values import T5_DECODING_FINGERPRINT
 
     from etalii_dllm.cli import main
 
-    for name in [n for n in __import__("os").environ if n.startswith("DLLM_")]:
-        monkeypatch.delenv(name)
     checkpoint, engine = flan
     request = ChatRequest([ChatMessage("user", TEXTS[1])], 8)
     result = beam.search(engine, request, 3, 2)
@@ -158,20 +156,18 @@ def test_scores_match_transformers(t5, flan):
     assert scoring.score_tokens(flan[1], [], source=[]).tokens == ()
 
 
-def test_score_refusals_receipts_and_front_ends(flan, capsys, monkeypatch, tmp_path):
+def test_score_refusals_receipts_and_front_ends(flan, capsys, cli_environment, tmp_path):
     from golden_values import T5_DECODING_FINGERPRINT
 
     from etalii_dllm.cli import main
 
-    for name in [n for n in __import__("os").environ if n.startswith("DLLM_")]:
-        monkeypatch.delenv(name)
     checkpoint, engine = flan
     with pytest.raises(ValueError, match="answer to a source"):
         scoring.score_text(engine, TEXTS[2])
     with pytest.raises(ValueError, match="only text-to-text"):
         scoring.score_text(DllmEngine.create_default(), "hello", source="hi")
-    with pytest.raises(ValueError, match="without </s>"):
-        engine.model.answer_logits(source_of(engine, TEXTS[0]), [5, END])
+    with pytest.raises(ValueError, match="</s> only at its end"):
+        engine.model.answer_logits(source_of(engine, TEXTS[0]), [END, 5])
     with pytest.raises(ValueError, match="out of range"):
         engine.model.answer_logits(source_of(engine, TEXTS[0]), [10**6])
     assert engine.model.answer_logits(source_of(engine, TEXTS[0]), []).shape == (0, engine.model.vocabulary_size)

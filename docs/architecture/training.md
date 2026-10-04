@@ -173,7 +173,10 @@ flowchart LR
 ```
 
 The rest is shared: AdamW, checkpoints, receipts (counting `"examples"`), LoRA over the encoder and the decoder
-(cross-attention included) and the export to `T5ForConditionalGeneration`.
+(cross-attention included) and the export to `T5ForConditionalGeneration`. A DPO run on a text-to-text model
+(`PreferenceData.from_text_to_text_records`, with the prompt as the source) takes each answer's summed
+cross-entropy and gradients from `TextToTextGradients.loss_and_gradients`, and its reference log-probabilities from
+`TextToTextGradients.logits`. Everything else is the decoder-only DPO step.
 
 ## Checkpoints and resume
 
