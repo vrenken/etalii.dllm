@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -52,6 +53,25 @@ class TextToTextCache:
     """The decoder inputs processed so far (the start token, then the answer)."""
     keys: list[list[np.ndarray]] = field(default_factory=list)
     values: list[list[np.ndarray]] = field(default_factory=list)
+
+    def export(self) -> tuple[Any, ...]:
+        """What :meth:`restore` needs to make an independent copy (beam search's hypotheses each keep one). The
+        arrays are shared: they are never changed in place, only appended to the copy's own lists."""
+        return self.source, list(self.cross), list(self.tokens), [*map(list, self.keys)], [*map(list, self.values)]
+
+    def restore(
+        self,
+        source: tuple[int, ...] | None,
+        cross: list[tuple[np.ndarray, np.ndarray]],
+        tokens: list[int],
+        keys: list[list[np.ndarray]],
+        values: list[list[np.ndarray]],
+    ) -> None:
+        """Fills an empty cache with what :meth:`export` returned."""
+        if self.source is not None or self.tokens:
+            raise ValueError("only an empty cache can be restored")
+        self.source, self.cross, self.tokens = source, list(cross), list(tokens)
+        self.keys, self.values = [*map(list, keys)], [*map(list, values)]
 
 
 class TextToText:
@@ -144,19 +164,62 @@ class TextToText:
     def forward_cached(self, tokens: Sequence[int], cache: TextToTextCache) -> FloatArray:
         """:meth:`forward`, reusing the encoder states and the decoder's keys and values in ``cache`` when the
         source is the same and the answer extends the one already processed. Gives the same bits as :meth:`forward`."""
-        source, answer = self.split(tokens)
-        if cache.source != tuple(source):
-            self._encode(source, cache)
-        inputs = [DECODER_START, *answer]
-        if cache.tokens != inputs[: len(cache.tokens)] or len(cache.tokens) == len(inputs):
-            cache.tokens = []
-            cache.keys = [[] for _ in range(self.config.decoder_layers)]
-            cache.values = [[] for _ in range(self.config.decoder_layers)]
-        logits = None
-        for token in inputs[len(cache.tokens) :]:
-            logits = self._step(token, cache)
-        assert logits is not None
-        return logits
+        return self.forward_batch([tokens], [cache])[0]
+
+    def forward_batch(
+        self, sequences: Sequence[Sequence[int]], caches: Sequence[TextToTextCache] | None = None
+    ) -> list[FloatArray]:
+        """Next-token logits for several independent sequences (#395): each source is encoded on its own (once per
+        cache), then the decoder steps of all sequences run together, their rows stacked through every linear
+        layer and attention per sequence against its own cache. Every kernel computes each row on its own in a fixed
+        order, so each sequence gets exactly the bits of a lone :meth:`forward_cached`. ``caches`` (one per
+        sequence, distinct) default to fresh ones."""
+        if caches is None:
+            caches = [self.new_cache() for _ in sequences]
+        if len(caches) != len(sequences):
+            raise ValueError("forward_batch needs one cache per sequence")
+        if len({id(cache) for cache in caches}) != len(caches):
+            raise ValueError("forward_batch needs a distinct cache per sequence")
+        pending = []
+        for tokens, cache in zip(sequences, caches, strict=True):
+            source, answer = self.split(tokens)
+            if cache.source != tuple(source):
+                self._encode(source, cache)
+            inputs = [DECODER_START, *answer]
+            if cache.tokens != inputs[: len(cache.tokens)] or len(cache.tokens) == len(inputs):
+                cache.tokens = []
+                cache.keys = [[] for _ in range(self.config.decoder_layers)]
+                cache.values = [[] for _ in range(self.config.decoder_layers)]
+            for token in inputs[len(cache.tokens) :]:
+                if not 0 <= token < self.config.vocabulary_size:
+                    raise ValueError("token id out of range")
+            pending.append(inputs[len(cache.tokens) :])
+        results: list[FloatArray | None] = [None] * len(caches)
+        step = 0
+        while True:  # one decoder position of every sequence that still has tokens to read
+            active = [i for i, tokens in enumerate(pending) if step < len(tokens)]
+            if not active:
+                break
+            logits = self._steps([pending[i][step] for i in active], [caches[i] for i in active])
+            for row, i in enumerate(active):
+                if step == len(pending[i]) - 1:
+                    results[i] = logits[row].copy()
+            step += 1
+        return [logits for logits in results if logits is not None]
+
+    def answer_logits(self, source: Sequence[int], answer: Sequence[int]) -> np.ndarray:
+        """The logits ``[len(answer), vocabulary]`` before each answer token: row ``i`` follows the source (ending
+        with ``</s>``) and ``answer[:i]``, with exactly the bits :meth:`forward` gives for that sequence (#393)."""
+        source, answer = list(source), [int(token) for token in answer]
+        if not source or source[-1] != self.end_of_source or self.end_of_source in answer:
+            raise ValueError("a text-to-text model scores an answer without </s> after a source ending with </s>")
+        if not answer:
+            return np.zeros((0, self.vocabulary_size), dtype=np.float32)
+        if any(not 0 <= token < self.vocabulary_size for token in answer):
+            raise ValueError("token id out of range")
+        cache = self.new_cache()
+        self._encode(source, cache)
+        return np.stack([self._steps([token], [cache])[0] for token in [DECODER_START, *answer[:-1]]])
 
     def encoder_states(self, source: Sequence[int]) -> FloatArray:
         """The encoder's last states ``[source, hidden]`` (after its final norm)."""
@@ -175,46 +238,54 @@ class TextToText:
             cache.cross.append((k, v))
         cache.tokens, cache.keys, cache.values = [], [], []
 
-    def _step(self, token: int, cache: TextToTextCache) -> FloatArray:
-        """Appends ``token`` at the next decoder position and returns the logits after it."""
+    def _steps(self, tokens: Sequence[int], caches: Sequence[TextToTextCache]) -> np.ndarray:
+        """Appends ``tokens[i]`` at the next decoder position of ``caches[i]`` and returns the logits after each
+        ``[len(tokens), vocabulary]``: the rows go through the linear layers together, attention runs per cache."""
         config = self.config
-        if not 0 <= token < config.vocabulary_size:
-            raise ValueError("token id out of range")
         heads, head_dim, eps = config.heads, config.head_dim, config.rms_norm_eps
-        if not cache.keys:
-            cache.keys = [[] for _ in range(config.decoder_layers)]
-            cache.values = [[] for _ in range(config.decoder_layers)]
-        position = len(cache.tokens)
-        keys_seen = np.arange(position + 1, dtype=np.int64)
-        buckets = t5_relative_buckets(
-            keys_seen - position, config.position_buckets, config.max_relative_positions, bidirectional=False
-        )
+        count = len(tokens)
         table = np.asarray(self._w["decoder.relative_bias.weight"], dtype=np.float32)
-        bias = np.ascontiguousarray(table[buckets].T.reshape(heads, 1, position + 1))
-        source_length = len(cache.cross[0][0]) if cache.cross else 0
-        zero = np.zeros((heads, 1, source_length), dtype=np.float32)
-        h = self._embedding[token : token + 1].copy()
+        biases, zeros = [], []
+        for cache in caches:
+            if not cache.keys:
+                cache.keys = [[] for _ in range(config.decoder_layers)]
+                cache.values = [[] for _ in range(config.decoder_layers)]
+            position = len(cache.tokens)
+            keys_seen = np.arange(position + 1, dtype=np.int64)
+            buckets = t5_relative_buckets(
+                keys_seen - position, config.position_buckets, config.max_relative_positions, bidirectional=False
+            )
+            biases.append(np.ascontiguousarray(table[buckets].T.reshape(heads, 1, position + 1)))
+            source_length = len(cache.cross[0][0]) if cache.cross else 0
+            zeros.append(np.zeros((heads, 1, source_length), dtype=np.float32))
+        h = self._embedding[list(tokens)].copy()
         for i in range(config.decoder_layers):
             p = f"decoder.layers.{i}."
             x = rms_norm(h, self._w[p + "attention_norm.weight"], eps).numpy()  # type: ignore[arg-type]
-            q = self._linear(x, p + "attention.q").reshape(1, heads, head_dim)
-            cache.keys[i].append(self._linear(x, p + "attention.k").reshape(heads, head_dim))
-            cache.values[i].append(self._linear(x, p + "attention.v").reshape(heads, head_dim))
-            k, v = np.stack(cache.keys[i]), np.stack(cache.values[i])
-            mixed = biased_attention(q, k, v, bias, 1.0).numpy().reshape(1, -1)
+            q = self._linear(x, p + "attention.q").reshape(count, 1, heads, head_dim)
+            k_new = self._linear(x, p + "attention.k").reshape(count, heads, head_dim)
+            v_new = self._linear(x, p + "attention.v").reshape(count, heads, head_dim)
+            mixed = np.empty((count, heads * head_dim), dtype=np.float32)
+            for row, cache in enumerate(caches):
+                cache.keys[i].append(k_new[row])
+                cache.values[i].append(v_new[row])
+                k, v = np.stack(cache.keys[i]), np.stack(cache.values[i])
+                mixed[row] = biased_attention(q[row], k, v, biases[row], 1.0).numpy().reshape(-1)
             h = h + self._linear(mixed, p + "attention.o")
             x = rms_norm(h, self._w[p + "cross_norm.weight"], eps).numpy()  # type: ignore[arg-type]
-            q = self._linear(x, p + "cross.q").reshape(1, heads, head_dim)
-            k, v = cache.cross[i]
-            mixed = biased_attention(q, k, v, zero, 1.0).numpy().reshape(1, -1)
+            q = self._linear(x, p + "cross.q").reshape(count, 1, heads, head_dim)
+            for row, cache in enumerate(caches):
+                k, v = cache.cross[i]
+                mixed[row] = biased_attention(q[row], k, v, zeros[row], 1.0).numpy().reshape(-1)
             h = h + self._linear(mixed, p + "cross.o")
             x = rms_norm(h, self._w[p + "mlp_norm.weight"], eps).numpy()  # type: ignore[arg-type]
             h = h + self._linear(self._mlp(x, p), p + "mlp.down")
-        cache.tokens.append(token)
+        for token, cache in zip(tokens, caches, strict=True):
+            cache.tokens.append(int(token))
         out = rms_norm(h, self._w["decoder.final_norm.weight"], eps).numpy()  # type: ignore[arg-type]
         if self._head_scale is not None:
             out = (out * self._head_scale).astype(np.float32)
-        return linear(out, self._head).numpy().reshape(-1)  # type: ignore[arg-type,no-any-return]
+        return linear(out, self._head).numpy()  # type: ignore[arg-type,no-any-return]
 
     def _mlp(self, x: np.ndarray, p: str) -> np.ndarray:
         up = self._linear(x, p + "mlp.up")

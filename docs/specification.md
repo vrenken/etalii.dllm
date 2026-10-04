@@ -388,7 +388,9 @@ The score of a text ([scoring](api.md#scoring)) tokenizes it as a prompt is toke
 decoder's logits do not depend on how the tokens were batched) and `log_softmax` is section 3's kernel; the first
 token is not scored. Alternatives are ordered by log-probability descending, then id ascending. The log-likelihood is
 the float32 log-probabilities summed in token order in double, and the perplexity `exp(-log_likelihood / n)` with the
-portable `exp`, for the `n` scored tokens.
+portable `exp`, for the `n` scored tokens. A text-to-text model ([section 7](#7-the-t5-encoder-decoder)) scores a
+text as the answer to a source. There every token is scored, token `i` from the decoder's logits after
+`[0, *t[:i]]`.
 
 ### Voting
 
@@ -600,8 +602,17 @@ answer is written one token at a time after it. The sequence the sampler sees as
    decoder matrix and the LM head (the tied word embedding included), as for the encoder's matrices.
 
 Decoding is [the decoder's](#5-the-decoder) sampling over these logits, with the source as the prompt; the answer
-stops at `</s>`. The context window counts the source and the answer together. Rolling, guidance, token healing,
-speculation and batching do not apply to text-to-text models.
+stops at `</s>`. The context window counts the source and the answer together. Rolling, token healing and
+speculation do not apply to text-to-text models. The other decoding modes carry over with the source in the
+prompt's place:
+
+- [Beam search](#beam-search) extends answers after the source exactly as after a prompt.
+- [Prompt scoring](#prompt-scoring) scores a text as the answer to a source: every token is scored, token `i` from
+  the decoder's logits after `[0, *answer[:i]]`.
+- [Classifier-free guidance](#guided-decoding) runs the negative prompt, followed by `</s>`, as a second source
+  with the same answer. Contrast and ensemble models must be text-to-text models too, and they read the same source.
+- Batching runs the decoder steps of several sequences together. Every row is computed on its own, so batching
+  never changes a bit.
 
 ## Checking an implementation
 

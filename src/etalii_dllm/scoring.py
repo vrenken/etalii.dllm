@@ -9,6 +9,9 @@ The score of a text is the log-probability of each of its tokens given the token
   scored (``None``, as in OpenAI's completions API).
 - With ``top`` alternatives, each scored position also lists the ``top`` most likely tokens, ordered by log-probability
   descending, then id ascending.
+- A text-to-text model (:mod:`etalii_dllm.seq2seq`, #393) scores a text as the answer to a ``source``: every
+  token is scored, token ``i`` given the source and the tokens before it, from the decoder's logits with the bits of
+  incremental decoding (``TextToText.answer_logits``).
 - ``log_likelihood`` sums the float32 log-probabilities in token order in double (``numerics.sum_``), and
   ``perplexity`` is ``exp(-log_likelihood / scored)`` with the portable ``exp``.
 
@@ -27,7 +30,7 @@ import numpy as np
 
 from etalii_dllm import _kernels
 from etalii_dllm.evaluation import _rows
-from etalii_dllm.generation import ContextLengthError, TokenLogprob
+from etalii_dllm.generation import ContextLengthError, TokenLogprob, with_end_of_source
 from etalii_dllm.numerics import log_softmax, sum_
 from etalii_dllm.receipts import Verification, canonical_json
 
@@ -52,11 +55,11 @@ class TextScore:
 
     @property
     def scored(self) -> int:
-        return max(len(self.tokens) - 1, 0)
+        return sum(t.logprob is not None for t in self.tokens)
 
     @property
     def log_likelihood(self) -> float:
-        values = np.asarray([t.logprob for t in self.tokens[1:]], dtype=np.float32)
+        values = np.asarray([t.logprob for t in self.tokens if t.logprob is not None], dtype=np.float32)
         return sum_(values) if len(values) else 0.0
 
     @property
@@ -94,32 +97,48 @@ class TextScore:
         }  # fmt: skip
 
 
-def score_tokens(engine: DllmEngine, tokens: Sequence[int], top: int = 0) -> TextScore:
-    """The score of ``tokens`` (see the module docstring). Raises :class:`ContextLengthError` when they do not fit
-    the model's context window."""
+def score_tokens(
+    engine: DllmEngine, tokens: Sequence[int], top: int = 0, source: Sequence[int] | None = None
+) -> TextScore:
+    """The score of ``tokens`` (see the module docstring); ``source`` is a text-to-text model's source, which it
+    needs. Raises :class:`ContextLengthError` when they do not fit the model's context window."""
     if not 0 <= top <= 20:
         raise ValueError("top logprobs must be between 0 and 20")
     tokens = [int(t) for t in tokens]
-    window = getattr(getattr(engine.model, "config", None), "context_length", None)
+    model = engine.model
+    text_to_text = getattr(model, "end_of_source", None) is not None
+    if text_to_text and source is None:
+        raise ValueError("a text-to-text model scores a text as the answer to a source")
+    if not text_to_text and source is not None:
+        raise ValueError("only text-to-text models score a text given a source")
+    window = getattr(getattr(model, "config", None), "context_length", None)
     if window and len(tokens) > window:
         raise ContextLengthError(f"the text has {len(tokens)} tokens; the model's context window holds {window}")
     if not tokens:
         return TextScore(())
-    scores = [TokenScore(tokens[0], None)]
-    if len(tokens) > 1:
-        rows = _rows(engine.model, tokens[:-1], len(tokens) - 1)
-        for i, target in enumerate(tokens[1:]):
-            values = log_softmax(rows[i])
-            alternatives: tuple[TokenLogprob, ...] = ()
-            if top:
-                order = np.lexsort((np.arange(len(values)), -values.astype(np.float64)))[:top]
-                alternatives = tuple(TokenLogprob(int(j), float(values[j])) for j in order)
-            scores.append(TokenScore(target, float(values[target]), alternatives))
+    if text_to_text:
+        assert source is not None
+        rows = model.answer_logits(with_end_of_source(model, source), tokens)  # type: ignore[attr-defined]
+        targets = tokens
+        scores = []
+    else:
+        rows = _rows(model, tokens[:-1], len(tokens) - 1) if len(tokens) > 1 else np.zeros((0, 0), np.float32)
+        targets = tokens[1:]
+        scores = [TokenScore(tokens[0], None)]
+    for i, target in enumerate(targets):
+        values = log_softmax(rows[i])
+        alternatives: tuple[TokenLogprob, ...] = ()
+        if top:
+            order = np.lexsort((np.arange(len(values)), -values.astype(np.float64)))[:top]
+            alternatives = tuple(TokenLogprob(int(j), float(values[j])) for j in order)
+        scores.append(TokenScore(target, float(values[target]), alternatives))
     return TextScore(tuple(scores))
 
 
-def score_text(engine: DllmEngine, text: str, top: int = 0) -> TextScore:
-    return score_tokens(engine, engine.tokenizer.encode(text), top)
+def score_text(engine: DllmEngine, text: str, top: int = 0, source: str | None = None) -> TextScore:
+    """The score of ``text``; for a text-to-text model, as the answer to ``source``."""
+    encoded = None if source is None else engine.tokenizer.encode(source)
+    return score_tokens(engine, engine.tokenizer.encode(text), top, encoded)
 
 
 def _id(body: Mapping[str, Any]) -> str:
@@ -127,8 +146,9 @@ def _id(body: Mapping[str, Any]) -> str:
     return "score_" + hashlib.sha256(canonical_json(content).encode()).hexdigest()[:32]
 
 
-def record(engine: DllmEngine, text: str, top: int, score: TextScore) -> dict[str, Any]:
-    """A receipt for a score: the text, the weights and the score's fingerprint."""
+def record(engine: DllmEngine, text: str, top: int, score: TextScore, source: str | None = None) -> dict[str, Any]:
+    """A receipt for a score: the text (and a text-to-text model's source), the weights and the score's
+    fingerprint."""
     from etalii_dllm import __version__
 
     body: dict[str, Any] = {
@@ -137,6 +157,7 @@ def record(engine: DllmEngine, text: str, top: int, score: TextScore) -> dict[st
         "model": engine.model.id,
         "system_fingerprint": engine.system_fingerprint,
         "text": text,
+        **({"source": source} if source is not None else {}),
         "top_logprobs": top,
         "output": {
             "tokens": len(score.tokens),
@@ -165,7 +186,8 @@ def verify(engine: DllmEngine, receipt: Mapping[str, Any]) -> Verification:
     if receipt["engine"] != __version__:
         notes.append(f"made by engine version {receipt['engine']}, replayed with {__version__}")
     top = int(receipt["top_logprobs"])
-    replayed = record(engine, receipt["text"], top, score_text(engine, receipt["text"], top))
+    source = receipt.get("source")
+    replayed = record(engine, receipt["text"], top, score_text(engine, receipt["text"], top, source), source)
     for key, label in (("tokens", "the number of tokens"), ("fingerprint", "the log-probabilities"),
                        ("log_likelihood", "the log-likelihood")):  # fmt: skip
         if receipt["output"].get(key) != replayed["output"][key]:

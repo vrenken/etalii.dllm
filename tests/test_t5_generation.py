@@ -314,7 +314,7 @@ def test_reference_implementation_and_verify(t5, flan):
             assert engine.model.forward([*source, *answer]).tobytes() == twin.forward(source, answer).tobytes()
         check = verify.check_reference(engine, max_tokens=6)
         assert check.equal, check.results
-        assert set(check.results) == {"logits", "greedy", "sampled", "controlled", "modern", "adaptive"}
+        assert set(check.results) == {"logits", "greedy", "sampled", "controlled", "modern", "adaptive", "scored"}
         report = verify.run(engine)
         assert {"logits", "greedy", "sampled"} <= set(report.parts)
 

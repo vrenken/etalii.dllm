@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from etalii_dllm import _kernels, receipts
-from etalii_dllm.generation import ContextLengthError, _complete_prefix
+from etalii_dllm.generation import ContextLengthError, _complete_prefix, with_end_of_source
 from etalii_dllm.numerics import fingerprint, log_softmax
 from etalii_dllm.receipts import Verification, canonical_json
 from etalii_dllm.sampling import _DEFAULTS
@@ -239,7 +239,7 @@ def search(
     _check(request)
     _, prompt = engine.request_prompt(request)
     tokenizer = engine.tokenizer
-    context = tokenizer.encode(prompt)
+    context = with_end_of_source(engine.model, tokenizer.encode(prompt))  # a text-to-text model's source (#392)
     window = getattr(getattr(engine.model, "config", None), "context_length", None) or None
     if window is not None and len(context) >= window:
         raise ContextLengthError(

@@ -510,6 +510,11 @@ answer's `logprobs` exactly. `dllm score --receipt` writes a score receipt (`"sc
 a fingerprint of every log-probability) that `dllm replay` and `POST /v1/receipts/verify` check by scoring again.
 [`dllm eval`](evaluation.md) uses the same log-likelihoods for perplexity and multiple-choice tasks.
 
+A T5 text-to-text model scores a text as the answer to a source instead:
+`dllm score answer.txt --source "translate English to German: Thank you"` scores every token of the answer, the
+receipt records the source, and `dllm eval` scores each continuation as the answer to its context. Echo on
+`/v1/completions` is refused for these models, because they do not score their source.
+
 ## Voting
 
 Self-consistency: sample several answers and return the most common one. A vote is exact too
@@ -554,7 +559,8 @@ top-k, top-p and seeds play no part. Penalties, logit bias, min-p, watermarks, g
 With `"receipt": true` the receipt is a beam receipt (`"beam": "dllm-beam/1"`: the request, the settings and every
 answer's fingerprint and score bits; on completions each choice carries its prompt's), which `dllm replay` and
 `POST /v1/receipts/verify` check by searching again. A search runs `width` sequences per step, each with its own
-KV cache, in one batched pass.
+KV cache, in one batched pass. T5 text-to-text models search over their answers in the same way, encoding the
+source once. Their answers equal `transformers`' `generate(num_beams=W, early_stopping=True)` token for token.
 
 ## Guided decoding
 
@@ -588,7 +594,8 @@ curl -s localhost:5080/v1/chat/completions -H 'content-type: application/json' -
 Each guide runs one more forward pass per token and model, with its own KV cache. Guided requests do not use
 speculative decoding (the answer is the same either way) and cannot roll the context window
 ([long conversations](#long-conversations)): they stop when the longest context is full. Receipts record the guide,
-so `dllm replay` repeats it.
+so `dllm replay` repeats it. With a T5 text-to-text model, the negative prompt is a second source that the
+decoder answers alongside, and contrast and ensemble models must be text-to-text models with the same tokenizer.
 
 ## Reasoning
 
