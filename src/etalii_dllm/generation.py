@@ -33,6 +33,16 @@ ROLL_SINK = 4
 """Tokens at the start of the sequence a rolled context keeps (attention sinks)."""
 
 
+def with_end_of_source(model: Any, tokens: Sequence[int]) -> list[int]:
+    """A text-to-text model's prompt (:mod:`etalii_dllm.seq2seq`) is its source, which ends with ``</s>``: ``tokens``
+    with that token appended when missing. Other models' prompts are returned unchanged."""
+    tokens = list(tokens)
+    end = getattr(model, "end_of_source", None)
+    if end is not None and (not tokens or tokens[-1] != end):
+        tokens.append(end)
+    return tokens
+
+
 class ContextLengthError(ValueError):
     """The prompt does not fit in the model's context window."""
 
@@ -497,12 +507,10 @@ class Generator:
         if min_tokens < 0:
             raise ValueError("min_tokens must be non-negative")
         context = self.tokenizer.encode(prompt) if isinstance(prompt, str) else list(prompt)
-        end = getattr(self.model, "end_of_source", None)
-        if end is not None:  # a text-to-text model: the prompt is the source, which ends with </s>
-            if overflow == "roll" or guide is not None or healed:
-                raise ValueError("a text-to-text model's prompt cannot roll, be guided or be healed")
-            if not context or context[-1] != end:
-                context.append(end)
+        if getattr(self.model, "end_of_source", None) is not None:
+            if overflow == "roll" or healed:
+                raise ValueError("a text-to-text model's prompt cannot roll or be healed")
+            context = with_end_of_source(self.model, context)
         window = self.context_length
         if window is not None and len(context) >= window:
             raise ContextLengthError(

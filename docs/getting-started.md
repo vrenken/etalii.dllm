@@ -1101,6 +1101,20 @@ result back as a Hugging Face model that `transformers` loads and generates the 
 [fine-tuning text-to-text models](training.md#text-to-text-models) and
 [exporting them](model-building.md#text-to-text-models).
 
+## 62. Beam search, scoring and guidance for T5 text-to-text models
+
+```bash
+dllm --model flan-t5-small.dllm generate --prompt "translate English to German: How old are you?" --beams 4
+echo -n "Wie alt bist du?" | dllm --model flan-t5-small.dllm score - --source "translate English to German: How old are you?"
+```
+
+The T5 and Flan-T5 models of section 60 now support beam search, which is how T5 models are usually decoded. It
+picks the same answer as `transformers`' `generate(num_beams=4)`, token for token. `dllm score --source` gives the
+exact probability of a given answer to a source; `dllm eval` uses the same scores. Negative prompts, contrastive
+decoding and ensembles of T5 models work too (`--negative-prompt`, `--contrast-model`, `--ensemble-model`).
+Concurrent requests to the server now share decoder steps without changing a bit. Details:
+[specification](specification.md#7-the-t5-encoder-decoder).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
@@ -1148,11 +1162,11 @@ result back as a Hugging Face model that `transformers` loads and generates the 
   encoders and BERT models with the tanh GELU export to safetensors but not to GGUF (llama.cpp's layout cuts their
   position rows), and GGUF files of RoBERTa or XLM-RoBERTa written by llama.cpp do not import. Unigram tokenizers
   come from `tokenizer.json`; GGUF files with a Unigram vocabulary (T5) are refused.
-- T5 text-to-text models (sections 60 and 61) are checked against `transformers` only on tiny synthetic models, run
-  on the CPU without batching, speculation or prompt caching, train only with teacher forcing on input and target
+- T5 text-to-text models (sections 60 to 62) are checked against `transformers` only on tiny synthetic models, run
+  on the CPU without speculation or prompt caching, train only with teacher forcing on input and target
   pairs (no DPO), export to safetensors but not to GGUF, and cannot be steered or inspected with the
-  interpretability commands yet. Their prompt cannot roll, be guided or be healed, and
-  the chat endpoints join the messages' text into one source (T5 has no chat template).
+  interpretability commands yet. Their prompt cannot roll or be healed, `echo` on `/v1/completions` cannot score
+  their source, and the chat endpoints join the messages' text into one source (T5 has no chat template).
 - Granite MoE's experts are stored fused, so a LoRA adapter on them cannot be exported in the PEFT format (the
   merged model exports fine), and llama.cpp has no Granite MoE architecture to export a GGUF file to.
 - Mixture-of-experts models (sections 38 and 40) are checked against a float64 transcription of `transformers` only on tiny

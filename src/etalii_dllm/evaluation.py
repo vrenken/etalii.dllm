@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from etalii_dllm import _kernels
+from etalii_dllm.generation import with_end_of_source
 from etalii_dllm.numerics import argmax, fingerprint, log_softmax, sum_
 
 if TYPE_CHECKING:
@@ -78,8 +79,10 @@ def score(engine: DllmEngine, context: Sequence[int], continuation: Sequence[int
         raise EvaluationError("a continuation needs at least one token of context")
     if not continuation:
         return Scored(np.zeros(0, dtype=np.float32), True)
-    tokens = [*context, *continuation[:-1]]
-    rows = _rows(engine.model, tokens, len(continuation))
+    if getattr(engine.model, "end_of_source", None) is not None:  # a text-to-text model: the context is the source
+        rows = engine.model.answer_logits(with_end_of_source(engine.model, context), continuation)  # type: ignore[attr-defined]
+    else:
+        rows = _rows(engine.model, [*context, *continuation[:-1]], len(continuation))
     logprobs = np.empty(len(continuation), dtype=np.float32)
     greedy = True
     for i, target in enumerate(continuation):

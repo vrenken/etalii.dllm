@@ -28,7 +28,14 @@ from etalii_dllm.chat import TOOL_CALL_OPEN, ChatMessage, ToolCall, render
 from etalii_dllm.chat_template import ChatTemplate
 from etalii_dllm.cuda import DEVICES
 from etalii_dllm.gbnf import TokenTable
-from etalii_dllm.generation import OVERFLOWS, Generation, GenerationResult, Generator, TokenLogprobs
+from etalii_dllm.generation import (
+    OVERFLOWS,
+    Generation,
+    GenerationResult,
+    Generator,
+    TokenLogprobs,
+    with_end_of_source,
+)
 from etalii_dllm.grammar import Grammar, HealingConstraint, TokenConstraint, TokenTrie
 from etalii_dllm.guidance import Guide
 from etalii_dllm.infill import fim_tokens
@@ -489,14 +496,11 @@ class DllmEngine:
                 quantize=quantize,
                 device=device,
                 adapter=adapter,
-                used={
-                    "steer": steer,
-                    "index": index,
-                    "draft_model": draft_model,
-                    "contrast_model": contrast_model,
-                    "ensemble": ensemble,
-                    "speculate": speculate,
-                },
+                verify=verify,
+                contrast_model=contrast_model,
+                ensemble=ensemble,
+                ensemble_weight=ensemble_weight,
+                used={"steer": steer, "index": index, "draft_model": draft_model, "speculate": speculate},
             )
         tensors: Mapping[str, np.ndarray] = file.tensors
         weights_fingerprint = file.fingerprint
@@ -593,11 +597,17 @@ class DllmEngine:
         quantize: str | None,
         device: str,
         adapter: str | Path | None,
+        verify: bool,
+        contrast_model: str | Path | None,
+        ensemble: Sequence[tuple[str | Path, float]],
+        ensemble_weight: float,
         used: Mapping[str, Any],
     ) -> DllmEngine:
         """A T5 text-to-text model (:mod:`etalii_dllm.seq2seq`): the prompt is the source, the answer is generated
-        by the decoder. Decoding options that need a decoder-only model are refused."""
+        by the decoder. ``contrast_model`` and ``ensemble`` are other text-to-text models with the same tokenizer
+        (#394). Decoding options that need a decoder-only model are refused."""
         from etalii_dllm.bpe import from_model_header
+        from etalii_dllm.modelfile import ModelFile
         from etalii_dllm.seq2seq import TextToText
 
         refused = [name for name, value in used.items() if value]
@@ -621,11 +631,23 @@ class DllmEngine:
             release=None if adapter else file.release,
         )
         tokenizer = from_model_header(file.tokenizer)
+
+        def companion(other: str | Path, role: str) -> TextToText:
+            loaded = ModelFile(other, verify=verify)
+            if _vocabulary(loaded.tokenizer) != _vocabulary(file.tokenizer):
+                raise ValueError(f"{other}: the {role} model's tokenizer differs from the model's")
+            if not loaded.config.is_text_to_text:
+                raise ValueError(f"{other}: the {role} model of a text-to-text model must be a text-to-text model")
+            return TextToText(loaded.config, loaded.tensors, weights_fingerprint=loaded.fingerprint, quantize=quantize)
+
         return DllmEngine(
             model,  # type: ignore[arg-type]
             tokenizer,
             "fp_" + model.weights_fingerprint[:12],
             stop_tokens=[*file.config.eos_token_ids, tokenizer.end_of_sequence],
+            contrast_model=companion(contrast_model, "contrast") if contrast_model else None,  # type: ignore[arg-type]
+            ensemble=[(companion(other, "ensemble"), float(weight)) for other, weight in ensemble],  # type: ignore[misc]
+            ensemble_weight=ensemble_weight,
         )
 
     @staticmethod
@@ -938,6 +960,7 @@ class DllmEngine:
                 negative = [*messages[:last], replace(messages[last], content=text), *messages[last + 1 :]]
                 text = self.render_chat(negative, tools, thinking=thinking)
             tokens = self.tokenizer.encode(text) or [self.tokenizer.end_of_sequence]
+            tokens = with_end_of_source(self.model, tokens)  # a text-to-text model's negative source (#394)
             model, scale = self.model, options.guidance_scale
             return lambda _context: guidance.NegativePrompt(model, tokens, scale)
         if options.contrast_beta is not None:

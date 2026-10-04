@@ -490,6 +490,7 @@ def main(argv: list[str] | None = None) -> int:
     scorer = commands.add_parser("score", help="the exact log-probability of every token of a text")
     scorer.add_argument("file", help="the text file to score ('-' reads standard input)")
     scorer.add_argument("--top", type=int, default=0, help="also list the N most likely tokens at each position")
+    scorer.add_argument("--source", help="a text-to-text model's source: the text is scored as its answer")
     scorer.add_argument("--json", action="store_true", help="print the scores (and a receipt) as JSON")
     scorer.add_argument("--receipt", metavar="FILE", help="write a score receipt to FILE (dllm replay checks it)")
 
@@ -976,11 +977,11 @@ def _score(args: argparse.Namespace, engine: DllmEngine) -> int:
 
     try:
         text = sys.stdin.read() if args.file == "-" else Path(args.file).read_text(encoding="utf-8")
-        result = scoring.score_text(engine, text, args.top)
+        result = scoring.score_text(engine, text, args.top, args.source)
     except (OSError, ValueError) as error:
         print(f"dllm score: {error}", file=sys.stderr)
         return 2
-    receipt = scoring.record(engine, text, args.top, result)
+    receipt = scoring.record(engine, text, args.top, result, args.source)
     if args.receipt:
         Path(args.receipt).write_text(json.dumps(receipt, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     if args.json:

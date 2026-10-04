@@ -280,7 +280,8 @@ def _check_encoder(engine: Any) -> ReferenceCheck:
 
 def _check_text_to_text(engine: Any, max_tokens: int) -> ReferenceCheck:
     """A text-to-text model against the reference: the first answer token's logits for the verify prompt and the
-    greedy, sampled, controlled, modern and adaptive answers, bit for bit (the reference recomputes every step)."""
+    greedy, sampled, controlled, modern and adaptive answers and the greedy answer's scores, bit for bit (the
+    reference recomputes every step)."""
     from etalii_dllm import reference
 
     twin = reference.ReferenceTextToText.from_engine_model(engine.model)
@@ -301,6 +302,16 @@ def _check_text_to_text(engine: Any, max_tokens: int) -> ReferenceCheck:
         sampler = reference.sampler(options, breakers if options.dry else ())
         tokens, _ = twin.generate(source, max_tokens, sampler, stops)
         results[name] = _first_difference(answer.tokens, tokens)
+    # The greedy answer scored as the answer to the source (docs/specification.md#prompt-scoring, #393).
+    from etalii_dllm import scoring
+
+    answer_tokens = list(engine.complete(PROMPT, max_tokens, GREEDY).tokens)
+    scored = scoring.score_tokens(engine, answer_tokens, source=source).tokens
+    engine_scores = np.asarray([t.logprob for t in scored], dtype=np.float32)
+    rows = [twin.forward(source, answer_tokens[:i]) for i in range(len(answer_tokens))]
+    expected = np.asarray([reference.log_softmax(row)[t] for row, t in zip(rows, answer_tokens, strict=True)],
+                          dtype=np.float32)  # fmt: skip
+    results["scored"] = "equal" if engine_scores.tobytes() == expected.tobytes() else "differ"
     return ReferenceCheck(results)
 
 

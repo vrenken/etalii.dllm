@@ -481,3 +481,10 @@ T5_TEXT_FINETUNE_FINGERPRINT = {
     "t5": "a2a0ac4ccd7b627e3d3ef60fe11dcd30a4db10a267bbe3a8e25ef303cfa53a8f",
     "flan": "b2261003860b0ce3dd08f9aa00f74460c352dc331a381bc698e0fbc38dddd0c5",
 }
+
+# Beam search, scoring and a negative source on the tiny Flan-T5 of tests/test_t5_decoding.py (#392-#394).
+T5_DECODING_FINGERPRINT = {
+    "beam": "e6ef1c0eb2eca2802fa9be1d378ec1e211c178574248eabd26f42ca5b84bb894",
+    "score": "16890c315dcd760fcd4f8d9814627b9342cca8a020b326ecebbb48c4b479fb61",
+    "negative": "4648fd34a52abb1649fb9d16ab2bda6771782fdd8ab905adeaf52288ebba0ff2",
+}

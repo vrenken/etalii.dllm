@@ -215,7 +215,14 @@ flowchart LR
 
 The cache keeps the encoder's projections and the decoder's keys and values. A new token's query sees only keys at
 or before it, so no mask is needed and the cached step gives the bits of a recompute; a different source or an
-answer that is not an extension starts afresh. Text-to-text models do not batch, speculate or use the prompt cache.
+answer that is not an extension starts afresh. `forward_batch` runs the decoder steps of several sequences together:
+each source is encoded on its own, and then the rows of all the new tokens go through every linear layer as one
+stacked matrix, while attention runs per cache. So concurrent requests batch (`batching.Batcher`) and still get
+the bits of a lone run.
+
+The cache can be copied (`export` and `restore`), so beam search gives every hypothesis its own copy.
+`answer_logits(source, answer)` gives the logits before every answer token, for scoring and `dllm eval`.
+Text-to-text models do not speculate or use the prompt cache.
 
 ## Choosing a token
 
