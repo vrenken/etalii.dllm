@@ -116,7 +116,15 @@ dllm export ms-marco-tuned.dllm --format gguf -o ms-marco-tuned.gguf          # 
   context pooler as `pooler.dense`, the special token ids from the tokenizer, plus the sentence-transformers modules of
   an embedder. As for the other encoders, the config is read back through the importer first and must give the same
   model. llama.cpp's GGUF layout has no DeBERTa, so `--format gguf` refuses it.
-- **T5** encoders (Phase 62) and embedders with a `Dense` projection do not export yet.
+- **T5** encoders (Phase 63) export to safetensors only: `T5EncoderModel` (the word embedding as `shared`, which
+  the encoder ties `embed_tokens` to, the bucket table in the first block's attention, the MLP as `wi`, or `wi_0` and
+  `wi_1` when it is gated, and `wo`), `feed_forward_proj` `relu`, `gelu`, `gelu_new`, `silu` or `gated-gelu`, plus
+  the sentence-transformers modules. transformers has no gated MLP with another activation, so such a model is
+  refused; llama.cpp has no T5 encoder embedder layout, so `--format gguf` refuses T5 too.
+- An embedder's **`Dense` projection** (any encoder family) is written as the sentence-transformers module `2_Dense`
+  (`config.json` with the sizes, the bias and the activation; `model.safetensors` with `linear.weight` and
+  `linear.bias`) between the pooling and `Normalize`. GGUF has no place for it, so such models export to safetensors
+  only.
 
 ### SentencePiece models through GGUF
 

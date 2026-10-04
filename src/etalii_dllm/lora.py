@@ -19,7 +19,10 @@ MLP (``q k v o up down``; there is no ``gate``) under transformers' names, e.g.
 ``BertForSequenceClassification``; ``roberta.`` for RoBERTa and XLM-RoBERTa). DeBERTa's projections are
 ``attention.self.query_proj``, ``key_proj`` and ``value_proj`` (under ``deberta.`` in a cross-encoder); its query and
 key projections also project the relative position table, and the merged weight serves both, as PEFT's adapted
-module does. The pooler and classifier stay frozen.
+module does. T5 adapts ``SelfAttention.q``/``k``/``v``/``o`` and the MLP's ``DenseReluDense.wi`` (``wi_0`` and
+``wi_1``, gate and up, when it is gated) and ``wo`` under ``encoder.block.N.layer.M.``, as in
+``base_model.model.encoder.block.0.layer.1.DenseReluDense.wi_1.lora_A.weight``. The pooler, the classifier and a
+``Dense`` projection after the pooling stay frozen.
 
 ModernBERT fuses q, k and v into one module (``attn.Wqkv``) and gate and up into another (``mlp.Wi``), and a PEFT
 adapter on a fused module has one ``A`` for all of its parts and one ``B`` with their rows stacked. So here the parts
@@ -94,6 +97,23 @@ DEBERTA_MODULES = {
     "v": "attention.self.value_proj",
 }
 _BY_DEBERTA_MODULE = {module: target for target, module in DEBERTA_MODULES.items()}
+# T5 encoders: T5EncoderModel's modules under encoder.block.N (the MLP's wi, or wi_0 and wi_1 when it is gated).
+_T5_ATTENTION = {"q": "layer.0.SelfAttention.q", "k": "layer.0.SelfAttention.k", "v": "layer.0.SelfAttention.v"}
+_T5_ATTENTION["o"] = "layer.0.SelfAttention.o"
+
+
+def t5_modules(config: TransformerConfig) -> dict[str, str]:
+    """T5's module names per target, after ``encoder.block.N.``: ``wi_0``/``wi_1`` (gate/up) for T5 v1.1."""
+    if config.gated_mlp:
+        mlp = {"gate": "layer.1.DenseReluDense.wi_0", "up": "layer.1.DenseReluDense.wi_1"}
+    else:
+        mlp = {"up": "layer.1.DenseReluDense.wi"}
+    return {**_T5_ATTENTION, **mlp, "down": "layer.1.DenseReluDense.wo"}
+
+
+_T5_PEFT_KEY = re.compile(
+    r"^(?:base_model\.model\.)?encoder\.block\.(\d+)\.(layer\.[01]\.\w+\.\w+)\.lora_([AB])\.weight$"
+)
 # ModernBERT: its modules and the parts of the fused ones, in row order (the first part keeps the shared A).
 MODERNBERT_MODULES = {"attn.Wqkv": ("q", "k", "v"), "attn.Wo": ("o",), "mlp.Wi": ("gate", "up"), "mlp.Wo": ("down",)}
 _MODERNBERT_MODULE_OF = {part: module for module, parts in MODERNBERT_MODULES.items() for part in parts}
@@ -170,13 +190,12 @@ def target_weights(config: TransformerConfig, lora: LoraConfig) -> list[str]:
     """The adapted weight names, in tensor order. In a mixture-of-experts layer ``gate``, ``up`` and ``down`` adapt
     every expert's projection (``layers.N.mlp.experts.E.gate.weight``) and the shared expert's
     (``layers.N.mlp.shared.gate.weight``); the router and the shared expert's gate are never adapted."""
-    if config.family == "t5":
-        raise AdapterError("LoRA adapters for T5 encoders are not supported yet (fine-tuning T5 is not)")
     if config.family == "modernbert":
         targets = _modernbert_targets(lora)
         return tensor_order([f"layers.{i}.{_WEIGHT_NAMES[t]}" for i in range(config.layers) for t in targets])
     if config.is_encoder:
-        targets = [t for t in lora.targets if t in ENCODER_MODULES]
+        modules = t5_modules(config) if config.family == "t5" else ENCODER_MODULES
+        targets = [t for t in lora.targets if t in modules]
         if not targets:
             raise AdapterError("an encoder has no gate projection; adapt q, k, v, o, up or down")
         return tensor_order([f"layers.{i}.{_WEIGHT_NAMES[t]}" for i in range(config.layers) for t in targets])
@@ -354,6 +373,9 @@ def peft_key(name: str, config: TransformerConfig | None = None) -> str:
         target = next(t for t, w in _WEIGHT_NAMES.items() if w == weight)
         prefix = "model." if config.classifier_labels else ""
         return f"base_model.model.{prefix}layers.{layer}.{_MODERNBERT_MODULE_OF[target]}.{suffix}"
+    if config is not None and config.family == "t5":
+        target = next(t for t, w in _WEIGHT_NAMES.items() if w == weight)
+        return f"base_model.model.encoder.block.{layer}.{t5_modules(config)[target]}.{suffix}"
     if config is not None and config.is_encoder:
         target = next(t for t, w in _WEIGHT_NAMES.items() if w == weight)
         module = _encoder_modules(config)[target]
@@ -394,6 +416,10 @@ def target_modules(config: TransformerConfig | None, lora: LoraConfig) -> list[s
     if config is not None and config.family == "modernbert":
         modules = [m for m, parts in MODERNBERT_MODULES.items() if parts[0] in _modernbert_targets(lora)]
         return rf".*layers\.\d+\.(?:{'|'.join(m.replace('.', chr(92) + '.') for m in modules)})"
+    if config is not None and config.family == "t5":
+        modules = t5_modules(config)
+        names = "|".join(modules[t].replace(".", r"\.") for t in lora.targets if t in modules)
+        return rf".*encoder\.block\.\d+\.(?:{names})"
     if config is not None and config.is_encoder:
         modules = _encoder_modules(config)
         names = "|".join(modules[t].replace(".", r"\.") for t in lora.targets if t in modules)
@@ -489,6 +515,14 @@ def _adapter_name(key: str, config: TransformerConfig, directory: Path) -> tuple
             raise AdapterError(f"{directory}: tensor {key!r} does not fit the model")
         first = MODERNBERT_MODULES[modern.group(3)][0]
         return f"layers.{int(modern.group(2))}.{_WEIGHT_NAMES[first]}.lora_{modern.group(4).lower()}", first
+    if config.family == "t5":
+        t5 = _T5_PEFT_KEY.match(key)
+        target = {module: t for t, module in t5_modules(config).items()}.get(t5.group(2)) if t5 else None
+        if t5 is None or target is None:
+            raise AdapterError(f"{directory}: unsupported adapter tensor {key!r}")
+        if not 0 <= int(t5.group(1)) < config.layers:
+            raise AdapterError(f"{directory}: tensor {key!r} does not fit the model")
+        return f"layers.{int(t5.group(1))}.{_WEIGHT_NAMES[target]}.lora_{t5.group(3).lower()}", target
     if config.is_encoder:
         found = _ENCODER_PEFT_KEY.match(key)
         by_module = _BY_DEBERTA_MODULE if config.family == "deberta" else _BY_ENCODER_MODULE

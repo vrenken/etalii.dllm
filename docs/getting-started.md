@@ -1061,6 +1061,20 @@ encoders, including the extra projection layer these models apply to the sentenc
 how far apart they are, using a small table of distances; the engine reads that table exactly as T5 itself does, so
 the vectors are the same on every machine. Details: [T5 encoders](retrieval.md#t5-encoders).
 
+## 59. Fine-tuning and exporting T5 embedders
+
+```bash
+dllm finetune gtr.dllm --data pairs.jsonl --steps 100 --lora-rank 8 -o gtr-tuned.dllm --adapter-output gtr-adapter
+dllm export gtr-tuned.dllm --format safetensors -o gtr-tuned-hf
+```
+
+The T5 embedders of section 58 now train like the other encoders: `dllm finetune` teaches them with pairs of texts,
+with or without a LoRA adapter, and the extra projection layer after the sentence vector learns along with the rest
+(for every model that has one, not only T5). `dllm export` writes the result back as a Hugging Face model that
+`transformers` and sentence-transformers load, projection included. The gradients are computed exactly, so the same
+data gives the same tuned model on every machine. Details: [fine-tuning encoders](training.md#encoders) and
+[exporting encoders](model-building.md#encoders).
+
 ## What does not work yet
 
 - Eight real models are verified against Hugging Face `transformers` in CI: SmolLM2-135M-Instruct,
@@ -1102,9 +1116,10 @@ the vectors are the same on every machine. Details: [T5 encoders](retrieval.md#t
   checked against `transformers` only on tiny synthetic models, exports to safetensors but not to GGUF (llama.cpp
   has no ModernBERT layout), and its fine-tuning does not freeze the padding row. DeBERTa (section 56) is checked
   only on tiny synthetic models too, imports only DeBERTa-v3's layout from a `tokenizer.json`, and exports to
-  safetensors but not to GGUF (llama.cpp has no DeBERTa layout). T5 encoders (section 58) are checked only on tiny
-  synthetic models, import only as embedders (no T5 text generation) and do not fine-tune, take LoRA adapters or
-  export yet; neither do embedders with a `Dense` projection. RoBERTa and XLM-RoBERTa
+  safetensors but not to GGUF (llama.cpp has no DeBERTa layout). T5 encoders (sections 58 and 59) are checked only
+  on tiny synthetic models, import only as embedders (no T5 text generation), train only with the embedding
+  objective, and export to safetensors but not to GGUF, as do embedders with a `Dense` projection; a T5 with a gated
+  MLP other than the tanh GELU does not export (transformers has no such `feed_forward_proj`). RoBERTa and XLM-RoBERTa
   encoders and BERT models with the tanh GELU export to safetensors but not to GGUF (llama.cpp's layout cuts their
   position rows), and GGUF files of RoBERTa or XLM-RoBERTa written by llama.cpp do not import. Unigram tokenizers
   come from `tokenizer.json`; GGUF files with a Unigram vocabulary (T5) are refused.

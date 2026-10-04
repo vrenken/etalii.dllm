@@ -1,5 +1,5 @@
-"""Reverse-mode gradients of BERT, ModernBERT and DeBERTa encoders (``etalii_dllm.encoder``): embedders and
-cross-encoders (#352, #360, #367).
+"""Reverse-mode gradients of BERT, ModernBERT, DeBERTa and T5 encoders (``etalii_dllm.encoder``): embedders and
+cross-encoders (#352, #360, #367, #377).
 
 The forward pass is the encoder's own, kernel for kernel (``Encoder.hidden_states`` and ``Encoder.classify``), so
 its states and logits equal the served model's bit for bit. The backward pass runs the gradient kernels of
@@ -32,6 +32,16 @@ and bias gradients are added to the content path's (content first). The table ro
 (``pq``'s then ``pk``'s, layers last to first) are added in float32 and go through ``layer_norm_backward`` to
 ``relative_norm`` and ``relative_embedding``, whose rows no pair reads get zero. The head
 ``classifier(gelu(pooler(h[0])))`` runs ``gelu_backward``.
+
+T5's backward pass runs ``rms_norm_backward`` for its bias-free RMS norms, ``biased_attention_backward`` with scale 1,
+and its MLP's activation gradient (ReLU passes ``dy`` where its input is positive, +0 elsewhere, as torch does; the
+gated MLP's gradient is ModernBERT's with that activation). Every layer reads one bucket table, so the score bias
+gradient of every layer (last to first, added in float32) scatters back with ``embedding_backward``: each (head, i,
+j) value summed in (head, i, j) row-major order into row ``t5_bucket(j - i)`` of that head's column.
+
+An embedder with a sentence-transformers ``Dense`` module (:func:`sentence_vector`) trains it with the rest: the
+normalisation's gradient goes through ``softcap_backward`` (``tanh``) and ``linear_backward`` to the projection's
+weight and bias and to the pooled vector.
 """
 
 from __future__ import annotations
@@ -44,7 +54,7 @@ import numpy as np
 import numpy.typing as npt
 
 from etalii_dllm.architecture import TransformerConfig
-from etalii_dllm.encoder import relative_index
+from etalii_dllm.encoder import activate, relative_index, t5_bias, t5_relative_buckets
 from etalii_dllm.numerics import (
     FloatArray,
     attention,
@@ -60,8 +70,11 @@ from etalii_dllm.numerics import (
     layer_norm_backward,
     linear,
     linear_backward,
+    rms_norm,
+    rms_norm_backward,
     rope,
     rope_inv_freq,
+    silu_backward,
     softcap,
     softcap_backward,
     sum_squares,
@@ -100,13 +113,10 @@ class EncoderGradients:
     def __init__(self, config: TransformerConfig) -> None:
         if not config.is_encoder:
             raise ValueError(f"{config.family} is a decoder; its gradients are DecoderGradients")
-        if config.family == "t5":
-            raise ValueError("fine-tuning T5 encoders is not supported yet")
-        if config.projection_size:
-            raise ValueError("fine-tuning an embedder with a Dense projection after the pooling is not supported yet")
         self.config = config
         self.modern = config.family == "modernbert"
         self.deberta = config.family == "deberta"
+        self.t5 = config.family == "t5"
         if self.modern:
             local = config.rope_theta if config.local_rope_theta is None else config.local_rope_theta
             self.inv_freq = rope_inv_freq(config.head_dim, config.rope_theta)
@@ -130,6 +140,8 @@ class EncoderGradients:
             return self._modern_encode(weights, ids)
         if self.deberta:
             return self._deberta_encode(weights, ids, types)
+        if self.t5:
+            return self._t5_encode(weights, ids)
         kinds = np.zeros(len(ids), dtype=np.int64) if types is None else np.asarray(types, dtype=np.int64)
         if kinds.shape != ids.shape or kinds.min() < 0 or kinds.max() >= config.type_vocabulary_size:
             raise ValueError(f"token types must be one per token, below {config.type_vocabulary_size}")
@@ -249,6 +261,8 @@ class EncoderGradients:
             return self._modern_gradients(weights, result, dh, grads)
         if self.deberta:
             return self._deberta_gradients(weights, result, dh, grads)
+        if self.t5:
+            return self._t5_gradients(weights, result, dh, grads)
         heads, head_dim = config.heads, config.head_dim
         for i in reversed(range(config.layers)):
             p = f"layers.{i}."
@@ -528,6 +542,89 @@ class EncoderGradients:
             ).numpy()
         return {name: np.array(values, dtype=np.float32) for name, values in grads.items()}
 
+    # T5
+
+    def _t5_encode(self, weights: Mapping[str, npt.ArrayLike], ids: npt.NDArray[np.int64]) -> EncoderPass:
+        """``Encoder._t5_states``, keeping the activations."""
+        config = self.config
+        n, heads, head_dim = len(ids), config.heads, config.head_dim
+        embedded = np.ascontiguousarray(_array(weights["token_embedding.weight"])[ids])
+        bias = t5_bias(config, weights["relative_bias.weight"], n)
+        result = EncoderPass(ids, np.zeros(n, dtype=np.int64), np.arange(n, dtype=np.int64), embedded, embedded)
+        h = embedded
+        for i in range(config.layers):
+            p = f"layers.{i}."
+            x = self._rms(weights, h, p + "attention_norm")
+            q = self._linear(weights, x, p + "attention.q").reshape(n, heads, head_dim)
+            k = self._linear(weights, x, p + "attention.k").reshape(n, heads, head_dim)
+            v = self._linear(weights, x, p + "attention.v").reshape(n, heads, head_dim)
+            mixed = biased_attention(q, k, v, bias, 1.0).numpy().reshape(n, -1)
+            a = h + self._linear(weights, mixed, p + "attention.o")
+            x2 = self._rms(weights, a, p + "mlp_norm")
+            up = self._linear(weights, x2, p + "mlp.up")
+            saved = {"h": h, "x": x, "q": q, "k": k, "v": v, "mixed": mixed, "a": a, "x2": x2, "up": up}
+            if config.gated_mlp:
+                gate = self._linear(weights, x2, p + "mlp.gate")
+                activated = activate(gate, config.activation)
+                saved |= {"gate": gate, "act": activated, "inner": activated * up}
+            else:
+                saved["inner"] = activate(up, config.activation)
+            result.layers.append(saved)
+            h = a + self._linear(weights, saved["inner"], p + "mlp.down")
+        result.layers.append({"h": h, "bias": bias})
+        result.states = self._rms(weights, h, "final_norm")
+        return result
+
+    def _t5_gradients(
+        self,
+        weights: Mapping[str, npt.ArrayLike],
+        result: EncoderPass,
+        dstates: FloatArray,
+        grads: dict[str, FloatArray],
+    ) -> dict[str, FloatArray]:
+        config = self.config
+        n, heads, head_dim, buckets = len(result.tokens), config.heads, config.head_dim, config.position_buckets
+        last = result.layers[-1]
+        bias = last["bias"]
+        # Flat scatter targets of every (head, i, j): row h * buckets + t5_bucket(j - i) of the transposed table.
+        positions = np.arange(n, dtype=np.int64)
+        index = t5_relative_buckets(positions[None, :] - positions[:, None], buckets, config.max_relative_positions)
+        targets = (np.arange(heads, dtype=np.int64)[:, None, None] * buckets + index[None]).reshape(-1)
+        dtable = np.zeros((heads, buckets), dtype=np.float32)
+        dh = self._rms_backward(weights, last["h"], dstates, grads, "final_norm")
+        for i in reversed(range(config.layers)):
+            p = f"layers.{i}."
+            saved = result.layers[i]
+            # h_out = a + down(mlp(x2)), x2 = RMSNorm(a)
+            dinner = self._linear_backward(weights, saved["inner"], dh, grads, p + "mlp.down")
+            if config.gated_mlp:  # inner = act(gate) * up
+                dgate = self._activation_backward(saved["gate"], dinner * saved["up"])
+                dup = dinner * saved["act"]
+                dx2 = self._linear_backward(weights, saved["x2"], dgate, grads, p + "mlp.gate")
+                dx2 = dx2 + self._linear_backward(weights, saved["x2"], dup, grads, p + "mlp.up")
+            else:  # inner = act(up)
+                dup = self._activation_backward(saved["up"], dinner)
+                dx2 = self._linear_backward(weights, saved["x2"], dup, grads, p + "mlp.up")
+            da = dh + self._rms_backward(weights, saved["a"], dx2, grads, p + "mlp_norm")
+            # a = h + o(attention(q(x), k(x), v(x), bias)), x = RMSNorm(h)
+            dmixed = self._linear_backward(weights, saved["mixed"], da, grads, p + "attention.o")
+            dq, dk, dv, dbias = biased_attention_backward(
+                saved["q"], saved["k"], saved["v"], bias, dmixed.reshape(n, heads, head_dim), 1.0
+            )
+            scattered = embedding_backward(dbias.numpy().reshape(-1, 1), targets, heads * buckets)
+            dtable = dtable + scattered.numpy().reshape(heads, buckets)
+            dx = None
+            for name, d in (("q", dq), ("k", dk), ("v", dv)):
+                part = self._linear_backward(
+                    weights, saved["x"], d.numpy().reshape(n, -1), grads, p + "attention." + name
+                )
+                dx = part if dx is None else dx + part
+            assert dx is not None
+            dh = da + self._rms_backward(weights, saved["h"], dx, grads, p + "attention_norm")
+        grads["relative_bias.weight"] = np.ascontiguousarray(dtable.T)
+        grads["token_embedding.weight"] = embedding_backward(dh, result.tokens, config.vocabulary_size).numpy()
+        return {name: np.array(values, dtype=np.float32) for name, values in grads.items()}
+
     # Pieces
 
     @property
@@ -538,6 +635,30 @@ class EncoderGradients:
         if self.config.activation == "gelu_tanh":
             return gelu_tanh_backward(x, dy).numpy()
         return gelu_backward(x, dy).numpy()
+
+    def _activation_backward(self, x: np.ndarray, dy: np.ndarray) -> FloatArray:
+        """``dy * act'(x)`` for T5's activation: ``relu`` passes ``dy`` where ``x > 0`` (+0 elsewhere, as torch)."""
+        activation = self.config.activation
+        if activation == "relu":
+            return np.where(x > 0, dy, np.float32(0)).astype(np.float32)
+        if activation == "silu":
+            return silu_backward(x, dy).numpy()
+        return self._gelu_backward(x, dy)
+
+    def _rms(self, weights: Mapping[str, npt.ArrayLike], x: np.ndarray, name: str) -> FloatArray:
+        return rms_norm(x, weights[name + ".weight"], self.config.rms_norm_eps).numpy()
+
+    def _rms_backward(
+        self,
+        weights: Mapping[str, npt.ArrayLike],
+        x: np.ndarray,
+        dy: np.ndarray,
+        grads: dict[str, FloatArray],
+        name: str,
+    ) -> FloatArray:
+        dx, dw = rms_norm_backward(x, weights[name + ".weight"], dy, self.config.rms_norm_eps)
+        grads[name + ".weight"] = dw.numpy()
+        return dx.numpy()
 
     def _linear(self, weights: Mapping[str, npt.ArrayLike], x: np.ndarray, name: str) -> FloatArray:
         return linear(x, weights[name + ".weight"], weights.get(name + ".bias")).numpy()
@@ -585,21 +706,9 @@ def pool(states: npt.ArrayLike, mode: str) -> tuple[FloatArray, FloatArray, np.f
     """The sentence vector of ``states`` as ``engine.embed`` pools it (``mean``: each column summed over positions
     ascending in double through the ``linear`` kernel, divided in float32; ``cls``: the first state; ``last_token``:
     the last), then L2-normalised: (the normalised vector, the pooled one, its float32 norm)."""
-    values = np.asarray(states, dtype=np.float32)
-    if mode == "cls":
-        vector = values[0].copy()
-    elif mode == "last_token":
-        vector = values[-1].copy()
-    elif mode == "mean":
-        ones = np.ones((1, values.shape[0]), dtype=np.float32)
-        total = linear(ones, np.ascontiguousarray(values.T)).numpy().reshape(-1)
-        vector = (total / np.float32(values.shape[0])).astype(np.float32)
-    else:
-        raise ValueError(f"unknown pooling {mode!r}; supported: {', '.join(POOLING_MODES)}")
-    norm = np.float32(np.sqrt(sum_squares(vector)))
-    if not norm > 0:
-        raise ValueError("cannot normalise a zero sentence vector")
-    return (vector / norm).astype(np.float32), vector, norm
+    vector = _pooled(np.asarray(states, dtype=np.float32), mode)
+    normalized, norm = _normalize(vector)
+    return normalized, vector, norm
 
 
 def pool_backward(
@@ -608,10 +717,96 @@ def pool_backward(
     """The gradient ``[positions, hidden]`` of the states from ``dnormalized``, the gradient of :func:`pool`'s
     normalised vector ``u / |u|``: ``du = (d - u_hat (u_hat . d)) / |u|`` (the ``dot`` kernel), then ``du`` to the
     pooled position (``cls``, ``last_token``) or ``du / positions`` to every position (``mean``)."""
+    return _spread(_normalize_backward(normalized, norm, dnormalized), positions, mode)
+
+
+@dataclass
+class SentenceVector:
+    """A training sentence vector: pooled, through the model's ``Dense`` projection when it has one, normalised."""
+
+    normalized: FloatArray
+    norm: np.float32
+    pooled: FloatArray
+    before: FloatArray | None = None
+    """The projection's ``linear`` output, before its activation (``None`` without a projection)."""
+
+
+def sentence_vector(
+    weights: Mapping[str, npt.ArrayLike], states: npt.ArrayLike, mode: str, projection: str | None = None
+) -> SentenceVector:
+    """``engine.embed``'s vector of ``states``: :func:`pool`, then, with ``projection`` (the embedding setting:
+    ``identity`` or ``tanh``), the ``Dense`` module ``act(linear(pooled, projection.weight, projection.bias))``
+    (``tanh`` as ``softcap(x, 1)``), then L2-normalised."""
+    pooled = _pooled(np.asarray(states, dtype=np.float32), mode)
+    if not projection:
+        normalized, norm = _normalize(pooled)
+        return SentenceVector(normalized, norm, pooled)
+    before = linear(pooled.reshape(1, -1), weights["projection.weight"], weights.get("projection.bias")).numpy()
+    if projection == "tanh":
+        projected = softcap(before, 1.0).numpy()
+    elif projection == "identity":
+        projected = before
+    else:
+        raise ValueError(f"unsupported projection activation {projection!r}")
+    normalized, norm = _normalize(projected.reshape(-1))
+    return SentenceVector(normalized, norm, pooled, before.reshape(-1))
+
+
+def sentence_backward(
+    weights: Mapping[str, npt.ArrayLike],
+    vector: SentenceVector,
+    dnormalized: npt.ArrayLike,
+    positions: int,
+    mode: str,
+    projection: str | None = None,
+) -> tuple[FloatArray, dict[str, FloatArray]]:
+    """The gradient of the states from ``dnormalized`` (:func:`pool_backward`), through the projection when
+    :func:`sentence_vector` ran one (``softcap_backward`` for ``tanh``, then ``linear_backward``), and the
+    projection's weight (and bias) gradients."""
+    d = _normalize_backward(vector.normalized, vector.norm, dnormalized)
+    grads: dict[str, FloatArray] = {}
+    if projection:
+        assert vector.before is not None
+        if projection == "tanh":
+            d = softcap_backward(vector.before, d, 1.0).numpy()
+        biased = "projection.bias" in weights
+        dpooled, dw, db = linear_backward(
+            vector.pooled.reshape(1, -1), weights["projection.weight"], d.reshape(1, -1), with_bias=biased
+        )
+        grads["projection.weight"] = dw.numpy()
+        if biased:
+            grads["projection.bias"] = _value(db).reshape(-1)
+        d = dpooled.numpy().reshape(-1)
+    return _spread(d, positions, mode), grads
+
+
+def _pooled(values: np.ndarray, mode: str) -> FloatArray:
+    if mode == "cls":
+        return values[0].copy()
+    if mode == "last_token":
+        return values[-1].copy()
+    if mode == "mean":
+        ones = np.ones((1, values.shape[0]), dtype=np.float32)
+        total = linear(ones, np.ascontiguousarray(values.T)).numpy().reshape(-1)
+        return (total / np.float32(values.shape[0])).astype(np.float32)
+    raise ValueError(f"unknown pooling {mode!r}; supported: {', '.join(POOLING_MODES)}")
+
+
+def _normalize(vector: np.ndarray) -> tuple[FloatArray, np.float32]:
+    norm = np.float32(np.sqrt(sum_squares(vector)))
+    if not norm > 0:
+        raise ValueError("cannot normalise a zero sentence vector")
+    return (vector / norm).astype(np.float32), norm
+
+
+def _normalize_backward(normalized: npt.ArrayLike, norm: np.float32, dnormalized: npt.ArrayLike) -> FloatArray:
     u_hat = np.asarray(normalized, dtype=np.float32)
     d = np.asarray(dnormalized, dtype=np.float32)
-    du = ((d - u_hat * np.float32(dot(u_hat, d))) / norm).astype(np.float32)
-    dstates = np.zeros((positions, u_hat.shape[0]), dtype=np.float32)
+    return ((d - u_hat * np.float32(dot(u_hat, d))) / norm).astype(np.float32)
+
+
+def _spread(du: np.ndarray, positions: int, mode: str) -> FloatArray:
+    dstates = np.zeros((positions, du.shape[0]), dtype=np.float32)
     if mode == "cls":
         dstates[0] = du
     elif mode == "last_token":

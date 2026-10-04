@@ -1,5 +1,5 @@
-"""Encoders back to the ecosystem (issues #355, #360, #370): ``dllm export`` of BERT, RoBERTa, XLM-RoBERTa,
-ModernBERT and DeBERTa models.
+"""Encoders back to the ecosystem (issues #355, #360, #370, #380): ``dllm export`` of BERT, RoBERTa, XLM-RoBERTa,
+ModernBERT, DeBERTa and T5 models.
 
 - ``safetensors``: a Hugging Face model directory that transformers and sentence-transformers load: ``config.json``
   (``BertModel``, ``RobertaModel`` or ``XLMRobertaModel``, or their ``...ForSequenceClassification`` with the
@@ -11,7 +11,11 @@ ModernBERT and DeBERTa models.
   the head as ``head.dense`` and ``head.norm``, and the special token ids read from the tokenizer. DeBERTa is
   written as ``DebertaV2Model`` or ``DebertaV2ForSequenceClassification`` (the DeBERTa-v3 layout: relative attention
   with shared position projections, ``p2c|c2p``, the relative table's LayerNorm, no absolute positions), the table
-  as ``encoder.rel_embeddings`` and ``encoder.LayerNorm``, the context pooler as ``pooler.dense``.
+  as ``encoder.rel_embeddings`` and ``encoder.LayerNorm``, the context pooler as ``pooler.dense``. T5 is written as
+  ``T5EncoderModel`` (the word embedding as ``shared``, the bucket table in the first block, ``feed_forward_proj``
+  ``relu``, ``gelu``, ``gelu_new``, ``silu`` or ``gated-gelu``; transformers has no gated MLP with another
+  activation). An embedder's ``Dense`` projection (any family) is the sentence-transformers module ``2_Dense``
+  (``config.json`` and ``model.safetensors`` with ``linear.weight`` and ``linear.bias``) before ``Normalize``.
 - ``gguf``: one float32 GGUF v3 file in llama.cpp's ``bert`` layout (``token_embd``, ``token_types``,
   ``position_embd``, ``token_embd_norm``, ``blk.N.attn_q`` ... ``layer_output_norm``; a cross-encoder's pooler and
   classifier as ``cls`` and ``cls.output``, so the head computes ``cls.output(tanh(cls(h[0])))``), the pooling type,
@@ -19,13 +23,15 @@ ModernBERT and DeBERTa models.
   ``▁``). ``tokenizer.huggingface.json`` keeps the exact tokenizer, and ``dllm.*`` keys the exact LayerNorm epsilon
   and the pooling or classifier settings, so importing the file gives back the same model; llama.cpp ignores them.
   BERT models with WordPiece vocabularies and the exact GELU only: RoBERTa's positions start past the padding token,
-  which llama.cpp's layout cuts from the position table. ModernBERT and DeBERTa are not written to GGUF.
+  which llama.cpp's layout cuts from the position table. ModernBERT, DeBERTa, T5 and embedders with a ``Dense``
+  projection are not written to GGUF.
 
 Both writers are deterministic (canonical JSON, a fixed tensor order, no clock values).
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 import struct
@@ -64,6 +70,11 @@ _POOLING_FLAGS = {
     "cls": "pooling_mode_cls_token",
     "last_token": "pooling_mode_lasttoken",
 }
+_DENSE_ACTIVATIONS = {
+    "identity": "torch.nn.modules.linear.Identity",
+    "tanh": "torch.nn.modules.activation.Tanh",
+}
+_PROJECTION = ("projection.weight", "projection.bias")
 _LAYER = re.compile(r"^layers\.(\d+)\.(.+)\.(weight|bias)$")
 
 
@@ -71,6 +82,11 @@ def _export_error(message: str) -> Exception:
     from etalii_dllm.exporting import ExportError
 
     return ExportError(message)
+
+
+def _bare(config: TransformerConfig) -> TransformerConfig:
+    """``config`` without its ``Dense`` projection, which sentence-transformers keeps outside the ``config.json``."""
+    return dataclasses.replace(config, projection_size=0, projection_bias=False)
 
 
 def _json_bytes(value: Any) -> bytes:
@@ -89,7 +105,7 @@ def _tokenizer_model(model: ModelFile) -> str:
 
 
 def _model_type(model: ModelFile) -> str:
-    if model.config.family in ("modernbert", "deberta"):
+    if model.config.family in ("modernbert", "deberta", "t5"):
         return model.config.family
     if model.config.padding_index is None:
         return "bert"
@@ -109,6 +125,8 @@ def hf_encoder_config(model: ModelFile) -> dict[str, Any]:
         return _modernbert_config(model)
     if model_type == "deberta":
         return _deberta_config(model)
+    if model_type == "t5":
+        return _t5_config(model)
     stem = {"bert": "Bert", "roberta": "Roberta", "xlm-roberta": "XLMRoberta"}[model_type]
     positions = config.context_length + (0 if config.padding_index is None else config.padding_index + 1)
     document: dict[str, Any] = {
@@ -135,10 +153,8 @@ def hf_encoder_config(model: ModelFile) -> dict[str, Any]:
     except ModelImportError as error:
         raise _export_error(f"the model cannot be described as a Hugging Face config.json: {error}") from None
     if again.classifier_labels != config.classifier_labels:
-        import dataclasses
-
         again = dataclasses.replace(again, classifier_labels=config.classifier_labels)
-    if again != config:
+    if again != _bare(config):
         raise _export_error("the model cannot be described exactly as a Hugging Face config.json")
     return document
 
@@ -205,14 +221,12 @@ def _modernbert_config(model: ModelFile) -> dict[str, Any]:
         again = modernbert_config(document)
     except ModelImportError as error:
         raise _export_error(f"the model cannot be described as a Hugging Face config.json: {error}") from None
-    import dataclasses
-
     again = dataclasses.replace(
         again,
         classifier_labels=config.classifier_labels,
         classifier_pooling=again.classifier_pooling if config.classifier_labels else None,
     )
-    if again != config:
+    if again != _bare(config):
         raise _export_error("the model cannot be described exactly as a Hugging Face config.json")
     return document
 
@@ -262,11 +276,82 @@ def _deberta_config(model: ModelFile) -> dict[str, Any]:
         again = deberta_config(document)
     except ModelImportError as error:
         raise _export_error(f"the model cannot be described as a Hugging Face config.json: {error}") from None
-    import dataclasses
-
-    if dataclasses.replace(again, classifier_labels=config.classifier_labels) != config:
+    if dataclasses.replace(again, classifier_labels=config.classifier_labels) != _bare(config):
         raise _export_error("the model cannot be described exactly as a Hugging Face config.json")
     return document
+
+
+def _t5_config(model: ModelFile) -> dict[str, Any]:
+    from etalii_dllm.importing.importer import ModelImportError, t5_config
+
+    config = model.config
+    if config.gated_mlp:
+        if config.activation != "gelu_tanh":
+            raise _export_error(f"T5 has no gated {config.activation} MLP that transformers would run exactly")
+        projection = "gated-gelu"
+    else:
+        projection = {"gelu_tanh": "gelu_new"}.get(config.activation, config.activation)
+    document: dict[str, Any] = {
+        "architectures": ["T5EncoderModel"],
+        "model_type": "t5",
+        "vocab_size": config.vocabulary_size,
+        "d_model": config.hidden_size,
+        "d_kv": config.head_dim,
+        "d_ff": config.intermediate_size,
+        "num_layers": config.layers,
+        "num_heads": config.heads,
+        "n_positions": config.context_length,
+        "layer_norm_epsilon": config.rms_norm_eps,
+        "feed_forward_proj": projection,
+        "relative_attention_num_buckets": config.position_buckets,
+        "relative_attention_max_distance": config.max_relative_positions,
+        "is_encoder_decoder": False,
+        "use_cache": False,
+        "pad_token_id": _special_id(model, "pad", 0),
+        "eos_token_id": _special_id(model, "eos", 1),
+        "torch_dtype": "float32",
+    }
+    try:
+        again = t5_config(document)
+    except ModelImportError as error:
+        raise _export_error(f"the model cannot be described as a Hugging Face config.json: {error}") from None
+    if again != _bare(config):
+        raise _export_error("the model cannot be described exactly as a Hugging Face config.json")
+    return document
+
+
+_T5_EXPORT_LAYER_NAMES = {
+    "attention.q": "layer.0.SelfAttention.q",
+    "attention.k": "layer.0.SelfAttention.k",
+    "attention.v": "layer.0.SelfAttention.v",
+    "attention.o": "layer.0.SelfAttention.o",
+    "attention_norm": "layer.0.layer_norm",
+    "mlp_norm": "layer.1.layer_norm",
+    "mlp.gate": "layer.1.DenseReluDense.wi_0",
+    "mlp.down": "layer.1.DenseReluDense.wo",
+}
+
+
+def t5_tensor_name(name: str, config: TransformerConfig) -> str:
+    """transformers' name of a T5 tensor in a ``T5EncoderModel``: the word embedding as ``shared`` (which the encoder
+    ties its ``embed_tokens`` to), the bucket table in the first block's attention, the MLP's ``wi`` (or ``wi_0`` and
+    ``wi_1`` when it is gated)."""
+    if name == "token_embedding.weight":
+        return "shared.weight"
+    if name == "relative_bias.weight":
+        return "encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight"
+    if name == "final_norm.weight":
+        return "encoder.final_layer_norm.weight"
+    match = _LAYER.match(name)
+    stem = match.group(2) if match else ""
+    if stem == "mlp.up":
+        module = "layer.1.DenseReluDense.wi_1" if config.gated_mlp else "layer.1.DenseReluDense.wi"
+    elif stem in _T5_EXPORT_LAYER_NAMES:
+        module = _T5_EXPORT_LAYER_NAMES[stem]
+    else:
+        raise _export_error(f"unexpected encoder tensor {name!r}")
+    assert match is not None
+    return f"encoder.block.{match.group(1)}.{module}.weight"
 
 
 _DEBERTA_EXPORT_NAMES = {
@@ -319,6 +404,8 @@ def modernbert_tensors(model: ModelFile) -> dict[str, np.ndarray]:
     }
     tensors: dict[str, np.ndarray] = {}
     for name in model.tensors:
+        if name in _PROJECTION:
+            continue
         if name in ("pooler.weight", "pooler_norm.weight", "classifier.weight", "classifier.bias"):
             head = {"pooler.weight": "head.dense.weight", "pooler_norm.weight": "head.norm.weight"}
             tensors[head.get(name, name)] = _rows(model, name)
@@ -378,10 +465,6 @@ def export_encoder_safetensors(model: ModelFile, directory: str | Path) -> list[
     from etalii_dllm.exporting import _tokenizer_files, write_safetensors
 
     config = model.config
-    if config.family == "t5":
-        raise _export_error("T5 encoders cannot be exported yet")
-    if config.projection_size:
-        raise _export_error("embedders with a Dense projection cannot be exported yet")
     model_type = _model_type(model)
     files: dict[str, bytes] = {"config.json": _json_bytes(hf_encoder_config(model))}
     tokenizer_files = _tokenizer_files(model.tokenizer, None)
@@ -398,9 +481,21 @@ def export_encoder_safetensors(model: ModelFile, directory: str | Path) -> list[
             {"idx": 0, "name": "0", "path": "", "type": "sentence_transformers.models.Transformer"},
             {"idx": 1, "name": "1", "path": "1_Pooling", "type": "sentence_transformers.models.Pooling"},
         ]
+        if config.projection_size:
+            dense = {"idx": 2, "name": "2", "path": "2_Dense", "type": "sentence_transformers.models.Dense"}
+            modules.append(dense)
+            files["2_Dense/config.json"] = _json_bytes(
+                {
+                    "in_features": config.hidden_size,
+                    "out_features": config.projection_size,
+                    "bias": config.projection_bias,
+                    "activation_function": _DENSE_ACTIVATIONS[str(settings.get("projection"))],
+                }
+            )
         if settings.get("normalize", True):
-            normalize = {"idx": 2, "name": "2", "path": "2_Normalize", "type": "sentence_transformers.models.Normalize"}
-            modules.append(normalize)
+            index = len(modules)
+            normalize = {"idx": index, "name": str(index), "path": f"{index}_Normalize"}
+            modules.append(normalize | {"type": "sentence_transformers.models.Normalize"})
         pooling = {"word_embedding_dimension": config.hidden_size, "include_prompt": True}
         pooling |= {flag: settings.get("pooling", "mean") == mode for mode, flag in _POOLING_FLAGS.items()}
         files["modules.json"] = _json_bytes(modules)
@@ -423,16 +518,25 @@ def export_encoder_safetensors(model: ModelFile, directory: str | Path) -> list[
     for name, data in files.items():
         (directory / name).parent.mkdir(parents=True, exist_ok=True)
         (directory / name).write_bytes(data)
-    if "modules.json" in files and any(m["path"] == "2_Normalize" for m in json.loads(files["modules.json"])):
-        (directory / "2_Normalize").mkdir(exist_ok=True)
+    for module in json.loads(files.get("modules.json", b"[]")):
+        if module["path"].endswith("_Normalize"):
+            (directory / module["path"]).mkdir(exist_ok=True)
+    names = [name for name in model.tensors if name not in _PROJECTION]
     if model_type == "modernbert":
         tensors = modernbert_tensors(model)
     elif model_type == "deberta":
-        tensors = {deberta_tensor_name(name, config): model.tensors[name] for name in model.tensors}
+        tensors = {deberta_tensor_name(name, config): model.tensors[name] for name in names}
+    elif model_type == "t5":
+        tensors = {t5_tensor_name(name, config): model.tensors[name] for name in names}
     else:
-        tensors = {hf_encoder_tensor_name(name, config, model_type): model.tensors[name] for name in model.tensors}
+        tensors = {hf_encoder_tensor_name(name, config, model_type): model.tensors[name] for name in names}
     write_safetensors(directory / "model.safetensors", tensors)
-    return [directory / name for name in sorted([*files, "model.safetensors"])]
+    written = [*files, "model.safetensors"]
+    if config.projection_size:
+        dense = {f"linear.{name.split('.')[1]}": model.tensors[name] for name in model.tensors if name in _PROJECTION}
+        write_safetensors(directory / "2_Dense" / "model.safetensors", dense)
+        written.append("2_Dense/model.safetensors")
+    return [directory / name for name in sorted(written)]
 
 
 # -- GGUF -------------------------------------------------------------------------------------------------------------
@@ -527,6 +631,8 @@ def export_encoder_gguf(model: ModelFile, path: str | Path) -> Path:
     if config.family in ("modernbert", "deberta", "t5"):
         family = {"modernbert": "ModernBERT", "deberta": "DeBERTa", "t5": "T5"}[config.family]
         raise _export_error(f"{family} encoders cannot be written to GGUF here; export them to safetensors")
+    if config.projection_size:
+        raise _export_error("llama.cpp has no Dense projection after the pooling; export the model to safetensors")
     if config.padding_index is not None:
         raise _export_error(
             "RoBERTa and XLM-RoBERTa encoders cannot be written to GGUF exactly (llama.cpp cuts the position rows "

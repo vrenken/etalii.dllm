@@ -10,7 +10,7 @@ Phase 43. It trains either every parameter of the decoder or [LoRA adapters](#lo
 every architecture the engine runs: Llama, Mistral, Qwen2, Qwen3, OLMo 2, Granite, Gemma 2, Gemma 3, Phi-3/Phi-4-mini
 (with LongRoPE) and the [mixture-of-experts](#mixtures-of-experts) models Mixtral, OLMoE, Qwen3-MoE, Qwen2-MoE and
 Granite MoE. Since Phase 58 it also fine-tunes [encoders](#encoders): BERT, RoBERTa, XLM-RoBERTa, ModernBERT and
-DeBERTa embedders and cross-encoders. There is no pre-training from scratch (weights come from
+DeBERTa embedders and cross-encoders, and T5 embedders. There is no pre-training from scratch (weights come from
 [importing open models](research/model-import.md)).
 
 ## Usage
@@ -205,7 +205,7 @@ dllm finetune olmoe.dllm --data my-data.jsonl --lora-rank 8 -o olmoe-lora.dllm -
 
 ## Encoders
 
-Embedders (all-MiniLM, bge, all-distilroberta, multilingual MiniLM, ModernBERT, DeBERTa) and cross-encoders
+Embedders (all-MiniLM, bge, all-distilroberta, multilingual MiniLM, ModernBERT, DeBERTa, sentence-t5, GTR-T5) and cross-encoders
 (ms-marco-MiniLM, mmarco, gte-reranker-modernbert, mxbai-rerank, nli-deberta-v3) fine-tune with the same command, the same options, checkpoints, receipts and LoRA. The objective follows the model:
 
 ```bash
@@ -271,15 +271,28 @@ DeBERTa's names (`attention.self.query_proj`, `key_proj`, `value_proj`, `attenti
 `intermediate.dense`, `output.dense`; `deberta.` in front for a cross-encoder); the merged query and key weights also
 project the relative table, exactly as PEFT's adapted modules do.
 
-T5 encoders (Phase 62) and embedders with a sentence-transformers `Dense` projection after the pooling are not
-fine-tuned yet: `dllm finetune` and LoRA refuse them with an error.
+T5 encoders (Phase 63) train with the embedding objective (they have no classification head). Their backward pass
+runs `rms_norm_backward` for the bias-free RMS norms, `biased_attention_backward` with scale 1 (T5 does not scale
+its scores), and the MLP's activation gradient: ReLU passes the gradient where its input is positive (+0 elsewhere,
+as torch does), and T5 v1.1's gated MLP differentiates `act(gate) * up` as ModernBERT's does. Every layer reads the
+same bucket table, so the score bias gradient of every layer (last layer first, added in float32) scatters back into
+it with `embedding_backward`: each (head, i, j) value is summed, in (head, i, j) row-major order and in double, into
+row `t5_bucket(j - i)` of that head's column. LoRA adapts T5's own modules (`SelfAttention.q`, `k`, `v`, `o`,
+`DenseReluDense.wi`, or `wi_0` and `wi_1` when the MLP is gated, and `wo`, under `encoder.block.N.layer.M.`).
+
+An embedder with a sentence-transformers `Dense` module after the pooling (sentence-t5, GTR-T5, LaBSE; any encoder
+family) trains it with the rest of the model: the training sentence vector is pooled, projected (`linear`, then
+`tanh` as `softcap(x, 1)` when the module has it) and normalised exactly as `engine.embed` computes it, and the
+gradient goes back through `softcap_backward` and `linear_backward` to the projection's weight and bias. LoRA leaves
+the projection frozen.
 
 `tests/test_encoder_training.py` checks the new kernels and the encoder's gradients against `transformers`' autograd
 and finite differences (BERT and XLM-RoBERTa with padding inside the sequence), both losses and their gradients
 against the `torch` formulas sentence-transformers uses, bit-exact resumption, receipts, golden hashes of a short run
 of each objective, and LoRA adapters whose names are `transformers`' own modules. `tests/test_modernbert.py` does the
-same for ModernBERT, its fused adapters included, and `tests/test_deberta.py` for DeBERTa (the bias gradient against
-finite differences too).
+same for ModernBERT, its fused adapters included, `tests/test_deberta.py` for DeBERTa (the bias gradient against
+finite differences too), and `tests/test_t5.py` for T5 (ReLU, SiLU, GELU, gated ReLU and gated tanh GELU MLPs) and
+for the `Dense` projection, checked through sentence-transformers' whole module chain on T5 and on BERT.
 
 ## What makes it reproducible
 
